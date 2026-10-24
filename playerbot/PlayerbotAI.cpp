@@ -554,8 +554,10 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     }
 
     // Alt level sync - level up non-random bots to match master level
+    // wow-playground: a bot that belongs to a real player keeps pace with that player whether or not
+    // they are grouped; upstream only levels bots in the master's own group.
     if (sPlayerbotAIConfig.syncAltLevelToMaster && bot->IsAlive() && master && !sRandomPlayerbotMgr.IsRandomBot(bot)
-        && bot->GetGroup() && master->GetGroup() && IsSafe(master) && bot->GetGroup()->GetLeaderGuid() == master->GetObjectGuid())
+        && IsSafe(master) && (!bot->GetGroup() || !master->GetGroup() || bot->GetGroup()->GetLeaderGuid() == master->GetObjectGuid()))
     {
         uint32 botLevel = bot->GetLevel();
         uint32 masterLevel = master->GetLevel();
