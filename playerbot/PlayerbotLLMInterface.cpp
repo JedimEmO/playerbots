@@ -373,17 +373,20 @@ std::string GetSSLError() {
 std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeOutSeconds, int maxGenerations, std::vector<std::string> & debugLines) {
     bool debug = !debugLines.empty();
 
-    if (sPlayerbotLLMInterface.generationCount > maxGenerations)
+    // Check the cap and take a slot in one atomic step. Callers run on std::async threads,
+    // and a separate load and increment let several of them pass the check at once.
+    const int runningGenerations = sPlayerbotLLMInterface.generationCount.fetch_add(1);
+
+    if (runningGenerations > maxGenerations)
     {
+        sPlayerbotLLMInterface.generationCount--;
         if (debug)
-            debugLines.push_back("Maximum generations reached " + std::to_string(sPlayerbotLLMInterface.generationCount) + "/" + std::to_string(maxGenerations));
+            debugLines.push_back("Maximum generations reached " + std::to_string(runningGenerations) + "/" + std::to_string(maxGenerations));
         return {};
     }
 
-    sPlayerbotLLMInterface.generationCount++;
-
     if (debug)
-        debugLines.push_back("Generations start " + std::to_string(sPlayerbotLLMInterface.generationCount) + "/" + std::to_string(maxGenerations));
+        debugLines.push_back("Generations start " + std::to_string(runningGenerations + 1) + "/" + std::to_string(maxGenerations));
 
 #ifdef _WIN32
     if (debug)
