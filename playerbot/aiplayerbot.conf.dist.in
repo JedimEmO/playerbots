@@ -877,6 +877,15 @@ AiPlayerbot.FleeingEnabled = 1
 #AiPlayerbot.ReactStrategies = 
 #AiPlayerbot.DeadStrategies = 
 
+# A free bot (random, free alt or autonomous) in a real player's group, with that player as its master,
+# plays as that player's companion: it gets the strategies an alt bot gets (CombatStrategies, NonCombatStrategies,
+# DeadStrategies, ReactStrategies), always 'follow' instead of 'wander', no grind, travel, rpg or lfg,
+# no saved strategy set loaded back, and no 'passive'/'stay' from the random bot loot rule.
+# It goes back to the random bot strategies when it leaves the group or the player leaves it.
+# 0 = free bots keep the random bot strategies while grouped with a real player (upstream behavior).
+# Default: 1
+# AiPlayerbot.FreeBotsFollowRealMaster = 1
+
 # Toggle offheal and offdps strategies for hybrid classes.
 #AiPlayerbot.EnableOffSpecStrategies = 1
 

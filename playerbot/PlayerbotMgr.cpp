@@ -1967,7 +1967,12 @@ std::string PlayerbotHolder::HandleConsoleCmd(Player* bot, Player* master, const
 
     std::string msg = "Sending command " + param + " to player " + bot->GetName();
 
-    if (!helper.ParseChatCommand(param, master ? master : bot))
+    // From the console 'master' is the player who typed the command, so it is null there. The command then runs on
+    // behalf of the bot's own master when it has one, so it acts with that player's authority (and 'follow' follows
+    // them), and on behalf of the bot itself otherwise.
+    Player* owner = master ? master : (ai->GetMaster() ? ai->GetMaster() : bot);
+
+    if (!helper.ParseChatCommand(param, owner))
     {
         return "command failed";
     }    

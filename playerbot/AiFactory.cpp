@@ -557,7 +557,9 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
 #endif
     }
 
-    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player))
+    // A free bot following a real master (AiPlayerbot.FreeBotsFollowRealMaster) takes the alt bot branch in every
+    // engine, so it plays as that player's companion. ResetStrategies runs again when the master changes.
+    if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !facade->IsFreeBotFollowingRealMaster())
 	{
         combatEngine->addStrategy("roll");
 
@@ -941,7 +943,8 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
 
         if (master && !master->GetPlayerbotAI())
         {
-            const char* wanderFollow = sPlayerbotAIConfig.useWanderAsDefaultFollowStrategy ? "wander" : "follow";
+            // A free bot following a real master always follows. 'wander' would let it drift up to 30 yards away.
+            const char* wanderFollow = (sPlayerbotAIConfig.useWanderAsDefaultFollowStrategy && !facade->IsFreeBotFollowingRealMaster()) ? "wander" : "follow";
             nonCombatEngine->addStrategies("racials", "nc", "food", wanderFollow, "default", "quest", "loot", "gather", "duel", "emote", "buff", "mount", NULL);
         }
         else
@@ -964,7 +967,7 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
     if (!player->InBattleGround() && sPlayerbotAIConfig.jumpFollow)
         nonCombatEngine->addStrategy("follow jump");
 
-    if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !player->InBattleGround())
+    if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !player->InBattleGround() && !facade->IsFreeBotFollowingRealMaster())
     {   
         Player* master = facade->GetMaster();
 
@@ -1333,7 +1336,7 @@ void AiFactory::AddDefaultDeadStrategies(Player* player, PlayerbotAI* const faca
         }
     }
 
-    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player))
+    if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !facade->IsFreeBotFollowingRealMaster())
     {
         deadEngine->ChangeStrategy(sPlayerbotAIConfig.randomBotDeadStrategies);
     }
@@ -1527,7 +1530,7 @@ void AiFactory::AddDefaultReactionStrategies(Player* player, PlayerbotAI* const 
         }
     }
 
-    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player))
+    if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !facade->IsFreeBotFollowingRealMaster())
     {
         reactionEngine->ChangeStrategy(sPlayerbotAIConfig.randomBotReactStrategies);
     }

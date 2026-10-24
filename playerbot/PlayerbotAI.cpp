@@ -2425,6 +2425,17 @@ void PlayerbotAI::DoNextAction(bool min)
         ResetStrategies();
     }
 
+    // The check above keeps a real player master. A free bot that followed a real player as its companion
+    // (AiPlayerbot.FreeBotsFollowRealMaster) drops that master once the player is no longer in its group, and goes
+    // back to the free bot strategies. Without a group the master is dropped further down, when the master is in world.
+    if (sPlayerbotAIConfig.freeBotsFollowRealMaster && HasActivePlayerMaster() && master != bot && group &&
+        !IsRealPlayer() && sRandomPlayerbotMgr.IsFreeBot(bot) && !bot->InBattleGround() && !group->IsMember(master->GetObjectGuid()))
+    {
+        master = nullptr;
+        SetMaster(master);
+        ResetStrategies();
+    }
+
     // test BG master set
     if ((!master || !HasActivePlayerMaster()) && group && !IsRealPlayer())
     {
@@ -2560,7 +2571,14 @@ void PlayerbotAI::DoNextAction(bool min)
 
         if (!group && sRandomPlayerbotMgr.IsFreeBot(bot) && !IsRealPlayer())
         {
+            // A companion of a real player (AiPlayerbot.FreeBotsFollowRealMaster) goes back to the free bot
+            // strategies when the group is gone; AiFactory gave it the alt bot ones because of this master.
+            bool followedRealMaster = sPlayerbotAIConfig.freeBotsFollowRealMaster && HasActivePlayerMaster() && !bot->InBattleGround();
+
             bot->GetPlayerbotAI()->SetMaster(nullptr);
+
+            if (followedRealMaster)
+                ResetStrategies();
         }
 	}
 	else if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_WALK_MODE)) bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_WALK_MODE);
@@ -2873,7 +2891,10 @@ void PlayerbotAI::ResetStrategies(bool autoLoad)
 
     // An autonomous bot always plays the strategies AiFactory gives it. A set saved while it was grouped with a player
     // would otherwise come back at the next login, when it plays alone.
-    if (autoLoad && HasPlayerRelation() && !sRandomPlayerbotMgr.IsAutonomousBot(bot)) sPlayerbotDbStore.Load(this);
+    // A free bot following a real master plays the companion strategies AiFactory gives it. Its saved set may come
+    // from a time it roamed (any 'nc'/'co' command saves all four engines), and would bring grind, rpg, travel or
+    // passive back.
+    if (autoLoad && HasPlayerRelation() && !sRandomPlayerbotMgr.IsAutonomousBot(bot) && !IsFreeBotFollowingRealMaster()) sPlayerbotDbStore.Load(this);
 
 #ifdef GenerateBotTests
     for (auto& [state, strats] : testStrategies)
@@ -8873,6 +8894,26 @@ bool PlayerbotAI::IsInRealGuild()
         return false;
 
     return !sPlayerbotAIConfig.IsInRandomAccountList(leaderAccount);
+}
+
+bool PlayerbotAI::IsFreeBotFollowingRealMaster()
+{
+    if (!sPlayerbotAIConfig.freeBotsFollowRealMaster)
+        return false;
+
+    if (IsRealPlayer() || bot->InBattleGround())
+        return false;
+
+    if (!sRandomPlayerbotMgr.IsFreeBot(bot))
+        return false;
+
+    if (!master || master == bot || master->GetPlayerbotAI())
+        return false;
+
+    // Only while grouped with that player: a free alt bot can have its owner as master without a group, and keeps
+    // the free bot strategies then.
+    Group* group = bot->GetGroup();
+    return group && group->IsMember(master->GetObjectGuid());
 }
 
 bool PlayerbotAI::HasPlayerRelation()

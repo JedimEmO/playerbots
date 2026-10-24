@@ -235,3 +235,32 @@ Lists the autonomous bots, the characters on the `AiPlayerbot.AutonomousAccounts
 one line each, `<name> online` or `<name> offline`, sorted by name.
 `No autonomous bots` means the setting is empty or its accounts have no characters.
 [Autonomous bots](autonomous-bots.md) describes them and every reply.
+
+## cmd
+
+```
+.rndbot cmd <bot> <command>
+```
+
+Sends a chat command to a bot, as if it were whispered to it.
+The command comes from upstream; this fork changes whose behalf it runs on.
+
+```
+.rndbot cmd Dunpriest nc ?
+```
+
+From the console there is no speaker,
+so the command runs on behalf of the bot's master when it has one,
+and on behalf of the bot itself otherwise.
+`follow` then follows the master, and replies such as the strategy list from `nc ?` go to the master.
+In game, the command runs on behalf of whoever typed it, as before.
+
+The reply is `Sending command <command> to player <bot>` once the command is queued,
+which does not mean the bot has acted on it yet;
+the bot runs it on its next update.
+`command failed` means the text matched no command.
+
+Strategy changes such as `nc +follow` last until the bot's strategies are next reset,
+which happens whenever its master changes.
+A free bot grouped with a real player gets the companion strategies without any command;
+[Following a real player](autonomous-bots.md#following-a-real-player) describes them.

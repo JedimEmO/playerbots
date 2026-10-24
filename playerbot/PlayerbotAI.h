@@ -646,6 +646,9 @@ public:
     bool HasRealPlayerMaster() { return master && (!master->GetPlayerbotAI() || master->GetPlayerbotAI()->IsRealPlayer()); } 
     //Bot has a master that is actively playing.
     bool HasActivePlayerMaster() const { return master && !master->GetPlayerbotAI(); }
+    // True for a free bot (random, free alt or autonomous) that is in a real player's group with that player as its
+    // master, while AiPlayerbot.FreeBotsFollowRealMaster is on. AiFactory then gives it the strategies of an alt bot.
+    bool IsFreeBotFollowingRealMaster();
     //Checks if the bot is summoned as alt of a player
     bool IsAlt() { return HasRealPlayerMaster() && !sRandomPlayerbotMgr.IsRandomBot(bot); }
     //Get the group leader or the master of the bot.

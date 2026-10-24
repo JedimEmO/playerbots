@@ -74,6 +74,7 @@ and not too far below its level or gear score.
 The player who invites it becomes its master,
 and while grouped it takes the normal chat commands from group members.
 Leaving the group, it plays on its own again.
+[Following a real player](#following-a-real-player) describes the strategies it plays meanwhile.
 
 Its level never follows a master.
 `AiPlayerbot.SyncAltLevelToMaster` does not apply to it,
@@ -83,6 +84,56 @@ A player who groups with a level 12 autonomous bot leaves it at level 12.
 `.bot add` on a character from the player's own account works as before.
 `.bot` commands that name an autonomous bot answer `Not allowed on autonomous bots`
 unless they come from a game master or the console.
+
+## Following a real player
+
+```
+AiPlayerbot.FreeBotsFollowRealMaster = 1
+```
+
+A free bot whose master is a real player in its group plays as that player's companion.
+This covers random bots and free alt bots as well as autonomous bots,
+and it is on by default.
+The problem it solves is a random bot that a player invites
+and that keeps roaming: it walks off to a trainer or a quest hub,
+or stands still with `passive` and `stay` while its party fights.
+
+While it follows a real master, the bot gets the strategies an alt bot on the player's own account gets,
+with one difference in movement.
+In the non-combat engine that is the role and spec strategies for its class,
+`follow`, `loot`, `quest`, `gather`, `food`, `buff`, `mount` and the rest of the base list,
+with `AiPlayerbot.NonCombatStrategies` on top.
+The combat, dead and reaction engines take `AiPlayerbot.CombatStrategies`, `AiPlayerbot.DeadStrategies`
+and `AiPlayerbot.ReactStrategies` instead of the random bot lists.
+There is no `grind`, `travel`, `rpg`, `lfg`, `maintenance` or `wander`.
+`quest` stays because it only reacts to the player:
+it accepts shared quests and talks to the quest giver the player talks to.
+
+The difference is that it always gets `follow`, even with `AiPlayerbot.UseWanderAsDefaultFollowStrategy` on,
+which is the default.
+Alt bots still get `wander` under that setting;
+set it to `0` for them to follow closely as well.
+
+Two other random bot rules stand aside while it follows a real master.
+A saved strategy set is not loaded back on reset,
+since any `nc` or `co` command saves all four engines
+and the set may come from a time the bot roamed.
+The loot rule that adds `passive` and `stay` to both engines,
+under free for all, master loot or a threshold above uncommon
+when the bot is not in the player's guild, does not run;
+alt bots never had it.
+
+The strategies are rebuilt whenever the master changes:
+when the bot accepts the invitation,
+when it picks a real player in its group as master,
+when that player logs in while grouped with it, and when the master goes away.
+The master goes away when the bot leaves the group, when the group disbands or the player kicks it,
+when the player leaves a group that still has other members, and when the player logs out.
+The bot then plays the free bot strategies again;
+when another bot leads what is left of the group, that bot becomes its master.
+
+With the setting at `0` a free bot keeps the random bot strategies while grouped with a real player.
+In a battleground the battleground strategies apply either way.
 
 ## What never happens to them
 
@@ -112,11 +163,11 @@ answer `Not allowed on autonomous bots`.
 | Rule | Random bot | Autonomous bot |
 |---|---|---|
 | Logged in and kept online | Random bot manager, by count and timers | Random bot manager, always |
-| Strategy set | Random bot set | Random bot set, plus `ai chat` from `NonCombatStrategies` |
+| Strategy set | Random bot set; alt bot set while it follows a real master | Random bot set, plus `ai chat` from `NonCombatStrategies`; alt bot set while it follows a real master |
 | Activity | Scaled by priority | Always active |
 | Randomized, levels and gear re-rolled | Yes | Never |
 | Level synced to master or players | Players, when randomized | Never |
-| Saved strategies loaded on reset | When it has a player relation | Never |
+| Saved strategies loaded on reset | When it has a player relation, unless it follows a real master | Never |
 | Cheats | `AiPlayerbot.RndBotCheats` | `AiPlayerbot.BotCheats` |
 | Instance reset limit on entering a dungeon | Checked | Not checked |
 | Trades | Sells, with discounts | Trades as a player's bot does |

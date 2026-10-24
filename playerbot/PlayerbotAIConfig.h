@@ -187,6 +187,9 @@ public:
     //
     bool randomBotJoinLfg;
     bool logRandomBotJoinLfg;
+    // AiPlayerbot.FreeBotsFollowRealMaster: a free bot in a real player's group with that player as its master gets the
+    // strategies of an alt bot instead of the random bot ones. See PlayerbotAI::IsFreeBotFollowingRealMaster.
+    bool freeBotsFollowRealMaster;
     bool randomBotJoinBG;
     bool randomBotAutoJoinBG;
     uint32 randomBotBracketCount;
