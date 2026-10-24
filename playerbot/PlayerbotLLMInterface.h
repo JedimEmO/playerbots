@@ -2,11 +2,18 @@
 #include <string>
 #include <vector>
 
+struct ParsedUrl;
+
 class PlayerbotLLMInterface
 {
 public:
     PlayerbotLLMInterface() {}
     static std::string SanitizeForJson(const std::string& input);
+
+    // Sends body as an HTTP/1.1 POST with Connection: close and reads until the server closes the connection
+    // or timeOutSeconds pass. response gets the raw answer, headers included. Returns false when it cannot
+    // connect or send. Blocks the calling thread, so never call it from the world thread.
+    static bool HttpPost(const ParsedUrl& url, const std::string& body, int timeOutSeconds, const std::string& bearerToken, std::string& response, std::vector<std::string>& debugLines);
 
     static std::string Generate(const std::string& prompt, int timeOutSeconds, int maxGenerations, std::vector<std::string>& debugLines);
 

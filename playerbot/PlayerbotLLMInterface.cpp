@@ -13,6 +13,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <thread>
+#include <mutex>
 #include "Log/Log.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotTextMgr.h"
@@ -370,23 +371,8 @@ std::string GetSSLError() {
     return std::string(err_buf);
 }
 
-std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeOutSeconds, int maxGenerations, std::vector<std::string> & debugLines) {
+bool PlayerbotLLMInterface::HttpPost(const ParsedUrl& url, const std::string& body, int timeOutSeconds, const std::string& bearerToken, std::string& response, std::vector<std::string>& debugLines) {
     bool debug = !debugLines.empty();
-
-    // Check the cap and take a slot in one atomic step. Callers run on std::async threads,
-    // and a separate load and increment let several of them pass the check at once.
-    const int runningGenerations = sPlayerbotLLMInterface.generationCount.fetch_add(1);
-
-    if (runningGenerations > maxGenerations)
-    {
-        sPlayerbotLLMInterface.generationCount--;
-        if (debug)
-            debugLines.push_back("Maximum generations reached " + std::to_string(runningGenerations) + "/" + std::to_string(maxGenerations));
-        return {};
-    }
-
-    if (debug)
-        debugLines.push_back("Generations start " + std::to_string(runningGenerations + 1) + "/" + std::to_string(maxGenerations));
 
 #ifdef _WIN32
     if (debug)
@@ -398,12 +384,11 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
             debugLines.push_back("WSAStartup failed");
 
         sLog.outError("BotLLM: WSAStartup failed");
-        sPlayerbotLLMInterface.generationCount--;
-        return "error";
+        return false;
     }
 #endif
 
-    ParsedUrl parsedUrl = sPlayerbotAIConfig.llmEndPointUrl;
+    const ParsedUrl& parsedUrl = url;
 
     if (debug)
         debugLines.push_back("Resolve hostname to IP address: " + parsedUrl.hostname + " " + std::to_string(parsedUrl.port));
@@ -422,8 +407,7 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
 #ifdef _WIN32
         WSACleanup();
 #endif
-        sPlayerbotLLMInterface.generationCount--;
-        return "error";
+        return false;
     }
 
     if (debug)
@@ -439,8 +423,7 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
         sLog.outError("BotLLM: Socket creation failed. Error: %d", WSAGetLastError());
         WSACleanup();
         freeaddrinfo(res);
-        sPlayerbotLLMInterface.generationCount--;
-        return "error";
+        return false;
     }
 #else
     if (sock < 0) {
@@ -449,8 +432,7 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
 
         sLog.outError("BotLLM: Socket creation failed. Error: %s", strerror(errno));
         freeaddrinfo(res);
-        sPlayerbotLLMInterface.generationCount--;
-        return "error";
+        return false;
     }
 #endif
 
@@ -470,25 +452,23 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
         close(sock);
 #endif
         freeaddrinfo(res);
-        sPlayerbotLLMInterface.generationCount--;
-        return "error";
+        return false;
     }
 
     freeaddrinfo(res);
 
     SSL_CTX* ctx = nullptr;
     SSL* ssl = nullptr;
-    std::string response;
 
     if (parsedUrl.https)
     {
-        static bool ssl_initialized = false;
-        if (!ssl_initialized) {
+        // Generate and PlayerbotEventSink call this from their own threads.
+        static std::once_flag sslInitialized;
+        std::call_once(sslInitialized, []() {
             SSL_library_init();
             SSL_load_error_strings();
             OpenSSL_add_all_algorithms();
-            ssl_initialized = true;
-        }
+        });
 
         const SSL_METHOD* method = TLS_client_method();
         ctx = SSL_CTX_new(method);
@@ -502,8 +482,7 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
 #else
             close(sock);
 #endif
-            sPlayerbotLLMInterface.generationCount--;
-            return "error";
+            return false;
         }
 
         SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
@@ -521,8 +500,7 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
 #else
             close(sock);
 #endif
-            sPlayerbotLLMInterface.generationCount--;
-            return "error";
+            return false;
         }
 
         SSL_set_tlsext_host_name(ssl, parsedUrl.hostname.c_str());
@@ -549,8 +527,7 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
 #else
             close(sock);
 #endif
-            sPlayerbotLLMInterface.generationCount--;
-            return "error";
+            return false;
         }
         
         if (debug)
@@ -564,10 +541,9 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
     request << "Accept: application/json\r\n";
     request << "Connection: close\r\n";
     
-    if (!sPlayerbotAIConfig.llmApiKey.empty())
-        request << "Authorization: Bearer " << sPlayerbotAIConfig.llmApiKey << "\r\n";
+    if (!bearerToken.empty())
+        request << "Authorization: Bearer " << bearerToken << "\r\n";
     
-    std::string body = prompt;
     request << "Content-Length: " << body.size() << "\r\n";
     request << "\r\n";
     request << body;
@@ -607,8 +583,7 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
 #else
         close(sock);
 #endif
-        sPlayerbotLLMInterface.generationCount--;
-        return "error";
+        return false;
     }
 
     if (debug)
@@ -645,7 +620,34 @@ std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeO
     close(sock);
 #endif
 
+    return true;
+}
+
+std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeOutSeconds, int maxGenerations, std::vector<std::string> & debugLines) {
+    bool debug = !debugLines.empty();
+
+    // Check the cap and take a slot in one atomic step. Callers run on std::async threads,
+    // and a separate load and increment let several of them pass the check at once.
+    const int runningGenerations = sPlayerbotLLMInterface.generationCount.fetch_add(1);
+
+    if (runningGenerations > maxGenerations)
+    {
+        sPlayerbotLLMInterface.generationCount--;
+        if (debug)
+            debugLines.push_back("Maximum generations reached " + std::to_string(runningGenerations) + "/" + std::to_string(maxGenerations));
+        return {};
+    }
+
+    if (debug)
+        debugLines.push_back("Generations start " + std::to_string(runningGenerations + 1) + "/" + std::to_string(maxGenerations));
+
+    std::string response;
+    bool sent = HttpPost(sPlayerbotAIConfig.llmEndPointUrl, prompt, timeOutSeconds, sPlayerbotAIConfig.llmApiKey, response, debugLines);
+
     sPlayerbotLLMInterface.generationCount--;
+
+    if (!sent)
+        return "error";
 
     if (debug)
     {
