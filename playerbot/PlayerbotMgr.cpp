@@ -35,6 +35,9 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["g"] = &PlayerbotHolder::HandleGuild;
     m_holderHandlers["r"] = &PlayerbotHolder::HandleRaid;
     m_holderHandlers["rl"] = &PlayerbotHolder::HandleRaidLeader;
+    m_holderHandlers["say"] = &PlayerbotHolder::HandleSay;
+    m_holderHandlers["yell"] = &PlayerbotHolder::HandleYell;
+    m_holderHandlers["emote"] = &PlayerbotHolder::HandleEmote;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -1808,6 +1811,59 @@ std::list<std::string> PlayerbotHolder::HandleRaidLeader(Player* master, const s
     return {result};
 }
 
+std::list<std::string> PlayerbotHolder::HandleSay(Player* master, const std::string param, AccountTypes security)
+{
+    return HandleNearbyChat(master, param, CHAT_MSG_SAY, "say message");
+}
+
+std::list<std::string> PlayerbotHolder::HandleYell(Player* master, const std::string param, AccountTypes security)
+{
+    return HandleNearbyChat(master, param, CHAT_MSG_YELL, "yell message");
+}
+
+std::list<std::string> PlayerbotHolder::HandleEmote(Player* master, const std::string param, AccountTypes security)
+{
+    return HandleNearbyChat(master, param, CHAT_MSG_EMOTE, "emote");
+}
+
+// Queues a say, yell or text emote packet on the sender's session, as HandleParty does for party chat.
+// On the console there is no master, so the first word of param names the sender and the rest is the text.
+// While spoofing, or from in game, the master is the sender and all of param is the text.
+std::list<std::string> PlayerbotHolder::HandleNearbyChat(Player* master, const std::string& param, uint32 chatType, const std::string& kind)
+{
+    std::string message = param;
+
+    if (!master)
+    {
+        size_t space = param.find(" ");
+        std::string botName = param.substr(0, space);
+
+        master = sObjectAccessor.FindPlayerByName(botName.c_str());
+        message = space == std::string::npos ? "" : param.substr(space + 1);
+    }
+
+    if (!master)
+        return {"No sender found"};
+
+    if (message.empty())
+        return {"No message given"};
+
+    // Speak in the faction language, as PlayerbotAI::Say and PlayerbotAI::Yell do.
+    // The core itself switches to LANG_UNIVERSAL for game masters and two-side chat. Text emotes ignore the language.
+    uint32 lang = LANG_UNIVERSAL;
+    if (chatType != CHAT_MSG_EMOTE)
+        lang = master->GetTeam() == ALLIANCE ? LANG_COMMON : LANG_ORCISH;
+
+    WorldPacket packet_template(CMSG_MESSAGECHAT);
+    packet_template << chatType;
+    packet_template << lang;
+    packet_template << message;
+
+    std::unique_ptr<WorldPacket> packetPtr(new WorldPacket(packet_template));
+    master->GetSession()->QueuePacket(std::move(packetPtr));
+    return {"Sent " + kind + " \"" + message + "\" as " + master->GetName()};
+}
+
 std::string PlayerbotHolder::HandleBotAddLogin(Player* bot, Player* master, const std::string param)
 {
     if (bot)
@@ -2879,6 +2935,12 @@ std::unordered_map<std::string, std::string> PlayerbotHolder::GetCommandTexts()
         {"r", "Send a raid message as the bot.\nUsage: .(rnd)bot r <message> (while spoofing as sender)\n .(rnd)bot r <botname> <message>"},
         
         {"rl", "Transfer raid leadership.\nUsage: .(rnd)bot rl <message> (while spoofing as sender)\n .(rnd)bot rl <botname>"},
+
+        {"say", "Say a message as the bot.\nUsage: .(rnd)bot say <message> (while spoofing as sender)\n .(rnd)bot say <botname> <message>\nExample: .rndbot say Dunpriest Well met!"},
+
+        {"yell", "Yell a message as the bot.\nUsage: .(rnd)bot yell <message> (while spoofing as sender)\n .(rnd)bot yell <botname> <message>\nExample: .rndbot yell Dunpriest For the Alliance!"},
+
+        {"emote", "Do a text emote as the bot.\nUsage: .(rnd)bot emote <text> (while spoofing as sender)\n .(rnd)bot emote <botname> <text>\nExample: .rndbot emote Dunpriest raises a mug. (shows as: Dunpriest raises a mug.)"},
         
         {"do", "Execute a bot action (sync, immediate response).\nUsage: .(rnd)bot do <bot> <action>\nExample: .(rnd)bot do <bot> stats, where, quests, who"},
         

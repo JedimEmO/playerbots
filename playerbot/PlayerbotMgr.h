@@ -81,6 +81,10 @@ private:
     std::list<std::string> HandleGuild(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleRaid(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleRaidLeader(Player* master, const std::string param, AccountTypes security);
+    std::list<std::string> HandleSay(Player* master, const std::string param, AccountTypes security);
+    std::list<std::string> HandleYell(Player* master, const std::string param, AccountTypes security);
+    std::list<std::string> HandleEmote(Player* master, const std::string param, AccountTypes security);
+    std::list<std::string> HandleNearbyChat(Player* master, const std::string& param, uint32 chatType, const std::string& kind);
     std::list<std::string> HandleCreate(Player* master, const std::string param, AccountTypes security);
 #ifdef GenerateBotTests
     std::list<std::string> HandleRunTest(Player* master, const std::string param, AccountTypes security);
