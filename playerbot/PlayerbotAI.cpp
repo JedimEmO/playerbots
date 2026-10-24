@@ -2244,6 +2244,13 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
         botOutgoingPacketHandlers.AddPacket(packet);
         return;
     }
+    case SMSG_PARTYKILLLOG: // tell the event webhook if the victim was a boss, then pass the packet on as before
+    {
+        // Only the killer's raid subgroup is sent this packet, so a kill out of the master's sight may reach only a bot.
+        PlayerbotEventSink::PostBossKilled(bot, packet);
+        botOutgoingPacketHandlers.AddPacket(packet);
+        return;
+    }
 	default:
 		botOutgoingPacketHandlers.AddPacket(packet);
 	}

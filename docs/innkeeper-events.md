@@ -71,3 +71,47 @@ the master is listed even when not grouped with the bot, and group members in an
 The event fires when the server sends the bot `SMSG_LEVELUP_INFO`.
 Experience sends it once per level, so a bot that gains two levels at once posts two events.
 `.character level` sends it once with the final level.
+
+### `boss_killed`
+
+A boss died with a real player there.
+
+```json
+{"type":"boss_killed","creature":"Edwin VanCleef","entry":639,"map":36,"instance":7,"witnesses":["Mathias","Ana","Bob"]}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `type` | string | `boss_killed` |
+| `creature` | string | The boss's name. |
+| `entry` | number | The boss's `creature_template` entry. |
+| `map` | number | The map it died on. |
+| `instance` | number | That map's instance id, which tells two runs of the same dungeon apart. `0` outside instances. |
+| `witnesses` | array of strings | The real players present, then the bots present. |
+
+A boss is a creature with `Rank` 3 in `creature_template`, a world boss, wherever it dies,
+or the kill credit of a dungeon encounter on that encounter's own map:
+a row of `instance_encounters` with `creditType` 0 whose `creditEntry` is the creature's entry.
+Rank alone does not tell bosses from trash in vanilla dungeons;
+Edwin VanCleef is rank 2 and most dungeon bosses are rank 1, like the elites around them.
+
+The witnesses are the members of the group the core would credit with the kill,
+by `Player::IsAtGroupRewardDistance`:
+anyone in the same instance inside a dungeon or raid, dead or alive,
+and anyone within group experience distance elsewhere.
+A member who released their spirit and ran back outside is not listed.
+Without a group, the only witness is the player or bot that was sent the kill.
+A kill with no real player among the witnesses sends nothing.
+
+The event fires when a real player or a bot is sent `SMSG_PARTYKILLLOG` and the victim is a boss.
+The core sends that packet when a player, or a player's pet or totem, lands the killing blow on a creature
+that player or their group tapped.
+It goes to the killer and to the members of the killer's raid subgroup within group reward distance,
+so the master's own kills count without bots,
+and a raid kill the master did not get the packet for is still seen through a bot.
+A boss killed by something that is not a player, such as an escort or a scripted instant kill, sends nothing.
+
+Everyone near the kill is sent the packet, so the fork posts each kill once.
+A kill is posted unless a kill with the same instance id and entry was posted less than 60 seconds earlier;
+the repeats inside that window are dropped, and they do not extend it.
+Outside instances the instance id is `0`, so two kills of the same world boss within 60 seconds post once.

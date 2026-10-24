@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "PlayerbotDbStore.h"
+#include "PlayerbotEventSink.h"
 #include "playerbot/PlayerbotFactory.h"
 #include "playerbot/RandomPlayerbotFactory.h"
 #include "playerbot/RandomPlayerbotMgr.h"
@@ -1169,6 +1170,10 @@ void PlayerbotMgr::HandleMasterIncomingPacket(const WorldPacket& packet)
 }
 void PlayerbotMgr::HandleMasterOutgoingPacket(const WorldPacket& packet)
 {
+   // Once per packet to the master, before the bots see it, so the master's own kills count without bots.
+   if (packet.GetOpcode() == SMSG_PARTYKILLLOG)
+       PlayerbotEventSink::PostBossKilled(master, packet);
+
    ForEachPlayerbot([&](Player* bot)
    {
         if (!bot->GetPlayerbotAI())
