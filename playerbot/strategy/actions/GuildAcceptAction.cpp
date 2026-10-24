@@ -18,6 +18,14 @@ bool GuildAcceptAction::Execute(Event& event)
     if (normalizePlayerName(Invitedname))
         inviter = ObjectAccessor::FindPlayerByName(Invitedname.c_str());
 
+    // Without an SMSG_GUILD_INVITE packet, as from ".rndbot do <bot> guild accept", answer the pending invite.
+    // The core keeps the inviter in the guild event log, and HandleGuildDeclineOpcode reads it the same way.
+    if (Invitedname.empty() && bot->GetGuildIdInvited())
+    {
+        if (Guild* invitedGuild = sGuildMgr.GetGuildById(bot->GetGuildIdInvited()))
+            inviter = ObjectAccessor::FindPlayer(invitedGuild->GetGuildInviter(bot->GetObjectGuid()));
+    }
+
     if (!inviter)
         return false;
 
