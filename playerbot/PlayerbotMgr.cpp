@@ -956,6 +956,134 @@ void PlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
     SetAIInternalUpdateDelay(sPlayerbotAIConfig.reactDelay);
     CheckTellErrors(elapsed);
+    UsePendingLevelToken();
+}
+
+namespace
+{
+    // The level cap of the token with this item entry, or 0 when the entry is not a level token.
+    uint32 LevelTokenCap(uint32 entry)
+    {
+        const std::vector<uint32>& caps = sPlayerbotAIConfig.levelTokenCaps;
+        const uint32 first = sPlayerbotAIConfig.levelTokenFirstEntry;
+        if (!first || entry < first || entry - first >= caps.size())
+            return 0;
+
+        // A cap above the server's maximum level must not take anyone past it.
+        return std::min(caps[entry - first], sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL));
+    }
+
+    // How long a pending token waits for its on-use spell to let go of the item before it is dropped.
+    constexpr time_t LevelTokenSpellTimeoutSeconds = 10;
+}
+
+// HandleMasterIncomingPacket calls this for CMSG_USE_ITEM. It runs on the world thread, in World::UpdateSessions,
+// after the core's WorldSession::HandleUseItemOpcode has handled the same packet and cast the token's on-use spell.
+// It only marks the token pending; UsePendingLevelToken levels the master and takes the token on the next AI tick.
+void PlayerbotMgr::OnLevelTokenUse(const WorldPacket& packet)
+{
+    if (!master || !master->IsInWorld() || sPlayerbotAIConfig.levelTokenCaps.empty())
+        return;
+
+    // Same layout as WorldSession::HandleUseItemOpcode: uint8 bagIndex, uint8 slot, uint8 spell_index, then the targets.
+    if (packet.size() < 2)
+        return;
+
+    WorldPacket p(packet);
+    p.rpos(0);
+    uint8 bagIndex, slot;
+    p >> bagIndex >> slot;
+
+    Item* item = master->GetItemByPos(bagIndex, slot);
+    if (!item)
+        return;
+
+    uint32 cap = LevelTokenCap(item->GetEntry());
+    if (!cap)
+        return;
+
+    // One token at a time: a second use before the first is taken does nothing.
+    if (!pendingLevelToken.IsEmpty())
+        return;
+
+    if (!CanUseLevelToken(cap))
+        return;
+
+    pendingLevelToken = item->GetObjectGuid();
+    pendingLevelTokenSince = time(nullptr);
+}
+
+// Tells the master why not, when a token with this cap cannot level them now.
+bool PlayerbotMgr::CanUseLevelToken(uint32 cap)
+{
+    ChatHandler chat(master->GetSession());
+
+    if (master->GetLevel() >= cap)
+    {
+        chat.PSendSysMessage("This token cannot take you past level %u.", cap);
+        return false;
+    }
+
+    if (!sServerFacade.IsAlive(master))
+    {
+        chat.SendSysMessage("You cannot use this token while dead.");
+        return false;
+    }
+
+    // Player::GiveLevel refills health and mana, so a token used in combat would be a full heal.
+    if (sServerFacade.IsInCombat(master))
+    {
+        chat.SendSysMessage("You cannot use this token in combat.");
+        return false;
+    }
+
+    return true;
+}
+
+// Runs from UpdateAIInternal, in the master's Player::UpdateAI on the map thread, as Player::GiveXP's level-ups do.
+void PlayerbotMgr::UsePendingLevelToken()
+{
+    if (pendingLevelToken.IsEmpty() || !master)
+        return;
+
+    Item* item = master->GetItemByGuid(pendingLevelToken);
+
+    // The token's on-use spell keeps a pointer to the item until the spell is deleted, and Spell::~Spell writes to it,
+    // so the last token of a stack must not be destroyed before then. Item::IsUsedInSpell is true while a spell holds it.
+    // An instant spell is deleted in the master's next Player::Update, which runs before this tick.
+    if (item && item->IsUsedInSpell() && time(nullptr) - pendingLevelTokenSince < LevelTokenSpellTimeoutSeconds)
+        return;
+
+    pendingLevelToken.Clear();
+
+    if (!item || item->IsInTrade())
+        return;
+
+    if (item->IsUsedInSpell())
+    {
+        sLog.outError("Level token: a spell still holds %s's token %u, not using it", master->GetName(), item->GetEntry());
+        ChatHandler(master->GetSession()).SendSysMessage("Your token could not be used. Try again.");
+        return;
+    }
+
+    uint32 entry = item->GetEntry();
+    uint32 cap = LevelTokenCap(entry);
+    if (!cap || !CanUseLevelToken(cap))
+        return;
+
+    uint32 level = master->GetLevel() + 1;
+    master->GiveLevel(level);
+
+    // Player::GiveLevel leaves experience to the caller. Keep the progress toward the next level, which the next level's
+    // larger requirement always holds, except at the maximum level, where there is no next level.
+    if (level >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
+        master->SetUInt32Value(PLAYER_XP, 0);
+
+    uint32 count = 1;
+    master->DestroyItemCount(*item, count, true);
+
+    ChatHandler(master->GetSession()).PSendSysMessage("The token takes you to level %u.", level);
+    sLog.outString("Level token: %s used token %u and reached level %u", master->GetName(), entry, level);
 }
 
 void PlayerbotMgr::HandleCommand(uint32 type, const std::string& text, uint32 lang)
@@ -1008,6 +1136,10 @@ void PlayerbotMgr::HandleCommand(uint32 type, const std::string& text, uint32 la
 
 void PlayerbotMgr::HandleMasterIncomingPacket(const WorldPacket& packet)
 {
+    // Once per master packet, before the bots see it. Every real player has a PlayerbotMgr, so this needs no bots.
+    if (packet.GetOpcode() == CMSG_USE_ITEM)
+        OnLevelTokenUse(packet);
+
     ForEachPlayerbot([&](Player* bot)
     {
         bot->GetPlayerbotAI()->HandleMasterIncomingPacket(packet);

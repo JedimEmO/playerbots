@@ -1119,6 +1119,13 @@ AiPlayerbot.LLMDefaultPromptsFile = llm_character_card.txt
 # Seconds to wait for the webhook's response before closing the connection.
 # AiPlayerbot.EventWebhookTimeout = 2
 
+# Level tokens. Using one raises a real player one level, up to the token's cap, and takes one token from the stack.
+# The tokens are items with consecutive entries starting at LevelTokenFirstEntry. LevelTokenCaps lists each token's cap
+# in entry order, so the number of caps is the number of tokens. An empty list turns tokens off.
+# Each token item needs an instant on-use spell with no charges; server/sql/020-level-tokens.sql in wow-playground adds the defaults.
+# AiPlayerbot.LevelTokenFirstEntry = 60001
+# AiPlayerbot.LevelTokenCaps = 25,40,55,60
+
 # Enable the alternative asynchronous login system.
 # AiPlayerbot.AsyncBotLogin = 0
 

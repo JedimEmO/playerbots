@@ -411,6 +411,10 @@ public:
     ParsedUrl eventWebhookEndPointUrl{};
     //LM END
 
+    // Level tokens (PlayerbotMgr): the item entry of the first token, and each token's level cap in entry order.
+    uint32 levelTokenFirstEntry = 60001;
+    std::vector<uint32> levelTokenCaps;
+
     uint32 EatDrinkMinDistance = 5;
     uint32 EatDrinkMaxDistance = 1000;
 

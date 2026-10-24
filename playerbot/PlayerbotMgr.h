@@ -170,9 +170,17 @@ protected:
     void CheckTellErrors(uint32 elapsed);
 
 private:
+    // Level tokens (AiPlayerbot.LevelTokenFirstEntry, AiPlayerbot.LevelTokenCaps).
+    // CMSG_USE_ITEM on a token marks it pending; the next AI tick levels the master and takes the token.
+    void OnLevelTokenUse(const WorldPacket& packet);
+    void UsePendingLevelToken();
+    bool CanUseLevelToken(uint32 cap);
+
     Player* const master;
     PlayerBotErrorMap errors;
     time_t lastErrorTell;
+    ObjectGuid pendingLevelToken;
+    time_t pendingLevelTokenSince = 0;
 };
 
 #endif

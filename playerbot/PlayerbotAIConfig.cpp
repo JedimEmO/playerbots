@@ -766,6 +766,10 @@ bool PlayerbotAIConfig::Initialize()
         }
     }
 
+    // Level tokens (PlayerbotMgr). Token n, counting from 0, has entry LevelTokenFirstEntry + n and cap LevelTokenCaps[n].
+    levelTokenFirstEntry = config.GetIntDefault("AiPlayerbot.LevelTokenFirstEntry", 60001);
+    LoadList<std::vector<uint32> >(config.GetStringDefault("AiPlayerbot.LevelTokenCaps", "25,40,55,60"), levelTokenCaps);
+
     // Gear progression system
     gearProgressionSystemEnabled = config.GetBoolDefault("AiPlayerbot.GearProgressionSystem.Enable", false);
 
