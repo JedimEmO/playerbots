@@ -774,6 +774,9 @@ bool PlayerbotAIConfig::Initialize()
     courierEntry = config.GetIntDefault("AiPlayerbot.CourierEntry", 60200);
     courierLingerSecs = config.GetIntDefault("AiPlayerbot.CourierLingerSecs", 30);
 
+    // Flight paths (PlayerbotMgr::OnPlayerLogin).
+    masterKnowsAllTaxiNodes = config.GetBoolDefault("AiPlayerbot.MasterKnowsAllTaxiNodes", false);
+
     // Gear progression system
     gearProgressionSystemEnabled = config.GetBoolDefault("AiPlayerbot.GearProgressionSystem.Enable", false);
 

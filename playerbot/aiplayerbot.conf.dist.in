@@ -1135,6 +1135,12 @@ AiPlayerbot.LLMDefaultPromptsFile = llm_character_card.txt
 # AiPlayerbot.CourierEntry = 60200
 # AiPlayerbot.CourierLingerSecs = 30
 
+# Flight paths. With MasterKnowsAllTaxiNodes = 1, a real player learns every flight path of their faction when they log in,
+# as if they had talked to each flight master. The paths are saved with the character, so they stay known if this is
+# turned off again. Bots are not affected. The core's AllFlightPaths in mangosd.conf is the temporary alternative:
+# it opens every path of both factions while it is on, and learns nothing.
+# AiPlayerbot.MasterKnowsAllTaxiNodes = 0
+
 # Enable the alternative asynchronous login system.
 # AiPlayerbot.AsyncBotLogin = 0
 

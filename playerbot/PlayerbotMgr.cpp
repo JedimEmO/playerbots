@@ -18,6 +18,7 @@
 #include "AI/BaseAI/UnitAI.h"
 #include "Entities/Creature.h"
 #include "Mails/Mail.h"
+#include "Server/DBCStores.h"
 
 #include <algorithm>
 #include <cctype>
@@ -1511,6 +1512,35 @@ void PlayerbotMgr::OnBotLoginInternal(Player * const bot)
     sLog.outDebug("Bot %s logged in", bot->GetName());
 }
 
+namespace
+{
+    // Learns every flight path of the player's team: every node of the taxi network (sTaxiNodesMask) that has a mount
+    // for the team, the same filter ObjectMgr::GetNearestTaxiNode uses to find the flight master a player talks to.
+    // The mask is saved with the character. Runs on the player's map thread, from RunMapTasks.
+    void LearnAllTaxiNodes(Player* player)
+    {
+        const uint32 teamIndex = player->GetTeam() == ALLIANCE ? 1 : 0;
+        uint32 learned = 0;
+        for (uint32 i = 1; i < sTaxiNodesStore.GetNumRows(); ++i)
+        {
+            TaxiNodesEntry const* node = sTaxiNodesStore.LookupEntry(i);
+            if (!node || !node->MountCreatureID[teamIndex])
+                continue;
+
+            const uint8 field = uint8((i - 1) / 32);
+            const uint32 submask = 1 << ((i - 1) % 32);
+            if ((sTaxiNodesMask[field] & submask) == 0)
+                continue;
+
+            if (player->m_taxi.SetTaximaskNode(i))
+                ++learned;
+        }
+
+        if (learned)
+            sLog.outDetail("Player %s learned %u flight paths", player->GetName(), learned);
+    }
+}
+
 void PlayerbotMgr::OnPlayerLogin(Player* player)
 {
     if (player->GetSession() != player->GetPlayerMenu()->GetGossipMenu().GetMenuSession())
@@ -1524,6 +1554,11 @@ void PlayerbotMgr::OnPlayerLogin(Player* player)
     // set locale priority for bot texts
     sPlayerbotTextMgr.AddLocalePriority(player->GetSession()->GetSessionDbLocaleIndex());
     sLog.outDetail("Player %s logged in, localeDbc %i, localeDb %i", player->GetName(), (uint32)(player->GetSession()->GetSessionDbcLocale()), player->GetSession()->GetSessionDbLocaleIndex());
+
+    // OnPlayerLogin runs on the world thread, and the taxi mask belongs to the player's map thread, so the paths are
+    // learned at the player's first AI tick. A player who opens a flight master before then sees them on the next visit.
+    if (sPlayerbotAIConfig.masterKnowsAllTaxiNodes && player == master)
+        QueueMapTask(LearnAllTaxiNodes);
 
     if (sPlayerbotAIConfig.IsFreeAltBot(player))
     {

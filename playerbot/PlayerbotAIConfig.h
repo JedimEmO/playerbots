@@ -419,6 +419,9 @@ public:
     uint32 courierEntry = 60200;
     uint32 courierLingerSecs = 30;
 
+    // A real player learns every flight path of their faction at login (PlayerbotMgr::OnPlayerLogin).
+    bool masterKnowsAllTaxiNodes = false;
+
     uint32 EatDrinkMinDistance = 5;
     uint32 EatDrinkMaxDistance = 1000;
 
