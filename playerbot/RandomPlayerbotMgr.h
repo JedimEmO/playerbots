@@ -8,6 +8,9 @@
 #include "WorldPosition.h"
 #include <map>
 #include <list>
+#include <mutex>
+#include <string>
+#include <vector>
 
 class WorldPacket;
 class Player;
@@ -72,6 +75,7 @@ private:
         void LogPlayerLocation();
         void DelayedFacingFix();
         void LoginFreeBots();
+        void UpdateAutonomousBots();
 public:
         static void DatabasePing(QueryResult* result, uint32 pingStart, std::string db);
         void SetDatabaseDelay(std::string db, uint32 delay) {databaseDelay[db] = delay;}
@@ -84,8 +88,16 @@ public:
         static bool HandlePlayerbotConsoleCommand(ChatHandler* handler, char const* args);
         bool IsRandomBot(Player* bot);
         bool IsRandomBot(uint32 bot);
-        bool IsFreeBot(Player* bot) { return IsRandomBot(bot) || sPlayerbotAIConfig.IsFreeAltBot(bot); }
-        bool IsFreeBot(uint32 bot) { return IsRandomBot(bot) || sPlayerbotAIConfig.IsFreeAltBot(bot); }
+        // A free bot plays on its own, without a master of its own: a random bot, a free alt bot or an autonomous bot.
+        bool IsFreeBot(Player* bot) { return IsRandomBot(bot) || sPlayerbotAIConfig.IsFreeAltBot(bot) || IsAutonomousBot(bot); }
+        bool IsFreeBot(uint32 bot) { return IsRandomBot(bot) || sPlayerbotAIConfig.IsFreeAltBot(bot) || IsAutonomousBot(bot); }
+        // A character on an AiPlayerbot.AutonomousAccounts account, played by the server. See docs/autonomous-bots.md.
+        bool IsAutonomousBot(Player* bot);
+        bool IsAutonomousBot(uint32 bot);
+        // Re-reads the characters on the autonomous accounts. World thread only.
+        void RefreshAutonomousBots();
+        // Name and whether the character is in the world, for every autonomous character, sorted by name.
+        std::vector<std::pair<std::string, bool>> GetAutonomousBots();
         void InstaRandomize(Player* bot);
         void Randomize(Player* bot);
         void RandomizeFirst(Player* bot);
@@ -277,6 +289,19 @@ public:
         std::map<uint32, std::map<std::string, CachedEvent> > eventCache;
         BarGoLink* loginProgressBar;
         std::list<uint32> currentBots;
+
+        struct AutonomousBot
+        {
+            uint32 account;
+            std::string name;
+        };
+        // Characters on the autonomous accounts by guid, written on the world thread by RefreshAutonomousBots and read
+        // by IsAutonomousBot from any thread.
+        std::map<uint32, AutonomousBot> autonomousBots;
+        std::mutex autonomousBotsMutex;
+        time_t autonomousRefreshTime = 0;
+        // When each autonomous character may next be sent to log in, so a slow login is not started twice.
+        std::map<uint32, time_t> autonomousLoginRetry;
         std::list<uint32> arenaTeamMembers;
         uint32 bgBotsCount;
         uint32 playersLevel = 0;

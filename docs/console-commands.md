@@ -7,7 +7,7 @@ which SOAP returns as the command's result.
 
 They also work as `.bot <subcommand>` in game.
 There the speaker commands use the spoofed or current character as the sender,
-and `deliver`, `profession` and `teleport` still need a game master account.
+and `deliver`, `profession`, `teleport` and `autonomous` still need a game master account.
 
 ## say, yell and emote
 
@@ -223,3 +223,14 @@ Two names always mean this command.
 | `You may not teleport bots` | The account is below game master. SOAP runs as the console, which passes. |
 
 The bot is checked before the player.
+
+## autonomous
+
+```
+.rndbot autonomous
+```
+
+Lists the autonomous bots, the characters on the `AiPlayerbot.AutonomousAccounts` accounts,
+one line each, `<name> online` or `<name> offline`, sorted by name.
+`No autonomous bots` means the setting is empty or its accounts have no characters.
+[Autonomous bots](autonomous-bots.md) describes them and every reply.

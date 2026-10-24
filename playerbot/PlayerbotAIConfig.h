@@ -108,6 +108,8 @@ public:
     bool IsInRandomAccountList(uint32 id);
     bool IsFreeAltBot(uint32 guid);
     bool IsFreeAltBot(Player* player) {return IsFreeAltBot(player->GetGUIDLow());}
+    bool IsInAutonomousAccountList(uint32 accountId);
+    void LoadAutonomousAccounts();
     bool IsInRandomQuestItemList(uint32 id);
 	bool IsInPvpProhibitedZone(uint32 id);
 
@@ -136,6 +138,9 @@ public:
     std::list<std::pair<uint32, uint32>> freeAltBots;
     std::list<std::string> toggleAlwaysOnlineAccounts;
     std::list<std::string> toggleAlwaysOnlineChars;
+    // AiPlayerbot.AutonomousAccounts: account names as configured (upper case) and the ids they resolve to.
+    std::list<std::string> autonomousAccountNames;
+    std::list<uint32> autonomousAccounts;
     bool enableRandomTeleports;
     bool enableMinimalMove;
     uint32 randomBotTeleportDistance;

@@ -555,8 +555,10 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
 
     // Alt level sync - level up non-random bots to match master level
     // wow-playground: a bot that belongs to a real player keeps pace with that player whether or not
-    // they are grouped; upstream only levels bots in the master's own group.
+    // they are grouped; upstream only levels bots in the master's own group. An autonomous bot levels on its own, so a
+    // player who groups with it does not pull it up.
     if (sPlayerbotAIConfig.syncAltLevelToMaster && bot->IsAlive() && master && !sRandomPlayerbotMgr.IsRandomBot(bot)
+        && !sRandomPlayerbotMgr.IsAutonomousBot(bot)
         && IsSafe(master) && (!bot->GetGroup() || !master->GetGroup() || bot->GetGroup()->GetLeaderGuid() == master->GetObjectGuid()))
     {
         uint32 botLevel = bot->GetLevel();
@@ -2040,7 +2042,7 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
                 if (!isFromFreeBot)
                 {
 
-                    isFromFreeBot = sPlayerbotAIConfig.IsFreeAltBot(guid1);
+                    isFromFreeBot = sPlayerbotAIConfig.IsFreeAltBot(guid1) || sRandomPlayerbotMgr.IsAutonomousBot(guid1.GetCounter());
 
                     if (isFromFreeBot)
                     {
@@ -2869,7 +2871,9 @@ void PlayerbotAI::ResetStrategies(bool autoLoad)
             stanceValue->Load("near");
     }
 
-    if (autoLoad && HasPlayerRelation()) sPlayerbotDbStore.Load(this);
+    // An autonomous bot always plays the strategies AiFactory gives it. A set saved while it was grouped with a player
+    // would otherwise come back at the next login, when it plays alone.
+    if (autoLoad && HasPlayerRelation() && !sRandomPlayerbotMgr.IsAutonomousBot(bot)) sPlayerbotDbStore.Load(this);
 
 #ifdef GenerateBotTests
     for (auto& [state, strats] : testStrategies)
@@ -6376,7 +6380,7 @@ ActivePiorityType PlayerbotAI::GetPriorityType()
     if (HasPlayerNearby(WorldPosition(bot).getVisibilityDistance() + sPlayerbotAIConfig.reactDistance))
         return ActivePiorityType::NEARBY_PLAYER;
 
-    if (sPlayerbotAIConfig.IsFreeAltBot(bot) || HasStrategy("travel once", BotState::BOT_STATE_NON_COMBAT))
+    if (sPlayerbotAIConfig.IsFreeAltBot(bot) || sRandomPlayerbotMgr.IsAutonomousBot(bot) || HasStrategy("travel once", BotState::BOT_STATE_NON_COMBAT))
         return ActivePiorityType::IS_ALWAYS_ACTIVE;
 
     if (bot->InBattleGroundQueue())
@@ -8222,7 +8226,8 @@ void PlayerbotAI::ReceiveDelayedPacket(futurePackets futPackets)
 
 PlayerbotHolder* PlayerbotAI::GetHolder() const
 {
-    if (sRandomPlayerbotMgr.IsRandomBot(bot))
+    // The random bot manager holds autonomous bots as well as random bots.
+    if (sRandomPlayerbotMgr.IsRandomBot(bot) || sRandomPlayerbotMgr.IsAutonomousBot(bot))
         return &sRandomPlayerbotMgr;
 
     if (bot->GetMaster())

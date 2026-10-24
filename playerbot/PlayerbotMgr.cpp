@@ -50,6 +50,7 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["deliver"] = &PlayerbotHolder::HandleDeliver;
     m_holderHandlers["profession"] = &PlayerbotHolder::HandleProfession;
     m_holderHandlers["teleport"] = &PlayerbotHolder::HandleTeleport;
+    m_holderHandlers["autonomous"] = &PlayerbotHolder::HandleAutonomous;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -570,6 +571,19 @@ std::string PlayerbotHolder::ProcessBotCommand(std::string cmd, ObjectGuid guid,
     {
         subType = cmd.substr(eqPos + 1);
         cmd = cmd.substr(0, eqPos);
+    }
+
+    // Autonomous bots are nobody's alts: the random bot manager logs them in and keeps them online, and they keep the
+    // character they have. Players command them through chat while grouped, not with .bot. Game masters and the
+    // console keep the commands that help a bot along, but not the ones that log it in or out, hand it to an account,
+    // or re-roll its level, gear or spells.
+    if (sPlayerbotAIConfig.IsInAutonomousAccountList(botAccount))
+    {
+        static const std::set<std::string> lifecycleOrReroll = {
+            "add", "login", "remove", "logout", "rm", "always", "init", "gear", "equip", "levelup", "level", "random" };
+
+        if (!admin || lifecycleOrReroll.count(cmd))
+            return "Not allowed on autonomous bots";
     }
 
     auto it = m_botCommandHandlers.find(cmd);
@@ -2742,6 +2756,25 @@ std::list<std::string> PlayerbotHolder::HandleTeleport(Player* master, const std
     return {"Teleported " + std::string(bot->GetName()) + " to " + std::string(player->GetName())};
 }
 
+// .rndbot autonomous
+// One line per character on the autonomous accounts, "<name> online" or "<name> offline", sorted by name. Runs on the
+// world thread and re-reads the characters first, so a character created a moment ago is listed.
+std::list<std::string> PlayerbotHolder::HandleAutonomous(Player* master, const std::string param, AccountTypes security)
+{
+    if (security < SEC_GAMEMASTER)
+        return {"You may not list autonomous bots"};
+
+    std::list<std::string> lines;
+    for (const auto& [name, online] : sRandomPlayerbotMgr.GetAutonomousBots())
+        lines.push_back(name + (online ? " online" : " offline"));
+
+    // The console answers an empty reply with its usage text, so say it.
+    if (lines.empty())
+        lines.push_back("No autonomous bots");
+
+    return lines;
+}
+
 std::string PlayerbotHolder::HandleBotAddLogin(Player* bot, Player* master, const std::string param)
 {
     if (bot)
@@ -3823,6 +3856,8 @@ std::unordered_map<std::string, std::string> PlayerbotHolder::GetCommandTexts()
         {"deliver", "Send a courier with items to an online player. It says the line, bows and hands the items over; what does not fit in the bags is mailed. Game masters and the console only.\nUsage: .rndbot deliver <player> <item>:<count>[,<item>:<count>...] <line>\nExample: .rndbot deliver Thrain 4536:5,159:5 Compliments of the house!"},
 
         {"teleport", "Teleport an online bot next to an online real player, on any map. Game masters and the console only.\nUsage: .rndbot teleport <bot> <player>\nExample: .rndbot teleport Dunpriest Thrain\nWith one name, .rndbot teleport still sends random bots whose names start with it to a grinding spot."},
+
+        {"autonomous", "List the autonomous bots, the characters on AiPlayerbot.AutonomousAccounts, one per line with online or offline. Game masters and the console only.\nUsage: .rndbot autonomous"},
 
         {"profession", "Set, unlearn or list a character's professions. set learns the ranks the value needs; the change is made on the character's next update. Game masters and the console only.\nUsage: .rndbot profession <character> list\n .rndbot profession <character> set <skill> <value>\n .rndbot profession <character> unlearn <skill>\nSkills: herbalism, mining, skinning, alchemy, blacksmithing, leatherworking, tailoring, engineering, enchanting, cooking, firstaid, fishing, or a skill line id. Values 1 to 300.\nExample: .rndbot profession Dunpriest set herbalism 150"},
         

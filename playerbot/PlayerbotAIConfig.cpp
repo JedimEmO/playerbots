@@ -818,6 +818,13 @@ bool PlayerbotAIConfig::Initialize()
         nm[0] = toupper(nm[0]);
     }
 
+    sLog.outString("Loading autonomous accounts.");
+    autonomousAccountNames.clear();
+    LoadListString<std::list<std::string>>(config.GetStringDefault("AiPlayerbot.AutonomousAccounts", ""), autonomousAccountNames);
+    for (std::string& nm : autonomousAccountNames)
+        std::transform(nm.begin(), nm.end(), nm.begin(), toupper);
+    LoadAutonomousAccounts();
+
     loadFreeAltBotAccounts();
 
     targetPosRecalcDistance = config.GetFloatDefault("AiPlayerbot.TargetPosRecalcDistance", 0.1f),
@@ -871,6 +878,50 @@ bool PlayerbotAIConfig::IsFreeAltBot(uint32 guid)
             return true;
 
     return false;
+}
+
+bool PlayerbotAIConfig::IsInAutonomousAccountList(uint32 accountId)
+{
+    return accountId && std::find(autonomousAccounts.begin(), autonomousAccounts.end(), accountId) != autonomousAccounts.end();
+}
+
+// Resolves AiPlayerbot.AutonomousAccounts to account ids. Called at startup and again by RandomPlayerbotMgr while it
+// refreshes the autonomous characters, so an account created after startup is picked up. A random bot account is
+// never autonomous: its characters belong to the random bot manager, which randomizes them.
+void PlayerbotAIConfig::LoadAutonomousAccounts()
+{
+    std::list<uint32> ids;
+
+    std::string prefix = randomBotAccountPrefix;
+    std::transform(prefix.begin(), prefix.end(), prefix.begin(), toupper);
+
+    for (std::string name : autonomousAccountNames)
+    {
+        if (name.empty())
+            continue;
+
+        if (!prefix.empty() && name.rfind(prefix, 0) == 0)
+        {
+            sLog.outError("AiPlayerbot.AutonomousAccounts: %s is a random bot account, ignoring it", name.c_str());
+            continue;
+        }
+
+        LoginDatabase.escape_string(name);
+        auto result = LoginDatabase.PQuery("SELECT id FROM account WHERE UPPER(username) = '%s'", name.c_str());
+        if (!result)
+            continue;
+
+        uint32 id = result->Fetch()[0].GetUInt32();
+        if (IsInRandomAccountList(id))
+        {
+            sLog.outError("AiPlayerbot.AutonomousAccounts: %s is a random bot account, ignoring it", name.c_str());
+            continue;
+        }
+
+        ids.push_back(id);
+    }
+
+    autonomousAccounts = ids;
 }
 
 bool PlayerbotAIConfig::IsInRandomQuestItemList(uint32 id)
@@ -975,6 +1026,10 @@ void PlayerbotAIConfig::loadFreeAltBotAccounts()
             Field* fields = results->Fetch();
             std::string accountName = fields[0].GetString();
             uint32 accountId = fields[1].GetUInt32();
+
+            // Characters on autonomous accounts are kept online by RandomPlayerbotMgr as autonomous bots, not as free alt bots.
+            if (IsInAutonomousAccountList(accountId))
+                continue;
 
             if (std::find(toggleAlwaysOnlineAccounts.begin(), toggleAlwaysOnlineAccounts.end(), accountName) != toggleAlwaysOnlineAccounts.end())
                 accountToggle = true;

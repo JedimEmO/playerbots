@@ -18,6 +18,36 @@
 #include "playerbot/RandomPlayerbotMgr.h"
 #include "BattleGround/BattleGroundMgr.h"
 
+#include <sstream>
+#include <string>
+
+namespace
+{
+    // Whether a strategy list from the config, such as "+custom::say,+ai chat", ends up adding the strategy. The last
+    // mention wins, as when ChangeStrategy applies the list in order.
+    bool ConfigAddsStrategy(const std::string& list, const std::string& strategy)
+    {
+        bool added = false;
+        std::string token;
+        std::istringstream in(list);
+        while (std::getline(in, token, ','))
+        {
+            size_t start = token.find_first_not_of(' ');
+            size_t end = token.find_last_not_of(' ');
+            if (start == std::string::npos)
+                continue;
+
+            token = token.substr(start, end - start + 1);
+            if (token == "+" + strategy || token == strategy)
+                added = true;
+            else if (token == "-" + strategy)
+                added = false;
+        }
+
+        return added;
+    }
+}
+
 AiObjectContext* AiFactory::createAiObjectContext(Player* player, PlayerbotAI* ai)
 {
     switch (player->getClass())
@@ -1022,6 +1052,12 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
     {
         nonCombatEngine->ChangeStrategy(sPlayerbotAIConfig.nonCombatStrategies);
     }
+
+    // An autonomous bot gets the random bot strategies above, and RandomBotNonCombatStrategies may remove 'ai chat'
+    // to keep random bots quiet. It keeps 'ai chat' when NonCombatStrategies, the list for bots that belong to
+    // players, gives it, so it can still talk through the LLM.
+    if (sRandomPlayerbotMgr.IsAutonomousBot(player) && ConfigAddsStrategy(sPlayerbotAIConfig.nonCombatStrategies, "ai chat"))
+        nonCombatEngine->addStrategy("ai chat");
 
     // Battleground switch
     if (player->InBattleGround())

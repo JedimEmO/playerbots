@@ -676,6 +676,10 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     sMemoryMonitor.SampleDiagnostics();
 #endif
 
+    // Autonomous bots stay online whether or not random bots log in.
+    if (sPlayerbotAIConfig.enabled)
+        UpdateAutonomousBots();
+
     if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
         return;
 
@@ -1093,6 +1097,122 @@ void RandomPlayerbotMgr::LoginFreeBots()
             return std::find(botsToRemove.begin(), botsToRemove.end(), entry) != botsToRemove.end();
         });
     }
+}
+
+void RandomPlayerbotMgr::RefreshAutonomousBots()
+{
+    sPlayerbotAIConfig.LoadAutonomousAccounts();
+
+    std::map<uint32, AutonomousBot> bots;
+    if (!sPlayerbotAIConfig.autonomousAccounts.empty())
+    {
+        std::ostringstream accounts;
+        bool first = true;
+        for (uint32 account : sPlayerbotAIConfig.autonomousAccounts)
+        {
+            accounts << (first ? "" : ",") << account;
+            first = false;
+        }
+
+        auto result = CharacterDatabase.PQuery("SELECT guid, account, name FROM characters WHERE account IN (%s)", accounts.str().c_str());
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                bots[fields[0].GetUInt32()] = AutonomousBot{ fields[1].GetUInt32(), fields[2].GetCppString() };
+            } while (result->NextRow());
+        }
+    }
+
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    autonomousBots = std::move(bots);
+}
+
+// Logs in every character on the autonomous accounts that is not in the world, and keeps doing so, so an autonomous
+// bot that logged out or was disconnected comes back. The characters are re-read every minute, so one created or
+// deleted while the server runs is picked up. Runs on the world thread before the maps update.
+void RandomPlayerbotMgr::UpdateAutonomousBots()
+{
+    if (sPlayerbotAIConfig.autonomousAccountNames.empty() || sWorld.IsShutdowning())
+        return;
+
+    time_t now = time(nullptr);
+    if (now >= autonomousRefreshTime)
+    {
+        RefreshAutonomousBots();
+        autonomousRefreshTime = now + 60;
+    }
+
+    std::map<uint32, AutonomousBot> bots;
+    {
+        std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+        bots = autonomousBots;
+    }
+
+    // AddPlayerBot only queues the login; a few per update keeps a full guild from loading in one tick.
+    const uint32 maxLoginsPerUpdate = 5;
+    uint32 logins = 0;
+    for (const auto& [guid, info] : bots)
+    {
+        if (logins >= maxLoginsPerUpdate)
+            break;
+
+        if (sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false))
+            continue;
+
+        // Someone is playing on the account from a client. Leave its characters to them.
+        if (sWorld.FindSession(info.account))
+            continue;
+
+        time_t& retry = autonomousLoginRetry[guid];
+        if (now < retry)
+            continue;
+
+        retry = now + 30;
+        sLog.outDetail("Autonomous bot %s logging in", info.name.c_str());
+        AddPlayerBot(guid, info.account);
+        logins++;
+    }
+}
+
+std::vector<std::pair<std::string, bool>> RandomPlayerbotMgr::GetAutonomousBots()
+{
+    RefreshAutonomousBots();
+
+    std::vector<std::pair<std::string, bool>> list;
+    {
+        std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+        for (const auto& [guid, info] : autonomousBots)
+        {
+            Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false);
+            list.push_back({ info.name, player && player->IsInWorld() });
+        }
+    }
+
+    std::sort(list.begin(), list.end());
+    return list;
+}
+
+bool RandomPlayerbotMgr::IsAutonomousBot(Player* bot)
+{
+    // A character on the account that someone plays from a client is that person's, not an autonomous bot.
+    if (!bot || !bot->GetSession() || bot->isRealPlayer())
+        return false;
+
+    return sPlayerbotAIConfig.IsInAutonomousAccountList(bot->GetSession()->GetAccountId());
+}
+
+bool RandomPlayerbotMgr::IsAutonomousBot(uint32 bot)
+{
+    if (sPlayerbotAIConfig.autonomousAccounts.empty())
+        return false;
+
+    if (Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, bot), false))
+        return IsAutonomousBot(player);
+
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    return autonomousBots.find(bot) != autonomousBots.end();
 }
 
 void RandomPlayerbotMgr::DelayedFacingFix()
@@ -2041,6 +2161,10 @@ void RandomPlayerbotMgr::AddOfflineGroupBots()
                 if (!IsFreeBot(member.GetCounter()))
                     continue;
 
+                // UpdateAutonomousBots logs these in; AddRandomBot would refuse them as not random.
+                if (IsAutonomousBot(member.GetCounter()))
+                    continue;
+
                 if (sObjectMgr.GetPlayer(member))
                     continue;
 
@@ -2246,7 +2370,7 @@ void RandomPlayerbotMgr::MovePlayerBot(uint32 guid, PlayerbotHolder* newHolder)
 bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
 {
     Player* player = GetPlayerBot(bot);
-    if (player && sPlayerbotAIConfig.IsFreeAltBot(player))
+    if (player && (sPlayerbotAIConfig.IsFreeAltBot(player) || IsAutonomousBot(player)))
     {
         return false;
     }
@@ -3276,6 +3400,10 @@ bool RandomPlayerbotMgr::IsRandomBot(Player* bot)
         if (sPlayerbotAIConfig.IsInRandomAccountList(bot->GetSession()->GetAccountId()))
             return true;
 
+        // Autonomous bots are played like random bots but are not random bots, so no random bot rule applies to them.
+        if (sPlayerbotAIConfig.IsInAutonomousAccountList(bot->GetSession()->GetAccountId()))
+            return false;
+
         return IsRandomBot(bot->GetGUIDLow());
     }
 
@@ -3285,8 +3413,12 @@ bool RandomPlayerbotMgr::IsRandomBot(Player* bot)
 bool RandomPlayerbotMgr::IsRandomBot(uint32 bot)
 {
     ObjectGuid guid = ObjectGuid(HIGHGUID_PLAYER, bot);
-    if (sPlayerbotAIConfig.IsInRandomAccountList(sObjectMgr.GetPlayerAccountIdByGUID(guid)))
+    uint32 account = sObjectMgr.GetPlayerAccountIdByGUID(guid);
+    if (sPlayerbotAIConfig.IsInRandomAccountList(account))
         return true;
+
+    if (sPlayerbotAIConfig.IsInAutonomousAccountList(account))
+        return false;
 
     return GetEventValue(bot, "add");
 }
@@ -3563,7 +3695,14 @@ bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* handler, cha
 
         ConsolePlayerCommandHandler handler_copy = playerHandler;
 
+        // init, upgrade and refresh randomize a bot and remove logs it out for good; autonomous bots keep their
+        // character and stay online, so these skip them.
+        bool skipsAutonomous = prefix == "init" || prefix == "upgrade" || prefix == "refresh" || prefix == "remove";
+
         sRandomPlayerbotMgr.ForEachPlayerbot([&](Player* bot) {
+            if (skipsAutonomous && sRandomPlayerbotMgr.IsAutonomousBot(bot))
+                return;
+
             std::string botName = bot->GetName();
             if (botName.find(name) == 0)
             {
@@ -3717,7 +3856,7 @@ void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
     if (IsFreeBot(player))
     {
         uint32 guid = player->GetGUIDLow();
-        if (!sPlayerbotAIConfig.IsFreeAltBot(player))
+        if (!sPlayerbotAIConfig.IsFreeAltBot(player) && !IsAutonomousBot(player))
            SetEventValue(guid, "login", 0, 0);
     }
     else

@@ -1024,6 +1024,13 @@ AiPlayerbot.UseKnockback = 1
 # AiPlayerbot.ToggleAlwaysOnlineAccounts =
 # AiPlayerbot.ToggleAlwaysOnlineChars =
 
+# Autonomous accounts, comma separated account names. Every character on them is an autonomous bot:
+# the server logs it in at startup and keeps it online, it gets the random bot strategies and is always active,
+# but it is never randomized, never level synced to a master or to players, and is not a random bot.
+# Real players can still invite it and command it while grouped. See docs/autonomous-bots.md.
+# Default: empty (off)
+# AiPlayerbot.AutonomousAccounts =
+
 
 # Allowed log files. See SPP_MAP for more information
 # https://github.com/mostlikely4r/spp-map

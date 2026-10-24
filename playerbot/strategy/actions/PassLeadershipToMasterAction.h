@@ -22,7 +22,8 @@ namespace ai
                 if (!message.empty())
                     ai->TellPlayerNoFacing(passLeaderTo, message);
 
-                if (sRandomPlayerbotMgr.IsRandomBot(bot))
+                // As a follower a free bot plays another strategy set than as the leader.
+                if (sRandomPlayerbotMgr.IsRandomBot(bot) || sRandomPlayerbotMgr.IsAutonomousBot(bot))
                 {
                     ai->ResetStrategies();
                     ai->Reset();
