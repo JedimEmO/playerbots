@@ -19,6 +19,9 @@
 #include "Entities/Creature.h"
 #include "Mails/Mail.h"
 
+#include <algorithm>
+#include <cctype>
+
 #ifdef GenerateBotTests
 #include "strategy/tests/TestAction.h"
 #include "strategy/tests/TestRegistry.h"
@@ -43,6 +46,7 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["yell"] = &PlayerbotHolder::HandleYell;
     m_holderHandlers["emote"] = &PlayerbotHolder::HandleEmote;
     m_holderHandlers["deliver"] = &PlayerbotHolder::HandleDeliver;
+    m_holderHandlers["profession"] = &PlayerbotHolder::HandleProfession;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -963,6 +967,7 @@ void PlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     CheckTellErrors(elapsed);
     UsePendingLevelToken();
     UpdateDeliveries();
+    RunMapTasks(master);
 }
 
 namespace
@@ -2362,6 +2367,254 @@ std::list<std::string> PlayerbotHolder::HandleDeliver(Player* master, const std:
     return {"Delivery to " + std::string(player->GetName()) + ": " + std::to_string(total) + " items"};
 }
 
+namespace
+{
+    // The professions .rndbot profession knows.
+    struct ProfessionInfo
+    {
+        // As typed in the command and shown in its replies.
+        const char* name;
+
+        // The core's SkillType value (Globals/SharedDefines.h), which is the SkillLine.dbc id.
+        uint16 skill;
+
+        // SkillLine.dbc category 11 (SKILL_CATEGORY_PROFESSION), which IsPrimaryProfessionSkill checks. Herbalism,
+        // mining and skinning are in it with the crafting professions. Cooking, first aid and fishing are category 9.
+        bool primary;
+
+        // The profession spell of each rank: Apprentice, Journeyman, Expert, Artisan. Each has SPELL_EFFECT_SKILL (118)
+        // for the skill with step 1 to 4, so Player::addSpell sets the skill's step and cap through
+        // UpdateSpellTrainedSkills, and each is in SkillLineAbility.dbc for the skill. Trainers do not teach these
+        // directly: the npc_trainer spells, named in the comments, cast SPELL_EFFECT_LEARN_SPELL on them.
+        uint32 rankSpells[4];
+
+        // Spells that come with the profession and that SkillLineAbility.dbc marks learned on getting the skill, so
+        // Player::SetSkill already teaches them through UpdateSkillTrainedSpells, as it does after a trainer.
+        // Taught here again in case that ever misses, and removed with the skill by the core.
+        uint32 gatheringSpells[2];
+    };
+
+    const ProfessionInfo Professions[] =
+    {
+        // Trainer spells 2372, 2373, 3571, 11994 (Apprentice to Artisan Herbalist). Herb Gathering ranks; Find Herbs 2383.
+        {"herbalism",      SKILL_HERBALISM,      true,  {2366, 2368, 3570, 11993},  {2383, 0}},
+        // Trainer spells 2581, 2582, 3568, 10249 (Miner). Mining ranks; Find Minerals 2580 and Smelting 2656.
+        {"mining",         SKILL_MINING,         true,  {2575, 2576, 3564, 10248},  {2580, 2656}},
+        // Trainer spells 8615, 8619, 8620, 10769. The Skinning ranks are the skinning spells themselves.
+        {"skinning",       SKILL_SKINNING,       true,  {8613, 8617, 8618, 10768},  {0, 0}},
+        // Trainer spells 2275, 2280, 3465, 11612 (Alchemist).
+        {"alchemy",        SKILL_ALCHEMY,        true,  {2259, 3101, 3464, 11611},  {0, 0}},
+        // Trainer spells 2020, 2021, 3539, 9786 (Blacksmith).
+        {"blacksmithing",  SKILL_BLACKSMITHING,  true,  {2018, 3100, 3538, 9785},   {0, 0}},
+        // Trainer spells 2155, 2154, 3812, 10663.
+        {"leatherworking", SKILL_LEATHERWORKING, true,  {2108, 3104, 3811, 10662},  {0, 0}},
+        // Trainer spells 3911, 3912, 3913, 12181 (Tailor).
+        {"tailoring",      SKILL_TAILORING,      true,  {3908, 3909, 3910, 12180},  {0, 0}},
+        // Trainer spells 4039, 4040, 4041, 12657 (Engineer).
+        {"engineering",    SKILL_ENGINEERING,    true,  {4036, 4037, 4038, 12656},  {0, 0}},
+        // Trainer spells 7414, 7415, 7416, 13921.
+        {"enchanting",     SKILL_ENCHANTING,     true,  {7411, 7412, 7413, 13920},  {0, 0}},
+        // Trainer spells 2551, 3412 (Cook); Expert and Artisan from the books' spells 19886 and 19887.
+        {"cooking",        SKILL_COOKING,        false, {2550, 3102, 3413, 18260},  {0, 0}},
+        // Trainer spells 3279, 3280; Expert and Artisan from the books' spells 19903 and 19902.
+        {"firstaid",       SKILL_FIRST_AID,      false, {3273, 3274, 7924, 10846},  {0, 0}},
+        // Trainer spells 7733, 7734, 18249; Expert from the book's spell 19889.
+        {"fishing",        SKILL_FISHING,        false, {7620, 7731, 7732, 18248},  {0, 0}},
+    };
+
+    // The game's limit, which the reply "Already has two primary professions" names. The core's MaxPrimaryTradeSkill
+    // setting only limits trainers, through the free profession points; this command checks the skills themselves.
+    constexpr uint32 MaxPrimaryProfessions = 2;
+
+    // Each rank raises the skill cap by 75: Apprentice 75, Journeyman 150, Expert 225, Artisan 300.
+    constexpr uint16 SkillPerRank = 75;
+    constexpr uint16 MaxProfessionSkill = 300;
+
+    // A skill line id or a name from Professions, case-insensitive. nullptr for anything else.
+    const ProfessionInfo* FindProfession(const std::string& text)
+    {
+        std::string lower = text;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+
+        bool isNumber = !lower.empty() && lower.size() <= 5 && std::all_of(lower.begin(), lower.end(), [](unsigned char c) { return std::isdigit(c); });
+        uint32 id = isNumber ? uint32(std::stoul(lower)) : 0;
+
+        for (const ProfessionInfo& prof : Professions)
+        {
+            if (lower == prof.name || id == prof.skill)
+                return &prof;
+        }
+
+        return nullptr;
+    }
+
+    // The rank a skill value needs: 1 to 75 Apprentice (1), up to 150 Journeyman (2), 225 Expert (3), 300 Artisan (4).
+    uint16 RankForValue(uint16 value)
+    {
+        return (value + SkillPerRank - 1) / SkillPerRank;
+    }
+
+    uint32 PrimaryProfessionCount(Player* player)
+    {
+        uint32 count = 0;
+        for (const ProfessionInfo& prof : Professions)
+        {
+            if (prof.primary && player->HasSkill(prof.skill))
+                count++;
+        }
+
+        return count;
+    }
+
+    // Runs on the character's map thread, from RunMapTasks. Learns the rank spells up to the rank value needs, as the
+    // trainers' learning spells would, unlearns the ranks above it, and sets the skill to value with that rank's cap.
+    void ApplyProfession(Player* player, const ProfessionInfo& prof, uint16 value)
+    {
+        // The command checked this already, but another one queued in the same tick may have taken the second slot.
+        if (prof.primary && !player->HasSkill(prof.skill) && PrimaryProfessionCount(player) >= MaxPrimaryProfessions)
+        {
+            sLog.outError("Profession: %s already has two primary professions, not learning %s", player->GetName(), prof.name);
+            return;
+        }
+
+        uint16 rank = RankForValue(value);
+        uint16 cap = rank * SkillPerRank;
+
+        // Highest first: removing a rank spell steps the skill down one rank (Player::UpdateSpellTrainedSkills).
+        for (uint16 r = 4; r > rank; --r)
+        {
+            if (player->HasSpell(prof.rankSpells[r - 1]))
+                player->removeSpell(prof.rankSpells[r - 1]);
+        }
+
+        // Lowest first, as a character climbs the trainers. Each sets the skill's step and cap, and the first one adds
+        // the skill at 1, which teaches the spells SkillLineAbility.dbc gives on getting the skill.
+        for (uint16 r = 1; r <= rank; ++r)
+        {
+            if (!player->HasSpell(prof.rankSpells[r - 1]))
+                player->learnSpell(prof.rankSpells[r - 1], false);
+        }
+
+        for (uint32 spell : prof.gatheringSpells)
+        {
+            if (spell && !player->HasSpell(spell))
+                player->learnSpell(spell, false);
+        }
+
+        // Also teaches or removes the recipes SkillLineAbility.dbc gives at a skill value, as raising the skill would.
+        player->SetSkill(prof.skill, value, cap, rank);
+
+        sLog.outString("Profession: %s has %s %u/%u", player->GetName(), prof.name, uint32(value), uint32(cap));
+    }
+
+    // Runs on the character's map thread, from RunMapTasks.
+    void UnlearnProfession(Player* player, const ProfessionInfo& prof)
+    {
+        // What the client's unlearn button does (WorldSession::HandleUnlearnSkillOpcode). SetSkillStep(skill, 0) calls
+        // SetSkill(skill, 0, 0), which removes the skill and, through UpdateSkillTrainedSpells, every spell
+        // SkillLineAbility.dbc lists for it: the rank spells, the recipes and the gathering spells. Removing a primary
+        // profession's first rank spell gives back the free profession point.
+        player->SetSkillStep(prof.skill, 0);
+
+        // Rank spells the character had without the skill.
+        for (uint16 r = 4; r > 0; --r)
+        {
+            if (player->HasSpell(prof.rankSpells[r - 1]))
+                player->removeSpell(prof.rankSpells[r - 1]);
+        }
+
+        sLog.outString("Profession: %s unlearned %s", player->GetName(), prof.name);
+    }
+}
+
+// .rndbot profession <character> list
+// .rndbot profession <character> set <skill> <value>
+// .rndbot profession <character> unlearn <skill>
+// Runs on the world thread. list reads the skills now. set and unlearn check the request, queue the change on the
+// character's PlayerbotAI (bots) or PlayerbotMgr (real players), whose next AI tick on the map thread makes it, and
+// reply with the planned result before it is made.
+std::list<std::string> PlayerbotHolder::HandleProfession(Player* master, const std::string param, AccountTypes security)
+{
+    const std::string usage = "Usage: .rndbot profession <character> list|set <skill> <value>|unlearn <skill>";
+
+    // Spells and skills are given from nothing, so only the console and game masters may change them.
+    if (security < SEC_GAMEMASTER)
+        return {"You may not change professions"};
+
+    std::vector<std::string> words;
+    split(words, param, " ");
+    words.erase(std::remove(words.begin(), words.end(), std::string()), words.end());
+
+    if (words.size() < 2)
+        return {usage};
+
+    std::string playerName = words[0];
+    std::string action = words[1];
+    std::transform(action.begin(), action.end(), action.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    bool isList = action == "list" && words.size() == 2;
+    bool isSet = action == "set" && words.size() == 4;
+    bool isUnlearn = action == "unlearn" && words.size() == 3;
+    if (!isList && !isSet && !isUnlearn)
+        return {usage};
+
+    Player* player = nullptr;
+    if (normalizePlayerName(playerName))
+        player = sObjectAccessor.FindPlayerByName(playerName.c_str());
+
+    if (!player || !player->IsInWorld())
+        return {"No player found"};
+
+    std::string name = player->GetName();
+
+    if (isList)
+    {
+        std::list<std::string> lines;
+        for (const ProfessionInfo& prof : Professions)
+        {
+            if (player->HasSkill(prof.skill))
+                lines.push_back(std::string(prof.name) + " " + std::to_string(player->GetSkillValuePure(prof.skill)) + "/" + std::to_string(player->GetSkillMaxPure(prof.skill)));
+        }
+
+        // The console answers an empty reply with its usage text, so say it.
+        if (lines.empty())
+            lines.push_back("No professions");
+
+        return lines;
+    }
+
+    // Bots run their PlayerbotAI every map tick; real players run their PlayerbotMgr. Both tick on the map thread.
+    PlayerbotAIBase* owner = player->GetPlayerbotAI();
+    if (!owner)
+        owner = player->GetPlayerbotMgr();
+
+    if (!owner)
+        return {"No player found"};
+
+    const ProfessionInfo* prof = FindProfession(words[2]);
+    if (!prof)
+        return {"Unknown skill " + words[2]};
+
+    if (isUnlearn)
+    {
+        owner->QueueMapTask([prof](Player* target) { UnlearnProfession(target, *prof); });
+        return {"Unlearned " + std::string(prof->name) + " for " + name};
+    }
+
+    const std::string& valueText = words[3];
+    bool isNumber = !valueText.empty() && valueText.size() <= 3 && std::all_of(valueText.begin(), valueText.end(), [](unsigned char c) { return std::isdigit(c); });
+    uint32 value = isNumber ? uint32(std::stoul(valueText)) : 0;
+    if (value < 1 || value > MaxProfessionSkill)
+        return {"Bad value " + valueText};
+
+    if (prof->primary && !player->HasSkill(prof->skill) && PrimaryProfessionCount(player) >= MaxPrimaryProfessions)
+        return {"Already has two primary professions"};
+
+    uint16 skillValue = uint16(value);
+    owner->QueueMapTask([prof, skillValue](Player* target) { ApplyProfession(target, *prof, skillValue); });
+    return {"Set " + std::string(prof->name) + " to " + std::to_string(value) + " for " + name};
+}
+
 std::string PlayerbotHolder::HandleBotAddLogin(Player* bot, Player* master, const std::string param)
 {
     if (bot)
@@ -3441,6 +3694,8 @@ std::unordered_map<std::string, std::string> PlayerbotHolder::GetCommandTexts()
         {"emote", "Do a text emote as the bot.\nUsage: .(rnd)bot emote <text> (while spoofing as sender)\n .(rnd)bot emote <botname> <text>\nExample: .rndbot emote Dunpriest raises a mug. (shows as: Dunpriest raises a mug.)"},
 
         {"deliver", "Send a courier with items to an online player. It says the line, bows and hands the items over; what does not fit in the bags is mailed. Game masters and the console only.\nUsage: .rndbot deliver <player> <item>:<count>[,<item>:<count>...] <line>\nExample: .rndbot deliver Thrain 4536:5,159:5 Compliments of the house!"},
+
+        {"profession", "Set, unlearn or list a character's professions. set learns the ranks the value needs; the change is made on the character's next update. Game masters and the console only.\nUsage: .rndbot profession <character> list\n .rndbot profession <character> set <skill> <value>\n .rndbot profession <character> unlearn <skill>\nSkills: herbalism, mining, skinning, alchemy, blacksmithing, leatherworking, tailoring, engineering, enchanting, cooking, firstaid, fishing, or a skill line id. Values 1 to 300.\nExample: .rndbot profession Dunpriest set herbalism 150"},
         
         {"do", "Execute a bot action (sync, immediate response).\nUsage: .(rnd)bot do <bot> <action>\nExample: .(rnd)bot do <bot> stats, where, quests, who"},
         

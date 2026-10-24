@@ -1,6 +1,7 @@
 
 #include "playerbot/playerbot.h"
 #include "playerbot/PlayerbotAIConfig.h"
+#include "Entities/Player.h"
 
 using namespace ai;
 
@@ -52,6 +53,33 @@ void PlayerbotAIBase::YieldAIInternalThread(bool minimal)
 {
     if (aiInternalUpdateDelay < sPlayerbotAIConfig.reactDelay)
         aiInternalUpdateDelay = minimal ? sPlayerbotAIConfig.reactDelay * 10 : sPlayerbotAIConfig.reactDelay;
+}
+
+void PlayerbotAIBase::QueueMapTask(std::function<void(Player*)> task)
+{
+    std::lock_guard<std::mutex> guard(mapTaskMutex);
+    mapTasks.push_back(std::move(task));
+    hasMapTasks = true;
+}
+
+void PlayerbotAIBase::RunMapTasks(Player* player)
+{
+    if (!hasMapTasks || !player)
+        return;
+
+    // During a teleport the player is between maps; wait until they arrive.
+    if (!player->IsInWorld() || player->IsBeingTeleported())
+        return;
+
+    std::vector<std::function<void(Player*)>> tasks;
+    {
+        std::lock_guard<std::mutex> guard(mapTaskMutex);
+        tasks.swap(mapTasks);
+        hasMapTasks = false;
+    }
+
+    for (auto& task : tasks)
+        task(player);
 }
 
 bool PlayerbotAIBase::IsActive() const

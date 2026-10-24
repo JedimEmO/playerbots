@@ -5,9 +5,9 @@ for a sidecar such as innkeeper that drives the game over SOAP or remote access.
 Each one answers with a single line,
 which SOAP returns as the command's result.
 
-All four also work as `.bot <subcommand>` in game.
+They also work as `.bot <subcommand>` in game.
 There the speaker commands use the spoofed or current character as the sender,
-and `deliver` still needs a game master account.
+and `deliver` and `profession` still need a game master account.
 
 ## say, yell and emote
 
@@ -90,3 +90,88 @@ A player who logs out in the seconds before the hand-over does not get the items
 | `You may not send deliveries` | The account is below game master. SOAP runs as the console, which passes. |
 
 The player is checked before the items, and the first bad item stops the check.
+
+## profession
+
+```
+.rndbot profession <character> list
+.rndbot profession <character> set <skill> <value>
+.rndbot profession <character> unlearn <skill>
+```
+
+Sets up, removes or lists the professions of an online character, bot or real player.
+`<character>` is the character name; case does not matter.
+`<skill>` is one of the names below, in any case, or the skill line id.
+The replies always use the lower-case name, so a line from `list` reads back as a `set`.
+
+| Name | Skill line | Kind |
+|---|---|---|
+| `herbalism` | 182 | primary |
+| `mining` | 186 | primary |
+| `skinning` | 393 | primary |
+| `alchemy` | 171 | primary |
+| `blacksmithing` | 164 | primary |
+| `leatherworking` | 165 | primary |
+| `tailoring` | 197 | primary |
+| `engineering` | 202 | primary |
+| `enchanting` | 333 | primary |
+| `cooking` | 185 | secondary |
+| `firstaid` | 129 | secondary |
+| `fishing` | 356 | secondary |
+
+```
+.rndbot profession Dunpriest set herbalism 150
+```
+
+`set` teaches the rank spells the value needs, as the trainers would,
+and sets the skill to the value with that rank's cap.
+Up to 75 is Apprentice, 150 Journeyman, 225 Expert and 300 Artisan,
+so the example gives Apprentice and Journeyman Herb Gathering and herbalism 150/150.
+Ranks above the one the value needs are unlearned, so `set` also lowers a profession.
+Getting the skill teaches what the game gives with it:
+Find Herbs for herbalism, Find Minerals, Smelting and Smelt Copper for mining,
+Disenchant for enchanting, and each crafting profession's starting recipes.
+Other recipes stay with the trainers.
+
+A character has at most two primary professions, as in the game;
+cooking, first aid and fishing do not count.
+Setting a primary profession the character already has is always allowed.
+
+`unlearn` does what the unlearn button in the skill window does.
+The skill goes, and with it the rank spells, every recipe of the profession and the gathering spells.
+Unlearning a profession the character does not have still answers `Unlearned`.
+
+`list` gives one line per profession the character has, in the order of the table:
+
+```
+herbalism 150/150
+cooking 1/75
+```
+
+The value is the trained skill, without racial bonuses such as the tauren's herbalism.
+
+`set` and `unlearn` only check and queue the change;
+the character's next update on their map makes it, because spells and skills belong to the map's thread.
+So the reply is the planned result and comes before the change.
+Bots update on every map tick, and real players within a fraction of a second.
+A character who is between maps gets the change once they arrive,
+and one who logs out before the next update does not get it.
+Two `set` commands for new primary professions in the same moment can both answer `Set`
+when the character has one primary profession;
+the second is then dropped at the update, and the server logs an error.
+Random bots may change their professions again when the bot manager randomizes or re-initializes them.
+
+| Reply | When |
+|---|---|
+| `<name> <value>/<max>` | One line per profession, for `list`. |
+| `No professions` | `list` on a character without any of the twelve professions. |
+| `Set <skill> to <value> for <character>` | The change is queued. |
+| `Unlearned <skill> for <character>` | The unlearning is queued. |
+| `No player found` | No online character has that name, or the name is invalid. |
+| `Unknown skill <text>` | The skill is not one of the twelve names or ids. `<text>` is as given. |
+| `Bad value <text>` | The value is not a number from 1 to 300. |
+| `Already has two primary professions` | `set` of a primary profession the character lacks while they have two. |
+| `Usage: .rndbot profession <character> list\|set <skill> <value>\|unlearn <skill>` | Missing or extra words, or an unknown action. |
+| `You may not change professions` | The account is below game master. SOAP runs as the console, which passes. |
+
+The character is checked first, then the skill, then the value.
