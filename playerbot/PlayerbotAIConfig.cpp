@@ -750,6 +750,22 @@ bool PlayerbotAIConfig::Initialize()
         LoadLLMDefaultPrompts(promptsFile);
     }
 
+    // Event webhook (PlayerbotEventSink). An empty URL turns it off.
+    eventWebhookUrl = config.GetStringDefault("AiPlayerbot.EventWebhookUrl", "");
+    eventWebhookTimeout = config.GetIntDefault("AiPlayerbot.EventWebhookTimeout", 2);
+    eventWebhookEnabled = false;
+    eventWebhookEndPointUrl = ParsedUrl{};
+    if (!eventWebhookUrl.empty())
+    {
+        try {
+            eventWebhookEndPointUrl = parseUrl(eventWebhookUrl);
+            eventWebhookEnabled = true;
+        }
+        catch (const std::invalid_argument& e) {
+            sLog.outError("Unable to parse EventWebhookUrl url: %s", e.what());
+        }
+    }
+
     // Gear progression system
     gearProgressionSystemEnabled = config.GetBoolDefault("AiPlayerbot.GearProgressionSystem.Enable", false);
 

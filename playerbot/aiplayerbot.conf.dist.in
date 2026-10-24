@@ -1112,6 +1112,13 @@ AiPlayerbot.LLMDefaultPromptsFile = llm_character_card.txt
 # AiPlayerbot.LLMApiJson = {"model": "gpt-4o-mini", "messages": [{"role": "system", "content": "<pre prompt> <context>"},{"role": "user", "content": "<prompt>"}],"max_tokens": 60}
 # AiPlayerbot.LLMResponseStartPattern = ("content":\s*")
 
+# Event webhook for a sidecar such as innkeeper. The server posts game events to this URL as JSON, one request per event,
+# each on its own thread. Empty turns it off. Only level_up is sent so far: an alt bot whose master is a real player gained a level.
+# See docs/innkeeper-events.md for the bodies.
+# AiPlayerbot.EventWebhookUrl =
+# Seconds to wait for the webhook's response before closing the connection.
+# AiPlayerbot.EventWebhookTimeout = 2
+
 # Enable the alternative asynchronous login system.
 # AiPlayerbot.AsyncBotLogin = 0
 

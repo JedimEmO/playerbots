@@ -41,6 +41,7 @@
 #include "Guilds/GuildMgr.h"
 #include "Chat/ChannelMgr.h"
 #include "PlayerbotLLMInterface.h"
+#include "PlayerbotEventSink.h"
 #include "strategy/values/Stances.h"
 
 #include <boost/algorithm/string.hpp>
@@ -2226,6 +2227,21 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
         bot->Relocate(highestPoint.getX(), highestPoint.getY(), highestPoint.getZ());
         //bot->m_movementInfo.ChangePosition(dest_calculated.getX(), dest_calculated.getY(), dest_calculated.getZ(), bot->GetOrientation());
         sLog.outDetail("%s: KNOCKBACK x: %f, y: %f, z: %f, time: %f, dist: %f, maxHeight: %f inPlace: %u, landTime: %u", bot->GetName(), dest_calculated.getX(), dest_calculated.getY(), dest_calculated.getZ(), timeToLand, distToLand, maxHeight, jumpInPlace, jumpTime);
+        return;
+    }
+    case SMSG_LEVELUP_INFO: // tell the event webhook, then let the levelup trigger pick talents and spells
+    {
+        // Player::GiveLevel sends this packet before it sets the new level, so read the level from the packet.
+        if (PlayerbotEventSink::IsEnabled() && packet.size() >= sizeof(uint32))
+        {
+            WorldPacket p(packet);
+            p.rpos(0);
+            uint32 level;
+            p >> level;
+            PlayerbotEventSink::PostLevelUp(this, level);
+        }
+
+        botOutgoingPacketHandlers.AddPacket(packet);
         return;
     }
 	default:

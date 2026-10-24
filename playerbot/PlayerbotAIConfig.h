@@ -404,6 +404,11 @@ public:
     bool llmGlobalContext;
     ParsedUrl llmEndPointUrl;
     std::set<uint32> llmBlockedReplyChannels;
+
+    std::string eventWebhookUrl;
+    uint32 eventWebhookTimeout = 2;
+    bool eventWebhookEnabled = false;
+    ParsedUrl eventWebhookEndPointUrl{};
     //LM END
 
     uint32 EatDrinkMinDistance = 5;
