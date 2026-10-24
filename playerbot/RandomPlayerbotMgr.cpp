@@ -3846,6 +3846,7 @@ void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
                 if (!bot->InBattleGround())
                 {
                     ai->SetMaster(player);
+                    ai->LeaveLfgQueueForRealMaster();
                     ai->ResetStrategies();
                     ai->TellPlayer(ai->GetMaster(), BOT_TEXT("hello"));
                 }

@@ -649,6 +649,9 @@ public:
     // True for a free bot (random, free alt or autonomous) that is in a real player's group with that player as its
     // master, while AiPlayerbot.FreeBotsFollowRealMaster is on. AiFactory then gives it the strategies of an alt bot.
     bool IsFreeBotFollowingRealMaster();
+    // Takes a free bot whose master is a real player out of the LFG queue it may have joined on its own. A queued
+    // bot never leaves by itself once it has a real master (LfgLeaveAction::isUseful). Does not depend on config.
+    void LeaveLfgQueueForRealMaster();
     //Checks if the bot is summoned as alt of a player
     bool IsAlt() { return HasRealPlayerMaster() && !sRandomPlayerbotMgr.IsRandomBot(bot); }
     //Get the group leader or the master of the bot.

@@ -2528,6 +2528,7 @@ void PlayerbotAI::DoNextAction(bool min)
         {
             master = newMaster;
             SetMaster(newMaster);
+            LeaveLfgQueueForRealMaster();
             ResetStrategies();
 
             if (sRandomPlayerbotMgr.IsFreeBot(bot))
@@ -8914,6 +8915,24 @@ bool PlayerbotAI::IsFreeBotFollowingRealMaster()
     // the free bot strategies then.
     Group* group = bot->GetGroup();
     return group && group->IsMember(master->GetObjectGuid());
+}
+
+void PlayerbotAI::LeaveLfgQueueForRealMaster()
+{
+    if (!HasActivePlayerMaster() || master == bot || IsRealPlayer() || !sRandomPlayerbotMgr.IsFreeBot(bot))
+        return;
+
+#ifdef MANGOSBOT_ZERO
+    // The queue runs on its own thread; leave through its messager, as the core's CMSG_MEETINGSTONE_LEAVE handler does.
+    if (sWorld.GetLFGQueue().IsPlayerInQueue(bot->GetObjectGuid()))
+    {
+        sLog.outDetail("Bot #%d <%s>: leaves the LFG queue for its master %s", bot->GetGUIDLow(), bot->GetName(), master->GetName());
+        sWorld.GetLFGQueue().GetMessager().AddMessage([playerGuid = bot->GetObjectGuid()](LFGQueue* queue)
+        {
+            queue->RemovePlayerFromQueue(playerGuid);
+        });
+    }
+#endif
 }
 
 bool PlayerbotAI::HasPlayerRelation()

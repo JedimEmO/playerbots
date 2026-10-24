@@ -42,6 +42,7 @@ namespace ai
             if (sRandomPlayerbotMgr.IsFreeBot(bot))
             {
                 ai->SetMaster(inviter);
+                ai->LeaveLfgQueueForRealMaster();
 
                 std::string defaultMovementStrategy = ai->GetDefaultMovementStrategy();
                 ai->ChangeStrategy("+" + defaultMovementStrategy, BotState::BOT_STATE_NON_COMBAT);

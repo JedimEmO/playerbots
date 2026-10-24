@@ -249,6 +249,7 @@ bool PlayerbotAIConfig::Initialize()
     randomBotJoinLfg = config.GetBoolDefault("AiPlayerbot.RandomBotJoinLfg", true);
     logRandomBotJoinLfg = config.GetBoolDefault("AiPlayerbot.LogRandomBotJoinLfg", false);
     freeBotsFollowRealMaster = config.GetBoolDefault("AiPlayerbot.FreeBotsFollowRealMaster", true);
+    realPlayersCommandFreeBots = config.GetBoolDefault("AiPlayerbot.RealPlayersCommandFreeBots", true);
     randomBotJoinBG = config.GetBoolDefault("AiPlayerbot.RandomBotJoinBG", true);
     randomBotAutoJoinBG = config.GetBoolDefault("AiPlayerbot.RandomBotAutoJoinBG", false);
     randomBotBracketCount = config.GetIntDefault("AiPlayerbot.RandomBotBracketCount", 3);

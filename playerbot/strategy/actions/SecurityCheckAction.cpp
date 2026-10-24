@@ -1,6 +1,7 @@
 
 #include "playerbot/playerbot.h"
 #include "playerbot/RandomPlayerbotMgr.h"
+#include "playerbot/PlayerbotAIConfig.h"
 #include "SecurityCheckAction.h"
 
 using namespace ai;
@@ -10,7 +11,8 @@ bool SecurityCheckAction::isUseful()
     // A random bot following a real master plays as an alt bot would (AiPlayerbot.FreeBotsFollowRealMaster), and alt
     // bots have no loot rule. Without this the rule adds 'passive' and 'stay' to both engines under free for all,
     // master loot or a threshold above uncommon unless the bot is in the player's guild, and the bot stops fighting.
-    if (ai->IsFreeBotFollowingRealMaster())
+    // AiPlayerbot.RealPlayersCommandFreeBots turns the rule off for every free bot.
+    if (sPlayerbotAIConfig.realPlayersCommandFreeBots || ai->IsFreeBotFollowingRealMaster())
         return false;
 
     return sRandomPlayerbotMgr.IsRandomBot(bot) && ai->GetMaster() && ai->GetMaster()->GetSession()->GetSecurity() < SEC_GAMEMASTER && !ai->GetMaster()->GetPlayerbotAI();

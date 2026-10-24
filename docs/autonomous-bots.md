@@ -123,6 +123,30 @@ under free for all, master loot or a threshold above uncommon
 when the bot is not in the player's guild, does not run;
 alt bots never had it.
 
+A bot that queued for a dungeon on its own leaves the LFG queue
+when a real player becomes its master,
+whatever the settings.
+It would otherwise stay queued, since the bot's own rule for leaving the queue
+waits while its master is a real player.
+
+## Commanding a free bot
+
+```
+AiPlayerbot.RealPlayersCommandFreeBots = 1
+```
+
+A real player who is a free bot's master, or in its group, may give it every command.
+The security checks that would otherwise answer with a refusal or silence are skipped:
+the level check, the gear score check,
+and the checks for a bot in a battleground queue or the LFG queue.
+The setting also turns the loot rule above off for every free bot,
+grouped with a real player or not.
+It is on by default; `0` restores the upstream security levels.
+
+Group members already passed these checks for chat commands,
+but not for guild invitations and petitions, which ignore the group;
+with the setting on, a real player in the bot's group passes those too.
+
 The strategies are rebuilt whenever the master changes:
 when the bot accepts the invitation,
 when it picks a real player in its group as master,

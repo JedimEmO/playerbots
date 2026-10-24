@@ -30,6 +30,18 @@ PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* rea
     // If a bot is a random bot
     else
     {
+        // A real player who is a free bot's master, or in its group, commands it fully (AiPlayerbot.RealPlayersCommandFreeBots).
+        // This runs before the level, gear score, battleground queue and LFG queue checks below, and also when
+        // ignoreGroup is set, so a bot that queued on its own or out-geared the player still takes their commands.
+        if (sPlayerbotAIConfig.realPlayersCommandFreeBots && sRandomPlayerbotMgr.IsFreeBot(bot) &&
+            (!from->GetPlayerbotAI() || from->GetPlayerbotAI()->IsRealPlayer()))
+        {
+            PlayerbotAI* botAi = bot->GetPlayerbotAI();
+            Group* botGroup = bot->GetGroup();
+            if ((botAi && botAi->GetMaster() == from) || (botGroup && botGroup->IsMember(from->GetObjectGuid())))
+                return PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL;
+        }
+
         Group* group = from->GetGroup();
         if (group && !ignoreGroup)
         {

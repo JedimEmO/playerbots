@@ -190,6 +190,9 @@ public:
     // AiPlayerbot.FreeBotsFollowRealMaster: a free bot in a real player's group with that player as its master gets the
     // strategies of an alt bot instead of the random bot ones. See PlayerbotAI::IsFreeBotFollowingRealMaster.
     bool freeBotsFollowRealMaster;
+    // AiPlayerbot.RealPlayersCommandFreeBots: a real player who is a free bot's master or in its group gets
+    // PLAYERBOT_SECURITY_ALLOW_ALL from PlayerbotSecurity::LevelFor, and the random bot loot rule is off.
+    bool realPlayersCommandFreeBots;
     bool randomBotJoinBG;
     bool randomBotAutoJoinBG;
     uint32 randomBotBracketCount;
