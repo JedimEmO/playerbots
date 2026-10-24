@@ -889,6 +889,7 @@ AiPlayerbot.FleeingEnabled = 1
 # A real player who is a free bot's master, or in its group, may give it every command,
 # whatever the level check, gear score check or the bot's battleground or LFG queue would say,
 # and the random bot loot rule (passive and stay under free for all, master loot or a high threshold) is off.
+# An autonomous bot takes every command from any real player, grouped or not.
 # 0 = upstream security levels.
 # Default: 1
 # AiPlayerbot.RealPlayersCommandFreeBots = 1

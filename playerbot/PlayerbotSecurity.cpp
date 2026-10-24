@@ -36,6 +36,11 @@ PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* rea
         if (sPlayerbotAIConfig.realPlayersCommandFreeBots && sRandomPlayerbotMgr.IsFreeBot(bot) &&
             (!from->GetPlayerbotAI() || from->GetPlayerbotAI()->IsRealPlayer()))
         {
+            // An autonomous bot plays for the server's real players, so any of them commands it, grouped or not: a
+            // whisper is then a command or chat, never "Invite me to your group first". Random bots still need the group.
+            if (sRandomPlayerbotMgr.IsAutonomousBot(bot) && from->GetSession()->GetSecurity() >= SEC_PLAYER)
+                return PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL;
+
             PlayerbotAI* botAi = bot->GetPlayerbotAI();
             Group* botGroup = bot->GetGroup();
             if ((botAi && botAi->GetMaster() == from) || (botGroup && botGroup->IsMember(from->GetObjectGuid())))

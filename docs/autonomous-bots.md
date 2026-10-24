@@ -68,7 +68,10 @@ for a permanent change, edit the config lists.
 
 ## Grouping with a player
 
-An autonomous bot accepts a group invitation from a real player on the same terms as a random bot:
+An autonomous bot accepts a group invitation from any real player
+while `AiPlayerbot.RealPlayersCommandFreeBots` is on, the default;
+the core still keeps the factions apart unless two-side groups are allowed.
+With the setting off it accepts on the same terms as a random bot:
 the player must be of its faction, or two-side groups must be allowed,
 and not too far below its level or gear score.
 The player who invites it becomes its master,
@@ -129,24 +132,6 @@ whatever the settings.
 It would otherwise stay queued, since the bot's own rule for leaving the queue
 waits while its master is a real player.
 
-## Commanding a free bot
-
-```
-AiPlayerbot.RealPlayersCommandFreeBots = 1
-```
-
-A real player who is a free bot's master, or in its group, may give it every command.
-The security checks that would otherwise answer with a refusal or silence are skipped:
-the level check, the gear score check,
-and the checks for a bot in a battleground queue or the LFG queue.
-The setting also turns the loot rule above off for every free bot,
-grouped with a real player or not.
-It is on by default; `0` restores the upstream security levels.
-
-Group members already passed these checks for chat commands,
-but not for guild invitations and petitions, which ignore the group;
-with the setting on, a real player in the bot's group passes those too.
-
 The strategies are rebuilt whenever the master changes:
 when the bot accepts the invitation,
 when it picks a real player in its group as master,
@@ -158,6 +143,30 @@ when another bot leads what is left of the group, that bot becomes its master.
 
 With the setting at `0` a free bot keeps the random bot strategies while grouped with a real player.
 In a battleground the battleground strategies apply either way.
+
+## Commanding a free bot
+
+```
+AiPlayerbot.RealPlayersCommandFreeBots = 1
+```
+
+A real player who is a free bot's master, or in its group, may give it every command.
+An autonomous bot goes further and takes every command from any real player, grouped or not,
+because it plays for the server's players.
+A whisper to it is then a command or chat for the LLM hook,
+never `Invite me to your group first`.
+Random bots and free alt bots still need the player in their group.
+
+The security checks that would otherwise answer with a refusal or silence are skipped:
+the level check, the gear score check,
+and the checks for a bot in a battleground queue or the LFG queue.
+The setting also turns the loot rule above off for every free bot,
+grouped with a real player or not.
+It is on by default; `0` restores the upstream security levels.
+
+Group members already passed these checks for chat commands,
+but not for guild invitations and petitions, which ignore the group;
+with the setting on, a real player in the bot's group passes those too.
 
 ## What never happens to them
 
@@ -196,6 +205,7 @@ answer `Not allowed on autonomous bots`.
 | Instance reset limit on entering a dungeon | Checked | Not checked |
 | Trades | Sells, with discounts | Trades as a player's bot does |
 | Hired by a player | Possible | Never |
+| Full commands from a real player | Master or group member | Any real player, grouped or not |
 | WTS adverts and activity suggestions in chat | Yes | No |
 | `level_up` event to the webhook | Never | When its master is a real player |
 
