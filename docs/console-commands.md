@@ -7,7 +7,7 @@ which SOAP returns as the command's result.
 
 They also work as `.bot <subcommand>` in game.
 There the speaker commands use the spoofed or current character as the sender,
-and `deliver` and `profession` still need a game master account.
+and `deliver`, `profession` and `teleport` still need a game master account.
 
 ## say, yell and emote
 
@@ -175,3 +175,51 @@ Random bots may change their professions again when the bot manager randomizes o
 | `You may not change professions` | The account is below game master. SOAP runs as the console, which passes. |
 
 The character is checked first, then the skill, then the value.
+
+## teleport
+
+```
+.rndbot teleport <bot> <player>
+```
+
+Teleports an online bot next to an online real player, on the same map or another one.
+Both names are character names; case does not matter.
+
+```
+.rndbot teleport Dunpriest Thrain
+```
+
+The bot lands two yards to the player's right, facing them.
+A bot on a flight path leaves it, and its AI is reset,
+so it does not walk straight back to what it was doing.
+A dead bot is teleported as it is; its corpse stays where it died.
+
+The teleport is made when the command runs, on the world thread while the maps wait,
+as the core's own `.namego` and `.goname` do.
+So `Teleported` means the core accepted it.
+On another map the bot arrives once the map change completes, a moment later.
+
+The core decides the instance from the bot's own bind or its group's,
+and makes a new one when there is neither.
+So a player in a dungeon or raid only gets the bot
+when it is in their group and that bind is the player's instance;
+the usual case is a group that entered together.
+Otherwise the bot would arrive alone in another copy of the dungeon, and the command refuses.
+It refuses a player in a battleground,
+a player on a ship or zeppelin, because the spot beside them is in the water,
+and either character in the middle of a teleport.
+
+With one name, `.rndbot teleport <name>` keeps its old meaning:
+random bots whose names start with `<name>` go to a grinding spot for their level.
+Two names always mean this command.
+
+| Reply | When |
+|---|---|
+| `Teleported <bot> to <player>` | The core accepted the teleport. |
+| `No bot found` | No online bot has that name; a real player's character is not a bot. |
+| `No player found` | No online real player has that name. |
+| `Could not teleport <bot> to <player>` | One of the refusals above, or the core refused the teleport. |
+| `Usage: .rndbot teleport <bot> <player>` | Not exactly two names. |
+| `You may not teleport bots` | The account is below game master. SOAP runs as the console, which passes. |
+
+The bot is checked before the player.

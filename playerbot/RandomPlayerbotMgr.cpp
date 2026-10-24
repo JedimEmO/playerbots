@@ -3521,9 +3521,20 @@ bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* handler, cha
     playerHandlers["change_strategy"] = &RandomPlayerbotMgr::HandleChangeStrategy;
     playerHandlers["remove"] = &RandomPlayerbotMgr::HandleRemove;
 
+    // ".rndbot teleport <bot> <player>" names two characters and goes to PlayerbotHolder::HandleTeleport below. Only
+    // ".rndbot teleport <name>" is the random teleport for level, which would otherwise take the first word as a name
+    // prefix and send every random bot it matches to a grinding spot.
+    std::vector<std::string> cmdWords;
+    split(cmdWords, cmd, " ");
+    cmdWords.erase(std::remove(cmdWords.begin(), cmdWords.end(), std::string()), cmdWords.end());
+    bool isTeleportToPlayer = cmdWords.size() == 3 && cmdWords[0] == "teleport";
+
     for (auto& [prefix, playerHandler] : playerHandlers)
     {
         if (cmd.find(prefix) != 0)
+            continue;
+
+        if (prefix == "teleport" && isTeleportToPlayer)
             continue;
 
         size_t prefixLen = prefix.size();

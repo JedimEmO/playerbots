@@ -94,6 +94,7 @@ private:
     std::list<std::string> HandleNearbyChat(Player* master, const std::string& param, uint32 chatType, const std::string& kind);
     std::list<std::string> HandleDeliver(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleProfession(Player* master, const std::string param, AccountTypes security);
+    std::list<std::string> HandleTeleport(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleCreate(Player* master, const std::string param, AccountTypes security);
 #ifdef GenerateBotTests
     std::list<std::string> HandleRunTest(Player* master, const std::string param, AccountTypes security);

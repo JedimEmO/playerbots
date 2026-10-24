@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 #ifdef GenerateBotTests
 #include "strategy/tests/TestAction.h"
@@ -48,6 +49,7 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["emote"] = &PlayerbotHolder::HandleEmote;
     m_holderHandlers["deliver"] = &PlayerbotHolder::HandleDeliver;
     m_holderHandlers["profession"] = &PlayerbotHolder::HandleProfession;
+    m_holderHandlers["teleport"] = &PlayerbotHolder::HandleTeleport;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -2650,6 +2652,96 @@ std::list<std::string> PlayerbotHolder::HandleProfession(Player* master, const s
     return {"Set " + std::string(prof->name) + " to " + std::to_string(value) + " for " + name};
 }
 
+// .rndbot teleport <bot> <player>
+// Runs on the world thread while the map threads are parked, as the core's own .namego (summon) and .goname (appear)
+// GM commands do: both call Player::TeleportTo on another player straight from the chat handler. So the teleport is
+// made here and the reply says whether the core took it, rather than queuing it on the bot's map thread.
+std::list<std::string> PlayerbotHolder::HandleTeleport(Player* master, const std::string param, AccountTypes security)
+{
+    const std::string usage = "Usage: .rndbot teleport <bot> <player>";
+
+    // Moving another character is a game master's power, as .namego is.
+    if (security < SEC_GAMEMASTER)
+        return {"You may not teleport bots"};
+
+    std::vector<std::string> words;
+    split(words, param, " ");
+    words.erase(std::remove(words.begin(), words.end(), std::string()), words.end());
+
+    if (words.size() != 2)
+        return {usage};
+
+    std::string botName = words[0];
+    std::string playerName = words[1];
+
+    Player* bot = nullptr;
+    if (normalizePlayerName(botName))
+        bot = sObjectAccessor.FindPlayerByName(botName.c_str());
+
+    if (!bot || !bot->IsInWorld() || bot->isRealPlayer() || !bot->GetPlayerbotAI())
+        return {"No bot found"};
+
+    Player* player = nullptr;
+    if (normalizePlayerName(playerName))
+        player = sObjectAccessor.FindPlayerByName(playerName.c_str());
+
+    if (!player || !player->IsInWorld() || !player->isRealPlayer())
+        return {"No player found"};
+
+    const std::string refused = "Could not teleport " + std::string(bot->GetName()) + " to " + std::string(player->GetName());
+
+    // Mid-teleport the position is about to change, as .namego and .goname refuse too.
+    if (bot->IsBeingTeleported() || player->IsBeingTeleported())
+        return {refused};
+
+    // A spot beside a player on a ship is not on the ship, so the bot would land in the water.
+    if (player->GetTransport())
+        return {refused};
+
+    Map* map = player->GetMap();
+    if (!map || map->IsBattleGround())
+        return {refused};
+
+    uint32 mapId = player->GetMapId();
+
+    // Player::TeleportTo picks the instance from the bot's own or its group's bind, and with neither it makes a new
+    // one. So the bot goes into a dungeon only when it is in the player's group and that bind is the player's
+    // instance; otherwise it would arrive alone in another copy of the dungeon.
+    if (map->Instanceable())
+    {
+        if (!bot->GetGroup() || bot->GetGroup() != player->GetGroup())
+            return {refused};
+
+        DungeonPersistentState* state = bot->GetBoundInstanceSaveForSelfOrGroup(mapId);
+        if (!state || state->GetInstanceId() != player->GetInstanceId())
+            return {refused};
+    }
+
+    // Two yards to the player's right, facing them, as .namego places the summoned with GetClosePoint.
+    float x, y, z;
+    player->GetClosePoint(x, y, z, bot->GetObjectBoundingRadius(), 2.0f, -M_PI_F / 2.0f);
+    float orientation = std::atan2(player->GetPositionY() - y, player->GetPositionX() - x);
+    if (orientation < 0.0f)
+        orientation += 2.0f * M_PI_F;
+
+    // As RandomPlayerbotMgr::RandomTeleport, which also teleports bots from the world thread.
+    if (bot->IsTaxiFlying())
+    {
+        bot->TaxiFlightInterrupt();
+        bot->GetMotionMaster()->MovementExpired();
+    }
+
+    bot->GetMotionMaster()->Clear();
+
+    if (!bot->TeleportTo(mapId, x, y, z, orientation))
+        return {refused};
+
+    bot->GetPlayerbotAI()->Reset(true);
+
+    sLog.outString("Teleport: %s to %s on map %u", bot->GetName(), player->GetName(), mapId);
+    return {"Teleported " + std::string(bot->GetName()) + " to " + std::string(player->GetName())};
+}
+
 std::string PlayerbotHolder::HandleBotAddLogin(Player* bot, Player* master, const std::string param)
 {
     if (bot)
@@ -3729,6 +3821,8 @@ std::unordered_map<std::string, std::string> PlayerbotHolder::GetCommandTexts()
         {"emote", "Do a text emote as the bot.\nUsage: .(rnd)bot emote <text> (while spoofing as sender)\n .(rnd)bot emote <botname> <text>\nExample: .rndbot emote Dunpriest raises a mug. (shows as: Dunpriest raises a mug.)"},
 
         {"deliver", "Send a courier with items to an online player. It says the line, bows and hands the items over; what does not fit in the bags is mailed. Game masters and the console only.\nUsage: .rndbot deliver <player> <item>:<count>[,<item>:<count>...] <line>\nExample: .rndbot deliver Thrain 4536:5,159:5 Compliments of the house!"},
+
+        {"teleport", "Teleport an online bot next to an online real player, on any map. Game masters and the console only.\nUsage: .rndbot teleport <bot> <player>\nExample: .rndbot teleport Dunpriest Thrain\nWith one name, .rndbot teleport still sends random bots whose names start with it to a grinding spot."},
 
         {"profession", "Set, unlearn or list a character's professions. set learns the ranks the value needs; the change is made on the character's next update. Game masters and the console only.\nUsage: .rndbot profession <character> list\n .rndbot profession <character> set <skill> <value>\n .rndbot profession <character> unlearn <skill>\nSkills: herbalism, mining, skinning, alchemy, blacksmithing, leatherworking, tailoring, engineering, enchanting, cooking, firstaid, fishing, or a skill line id. Values 1 to 300.\nExample: .rndbot profession Dunpriest set herbalism 150"},
         
