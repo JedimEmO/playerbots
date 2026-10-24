@@ -209,9 +209,10 @@ It refuses a player in a battleground,
 a player on a ship or zeppelin, because the spot beside them is in the water,
 and either character in the middle of a teleport.
 
-With one name, `.rndbot teleport <name>` keeps its old meaning:
+With exactly one name, `.rndbot teleport <name>` keeps its old meaning:
 random bots whose names start with `<name>` go to a grinding spot for their level.
-Two names always mean this command.
+Two or more names always come to this command, so more than two answer the usage
+and never reach that prefix match.
 
 | Reply | When |
 |---|---|
