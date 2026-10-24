@@ -415,6 +415,10 @@ public:
     uint32 levelTokenFirstEntry = 60001;
     std::vector<uint32> levelTokenCaps;
 
+    // Courier deliveries (.rndbot deliver): the creature entry summoned as the courier, and how long it stays.
+    uint32 courierEntry = 60200;
+    uint32 courierLingerSecs = 30;
+
     uint32 EatDrinkMinDistance = 5;
     uint32 EatDrinkMaxDistance = 1000;
 

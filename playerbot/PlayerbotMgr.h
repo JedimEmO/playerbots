@@ -7,15 +7,22 @@
 #include "Database/DatabaseEnv.h"
 #include "Globals/SharedDefines.h"
 
+#include <mutex>
+#include <utility>
+#include <vector>
+
 
 class WorldPacket;
 class Player;
 class Unit;
 class Object;
 class Item;
+class Creature;
 
 typedef std::map<uint32, Player*> PlayerBotMap;
 typedef std::map<std::string, std::set<std::string> > PlayerBotErrorMap;
+// Item entry and count pairs of one courier delivery.
+typedef std::vector<std::pair<uint32, uint32> > DeliveryItems;
 
 class PlayerbotHolder : public PlayerbotAIBase
 {
@@ -85,6 +92,7 @@ private:
     std::list<std::string> HandleYell(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleEmote(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleNearbyChat(Player* master, const std::string& param, uint32 chatType, const std::string& kind);
+    std::list<std::string> HandleDeliver(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleCreate(Player* master, const std::string param, AccountTypes security);
 #ifdef GenerateBotTests
     std::list<std::string> HandleRunTest(Player* master, const std::string param, AccountTypes security);
@@ -163,6 +171,9 @@ public:
 
     Player* GetMaster() const { return master; };
 
+    // Courier deliveries (.rndbot deliver). Called on the world thread; the master's next AI tick summons the courier.
+    void QueueDelivery(const DeliveryItems& items, const std::string& line);
+
     void SaveToDB();
 
 protected:
@@ -176,11 +187,29 @@ private:
     void UsePendingLevelToken();
     bool CanUseLevelToken(uint32 cap);
 
+    // Courier deliveries. QueueDelivery adds to queuedDeliveries; UpdateDeliveries, on the map thread, moves them to
+    // activeDeliveries, summons each courier, and hands the items over once the courier has walked up.
+    struct PendingDelivery
+    {
+        DeliveryItems items;
+        std::string line;
+        ObjectGuid courier;
+        uint32 summonedAtMs = 0;
+        bool summoned = false;
+    };
+
+    void UpdateDeliveries();
+    void SummonCourier(PendingDelivery& delivery);
+    void CompleteDelivery(PendingDelivery& delivery, Creature* courier);
+
     Player* const master;
     PlayerBotErrorMap errors;
     time_t lastErrorTell;
     ObjectGuid pendingLevelToken;
     time_t pendingLevelTokenSince = 0;
+    std::mutex deliveryMutex;
+    std::vector<PendingDelivery> queuedDeliveries;   // guarded by deliveryMutex
+    std::vector<PendingDelivery> activeDeliveries;   // map thread only
 };
 
 #endif

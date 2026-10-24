@@ -15,6 +15,9 @@
 #include "strategy/actions/InviteToGroupAction.h"
 #include "AiFactory.h"
 #include "Guilds/GuildMgr.h"
+#include "AI/BaseAI/UnitAI.h"
+#include "Entities/Creature.h"
+#include "Mails/Mail.h"
 
 #ifdef GenerateBotTests
 #include "strategy/tests/TestAction.h"
@@ -39,6 +42,7 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["say"] = &PlayerbotHolder::HandleSay;
     m_holderHandlers["yell"] = &PlayerbotHolder::HandleYell;
     m_holderHandlers["emote"] = &PlayerbotHolder::HandleEmote;
+    m_holderHandlers["deliver"] = &PlayerbotHolder::HandleDeliver;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -958,6 +962,7 @@ void PlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     SetAIInternalUpdateDelay(sPlayerbotAIConfig.reactDelay);
     CheckTellErrors(elapsed);
     UsePendingLevelToken();
+    UpdateDeliveries();
 }
 
 namespace
@@ -1085,6 +1090,297 @@ void PlayerbotMgr::UsePendingLevelToken()
 
     ChatHandler(master->GetSession()).PSendSysMessage("The token takes you to level %u.", level);
     sLog.outString("Level token: %s used token %u and reached level %u", master->GetName(), entry, level);
+}
+
+namespace
+{
+    // The most item stacks one delivery may carry, so a typo in a count cannot fill a mailbox. A backpack holds 16.
+    constexpr uint32 MaxDeliveryStacks = 16;
+
+    // Where the courier appears, how close it walks, and when it hands over the items.
+    constexpr float CourierMinSpawnDistance = 6.0f;
+    constexpr float CourierMaxSpawnDistance = 8.0f;
+    constexpr float CourierStopDistance = 2.0f;
+    constexpr float CourierHandOverDistance = 3.0f;
+    constexpr uint32 CourierWalkTimeoutMs = 4000;
+    constexpr uint32 CourierMovePointId = 1;
+
+    // Friendly to everyone, so no guard or monster attacks the courier.
+    constexpr uint32 CourierFaction = 35;
+
+    const char* const CourierMailSubject = "A delivery from the inn";
+    const char* const CourierMailedLine = "Your bags are full; I left it with the postmaster.";
+
+    // A whole number of up to nine digits, so it fits a uint32.
+    bool ParseUint(const std::string& text, uint32& value)
+    {
+        if (text.empty() || text.size() > 9)
+            return false;
+
+        for (char c : text)
+            if (c < '0' || c > '9')
+                return false;
+
+        value = uint32(std::stoul(text));
+        return true;
+    }
+
+    // Splits "<item>:<count>[,<item>:<count>...]" into pairs. A pair without ":<count>" counts one.
+    // On a bad pair, error gets the console reply and the result is false.
+    bool ParseDeliveryItems(const std::string& list, DeliveryItems& items, std::string& error)
+    {
+        uint32 stacks = 0;
+        size_t start = 0;
+
+        while (true)
+        {
+            size_t comma = list.find(',', start);
+            std::string pair = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+
+            size_t colon = pair.find(':');
+            std::string entryText = pair.substr(0, colon);
+            std::string countText = colon == std::string::npos ? "1" : pair.substr(colon + 1);
+
+            uint32 entry = 0;
+            ItemPrototype const* proto = ParseUint(entryText, entry) ? ObjectMgr::GetItemPrototype(entry) : nullptr;
+            if (!proto)
+            {
+                error = "Unknown item " + entryText;
+                return false;
+            }
+
+            uint32 count = 0;
+            if (!ParseUint(countText, count) || !count)
+            {
+                error = "Bad count for item " + entryText;
+                return false;
+            }
+
+            uint32 maxStack = std::max(proto->GetMaxStackSize(), 1u);
+            stacks += (count + maxStack - 1) / maxStack;
+            if (stacks > MaxDeliveryStacks)
+            {
+                error = "Too many items: at most " + std::to_string(MaxDeliveryStacks) + " stacks";
+                return false;
+            }
+
+            items.push_back({entry, count});
+
+            if (comma == std::string::npos)
+                return true;
+
+            start = comma + 1;
+        }
+    }
+
+    // How many of count the player's bags take now, worked out as ChatHandler::HandleAddItemCommand does.
+    // dest gets the bag slots for that many.
+    uint32 StorableCount(Player* player, uint32 entry, uint32 count, ItemPosCountVec& dest)
+    {
+        uint32 noSpace = 0;
+        InventoryResult msg = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry, count, &noSpace);
+        if (msg == EQUIP_ERR_OK)
+            return count;
+
+        // Only a partial fit leaves slots in dest and the rest in noSpace. Any other refusal takes nothing.
+        if (dest.empty() || !noSpace || noSpace >= count)
+            return 0;
+
+        return count - noSpace;
+    }
+}
+
+// HandleDeliver calls this on the world thread, in World::ProcessCliCommands, which runs after the map updates have
+// finished. UpdateDeliveries takes the delivery on the master's next AI tick on the map thread.
+void PlayerbotMgr::QueueDelivery(const DeliveryItems& items, const std::string& line)
+{
+    PendingDelivery delivery;
+    delivery.items = items;
+    delivery.line = line;
+
+    std::lock_guard<std::mutex> guard(deliveryMutex);
+    queuedDeliveries.push_back(std::move(delivery));
+}
+
+// Runs from UpdateAIInternal, in the master's Player::UpdateAI on the map thread. Summoning a creature and adding items
+// both belong to the master's map, so they happen here and not in the console handler.
+// A delivery takes two ticks or more: the first summons the courier and sends it walking, a later one hands over the
+// items once the courier is within CourierHandOverDistance or CourierWalkTimeoutMs has passed.
+void PlayerbotMgr::UpdateDeliveries()
+{
+    {
+        std::lock_guard<std::mutex> guard(deliveryMutex);
+        for (PendingDelivery& delivery : queuedDeliveries)
+            activeDeliveries.push_back(std::move(delivery));
+        queuedDeliveries.clear();
+    }
+
+    if (activeDeliveries.empty() || !master)
+        return;
+
+    // During a teleport the master is between maps; wait until they arrive.
+    if (!master->IsInWorld() || master->IsBeingTeleported())
+        return;
+
+    uint32 now = WorldTimer::getMSTime();
+
+    for (auto it = activeDeliveries.begin(); it != activeDeliveries.end();)
+    {
+        PendingDelivery& delivery = *it;
+
+        if (!delivery.summoned)
+        {
+            SummonCourier(delivery);
+
+            // Without a courier the items are handed over at once.
+            if (delivery.courier.IsEmpty())
+            {
+                CompleteDelivery(delivery, nullptr);
+                it = activeDeliveries.erase(it);
+                continue;
+            }
+
+            ++it;
+            continue;
+        }
+
+        // The courier is gone when the master changed maps or it despawned; the items are handed over anyway.
+        Creature* courier = master->GetMap()->GetCreature(delivery.courier);
+        if (courier && !courier->IsAlive())
+            courier = nullptr;
+
+        if (courier)
+        {
+            bool arrived = courier->GetDistance(master, false, DIST_CALC_NONE) <= CourierHandOverDistance;
+            if (!arrived && WorldTimer::getMSTimeDiff(delivery.summonedAtMs, now) < CourierWalkTimeoutMs)
+            {
+                ++it;
+                continue;
+            }
+        }
+
+        CompleteDelivery(delivery, courier);
+        it = activeDeliveries.erase(it);
+    }
+}
+
+// Summons the courier a few yards in front of the master, facing them, and sends it towards them.
+// Leaves delivery.courier empty when the courier cannot be summoned.
+void PlayerbotMgr::SummonCourier(PendingDelivery& delivery)
+{
+    delivery.summoned = true;
+    delivery.summonedAtMs = WorldTimer::getMSTime();
+
+    uint32 entry = sPlayerbotAIConfig.courierEntry;
+    if (!entry || !ObjectMgr::GetCreatureTemplate(entry))
+    {
+        sLog.outError("Courier: no creature_template %u (AiPlayerbot.CourierEntry), delivering to %s without a courier", entry, master->GetName());
+        return;
+    }
+
+    // In front of the master, so they see the courier come.
+    float angle = master->GetOrientation() + frand(-M_PI_F / 3, M_PI_F / 3);
+    float distance = frand(CourierMinSpawnDistance, CourierMaxSpawnDistance);
+    float x, y, z;
+    master->GetNearPoint(master, x, y, z, 0.0f, distance, angle);
+
+    // GetAngle gives the direction from the master to the spot; the courier faces the other way, towards the master.
+    float facing = master->GetAngle(x, y) + M_PI_F;
+    if (facing >= 2 * M_PI_F)
+        facing -= 2 * M_PI_F;
+
+    uint32 lingerMs = std::max(sPlayerbotAIConfig.courierLingerSecs, 5u) * IN_MILLISECONDS;
+    Creature* courier = master->SummonCreature(entry, x, y, z, facing, TEMPSPAWN_TIMED_DESPAWN, lingerMs, false, true);
+    if (!courier)
+    {
+        sLog.outError("Courier: could not summon creature %u near %s, delivering without a courier", entry, master->GetName());
+        return;
+    }
+
+    // Nobody may attack the courier, and it attacks nobody.
+    courier->setFaction(CourierFaction);
+    courier->SetImmuneToPlayer(true);
+    courier->SetImmuneToNPC(true);
+    if (UnitAI* ai = courier->AI())
+        ai->SetReactState(REACT_PASSIVE);
+
+    // Stop CourierStopDistance short of the master, on the side the courier comes from.
+    float approach = master->GetAngle(courier);
+    float targetX = master->GetPositionX() + CourierStopDistance * cos(approach);
+    float targetY = master->GetPositionY() + CourierStopDistance * sin(approach);
+    courier->GetMotionMaster()->MovePoint(CourierMovePointId, targetX, targetY, master->GetPositionZ());
+
+    delivery.courier = courier->GetObjectGuid();
+}
+
+// The courier, when there is one, says the line and bows. The items go into the master's bags, and what does not fit
+// is mailed, one stack per letter because the core allows one item per mail (MAX_MAIL_ITEMS).
+void PlayerbotMgr::CompleteDelivery(PendingDelivery& delivery, Creature* courier)
+{
+    if (courier)
+    {
+        // Stop where it is, in case it was still walking when CourierWalkTimeoutMs ran out.
+        courier->GetMotionMaster()->Clear();
+        courier->StopMoving();
+        courier->SetFacingToObject(master);
+
+        if (!delivery.line.empty())
+            courier->MonsterSay(delivery.line.c_str(), LANG_UNIVERSAL, master);
+
+        courier->HandleEmoteCommand(EMOTE_ONESHOT_BOW);
+    }
+
+    uint32 delivered = 0;
+    uint32 mailed = 0;
+
+    for (const auto& [entry, count] : delivery.items)
+    {
+        ItemPrototype const* proto = ObjectMgr::GetItemPrototype(entry);
+        if (!proto)
+            continue;
+
+        ItemPosCountVec dest;
+        uint32 stored = StorableCount(master, entry, count, dest);
+        if (stored)
+        {
+            if (Item* item = master->StoreNewItem(dest, entry, true, Item::GenerateItemRandomPropertyId(entry)))
+            {
+                master->SendNewItem(item, stored, true, false);
+                delivered += stored;
+            }
+            else
+                stored = 0;
+        }
+
+        uint32 maxStack = std::max(proto->GetMaxStackSize(), 1u);
+        for (uint32 left = count - stored; left;)
+        {
+            uint32 stack = std::min(left, maxStack);
+            Item* item = Item::CreateItem(entry, stack, master);
+            if (!item)
+            {
+                sLog.outError("Courier: could not create item %u for %s", entry, master->GetName());
+                break;
+            }
+
+            // Saved before mailing, as BattleGround::SendRewardMarkByMail does, so the item exists when the mail is read.
+            item->SaveToDB();
+            MailDraft(CourierMailSubject).AddItem(item).SendMailTo(MailReceiver(master), MailSender(MAIL_CREATURE, sPlayerbotAIConfig.courierEntry));
+
+            mailed += stack;
+            left -= stack;
+        }
+    }
+
+    if (mailed)
+    {
+        if (courier)
+            courier->MonsterSay(CourierMailedLine, LANG_UNIVERSAL, master);
+        else
+            ChatHandler(master->GetSession()).SendSysMessage("Your bags are full; the delivery is in your mailbox.");
+    }
+
+    sLog.outString("Courier: %s received %u items in their bags and %u by mail", master->GetName(), delivered, mailed);
 }
 
 void PlayerbotMgr::HandleCommand(uint32 type, const std::string& text, uint32 lang)
@@ -1999,6 +2295,71 @@ std::list<std::string> PlayerbotHolder::HandleNearbyChat(Player* master, const s
     std::unique_ptr<WorldPacket> packetPtr(new WorldPacket(packet_template));
     master->GetSession()->QueuePacket(std::move(packetPtr));
     return {"Sent " + kind + " \"" + message + "\" as " + master->GetName()};
+}
+
+// .rndbot deliver <player> <item>:<count>[,<item>:<count>...] <line>
+// Runs on the world thread. It checks the player and the items, works out from the player's bags now whether anything
+// will have to be mailed, and queues the delivery on the player's PlayerbotMgr, whose next AI tick on the map thread
+// summons the courier. The reply is given before the courier arrives, so "Bags full, mailed <n>" is a forecast: the
+// bags are checked again at the hand-over and whatever does not fit then is mailed.
+std::list<std::string> PlayerbotHolder::HandleDeliver(Player* master, const std::string param, AccountTypes security)
+{
+    // The items are created from nothing, so only the console and game masters may send them.
+    if (security < SEC_GAMEMASTER)
+        return {"You may not send deliveries"};
+
+    // Takes the next space-separated word off the front of rest.
+    std::string rest = param;
+    auto takeWord = [&rest]()
+    {
+        size_t start = rest.find_first_not_of(' ');
+        if (start == std::string::npos)
+        {
+            rest.clear();
+            return std::string();
+        }
+
+        size_t end = rest.find(' ', start);
+        std::string word = rest.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        rest = end == std::string::npos ? "" : rest.substr(end + 1);
+        return word;
+    };
+
+    std::string playerName = takeWord();
+    std::string itemList = takeWord();
+    size_t lineStart = rest.find_first_not_of(' ');
+    std::string line = lineStart == std::string::npos ? "" : rest.substr(lineStart);
+
+    if (playerName.empty() || itemList.empty())
+        return {"Usage: .rndbot deliver <player> <item>:<count>[,<item>:<count>...] <line>"};
+
+    Player* player = nullptr;
+    if (normalizePlayerName(playerName))
+        player = sObjectAccessor.FindPlayerByName(playerName.c_str());
+
+    if (!player || !player->IsInWorld() || !player->isRealPlayer() || !player->GetPlayerbotMgr())
+        return {"No player found"};
+
+    DeliveryItems items;
+    std::string error;
+    if (!ParseDeliveryItems(itemList, items, error))
+        return {error};
+
+    uint32 total = 0;
+    uint32 mailed = 0;
+    for (const auto& [entry, count] : items)
+    {
+        ItemPosCountVec dest;
+        total += count;
+        mailed += count - StorableCount(player, entry, count, dest);
+    }
+
+    player->GetPlayerbotMgr()->QueueDelivery(items, line);
+
+    if (mailed)
+        return {"Bags full, mailed " + std::to_string(mailed)};
+
+    return {"Delivery to " + std::string(player->GetName()) + ": " + std::to_string(total) + " items"};
 }
 
 std::string PlayerbotHolder::HandleBotAddLogin(Player* bot, Player* master, const std::string param)
@@ -3078,6 +3439,8 @@ std::unordered_map<std::string, std::string> PlayerbotHolder::GetCommandTexts()
         {"yell", "Yell a message as the bot.\nUsage: .(rnd)bot yell <message> (while spoofing as sender)\n .(rnd)bot yell <botname> <message>\nExample: .rndbot yell Dunpriest For the Alliance!"},
 
         {"emote", "Do a text emote as the bot.\nUsage: .(rnd)bot emote <text> (while spoofing as sender)\n .(rnd)bot emote <botname> <text>\nExample: .rndbot emote Dunpriest raises a mug. (shows as: Dunpriest raises a mug.)"},
+
+        {"deliver", "Send a courier with items to an online player. It says the line, bows and hands the items over; what does not fit in the bags is mailed. Game masters and the console only.\nUsage: .rndbot deliver <player> <item>:<count>[,<item>:<count>...] <line>\nExample: .rndbot deliver Thrain 4536:5,159:5 Compliments of the house!"},
         
         {"do", "Execute a bot action (sync, immediate response).\nUsage: .(rnd)bot do <bot> <action>\nExample: .(rnd)bot do <bot> stats, where, quests, who"},
         

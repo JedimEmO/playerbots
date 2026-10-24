@@ -1127,6 +1127,14 @@ AiPlayerbot.LLMDefaultPromptsFile = llm_character_card.txt
 # AiPlayerbot.LevelTokenFirstEntry = 60001
 # AiPlayerbot.LevelTokenCaps = 25,40,55,60
 
+# Courier deliveries. ".rndbot deliver <player> <item>:<count>[,...] <line>" summons a courier creature near an online
+# player. It walks up, says the line and hands over the items, and mails whatever does not fit in the bags.
+# CourierEntry is the creature_template entry of the courier; server/sql/040-courier.sql in wow-playground adds 60200.
+# CourierLingerSecs is how long the courier stays in the world after it is summoned.
+# See docs/console-commands.md.
+# AiPlayerbot.CourierEntry = 60200
+# AiPlayerbot.CourierLingerSecs = 30
+
 # Enable the alternative asynchronous login system.
 # AiPlayerbot.AsyncBotLogin = 0
 

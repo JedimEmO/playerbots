@@ -770,6 +770,10 @@ bool PlayerbotAIConfig::Initialize()
     levelTokenFirstEntry = config.GetIntDefault("AiPlayerbot.LevelTokenFirstEntry", 60001);
     LoadList<std::vector<uint32> >(config.GetStringDefault("AiPlayerbot.LevelTokenCaps", "25,40,55,60"), levelTokenCaps);
 
+    // Courier deliveries (PlayerbotMgr, .rndbot deliver).
+    courierEntry = config.GetIntDefault("AiPlayerbot.CourierEntry", 60200);
+    courierLingerSecs = config.GetIntDefault("AiPlayerbot.CourierLingerSecs", 30);
+
     // Gear progression system
     gearProgressionSystemEnabled = config.GetBoolDefault("AiPlayerbot.GearProgressionSystem.Enable", false);
 
