@@ -24,6 +24,11 @@ EntryGuidps EntryGuidpsValue::Calculate()
 
     for (auto& goDataPair : WorldPosition().getGameObjectsNear())
     {
+        // wow-playground: a negative respawn time means the object starts despawned and only a script shows it, for
+        // a moment (the Unguarded Thunder Ale Barrel of Bitter Rivals). A bot that travels to one waits there forever.
+        if (goDataPair->second.spawntimesecsmin < 0)
+            continue;
+
         AsyncGuidPosition aGuidP(goDataPair);
         if (aGuidP.isValid() && !aGuidP.IsEventUnspawned())
         {

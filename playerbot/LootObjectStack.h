@@ -57,12 +57,22 @@ namespace ai
         bool CanLoot(float maxDistance);
         LootObject GetLoot(float maxDistance = 0);
 
+        // wow-playground: call on each step towards a loot object. Returns false, and leaves that object alone for
+        // a while, once the bot has spent too long without getting there (a crate behind a wall, which the loot scan
+        // finds again every few seconds because it ignores line of sight).
+        bool NoteApproach(ObjectGuid guid);
+        bool GaveUpOn(ObjectGuid guid);
+
     private:
         std::vector<LootObject> OrderByDistance(float maxDistance = 0);
 
     private:
         Player* bot;
         LootTargetList availableLoot;
+        ObjectGuid approachGuid;
+        time_t approachSince = 0;
+        time_t approachLast = 0;
+        std::map<ObjectGuid, time_t> givenUpUntil;
     };
 
 };

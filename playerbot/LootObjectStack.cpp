@@ -7,6 +7,11 @@
 using namespace ai;
 
 #define MAX_LOOT_OBJECT_COUNT 10
+// wow-playground: how long a bot keeps walking at one loot object, the gap that counts as a fresh start (a fight on
+// the way), and how long it then leaves that object alone.
+#define LOOT_APPROACH_SECS 60
+#define LOOT_APPROACH_GAP_SECS 10
+#define LOOT_GIVE_UP_SECS 600
 
 LootTarget::LootTarget(ObjectGuid guid) : guid(guid), asOfTime(time(0))
 {
@@ -336,6 +341,9 @@ bool LootObject::IsLootPossible(Player* bot)
 
 bool LootObjectStack::Add(ObjectGuid guid)
 {
+    if (GaveUpOn(guid))
+        return false;
+
     if (!availableLoot.insert(guid).second)
         return false;
 
@@ -367,6 +375,40 @@ bool LootObjectStack::CanLoot(float maxDistance)
     return !ordered.empty();
 }
 
+bool LootObjectStack::NoteApproach(ObjectGuid guid)
+{
+    time_t now = time(0);
+
+    if (guid != approachGuid || now - approachLast > LOOT_APPROACH_GAP_SECS)
+    {
+        approachGuid = guid;
+        approachSince = now;
+    }
+
+    approachLast = now;
+
+    if (now - approachSince <= LOOT_APPROACH_SECS)
+        return true;
+
+    givenUpUntil[guid] = now + LOOT_GIVE_UP_SECS;
+    approachGuid = ObjectGuid();
+    Remove(guid);
+    return false;
+}
+
+bool LootObjectStack::GaveUpOn(ObjectGuid guid)
+{
+    auto i = givenUpUntil.find(guid);
+    if (i == givenUpUntil.end())
+        return false;
+
+    if (i->second > time(0))
+        return true;
+
+    givenUpUntil.erase(i);
+    return false;
+}
+
 LootObject LootObjectStack::GetLoot(float maxDistance)
 {
     std::vector<LootObject> ordered = OrderByDistance(maxDistance);
@@ -382,6 +424,9 @@ std::vector<LootObject> LootObjectStack::OrderByDistance(float maxDistance)
     for (LootTargetList::iterator i = safeCopy.begin(); i != safeCopy.end(); i++)
     {
         ObjectGuid guid = i->guid;
+        if (GaveUpOn(guid))
+            continue;
+
         LootObject lootObject(bot, guid);
         if (!lootObject.IsLootPossible(bot))
             continue;

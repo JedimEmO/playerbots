@@ -355,6 +355,17 @@ So for an autonomous character only:
 
 `PlayerTravelInfo::IsAutonomous` carries the difference into the travel destinations.
 
+Two traps held characters for an hour on the live server, and their fixes apply to every bot.
+
+- A game object whose respawn time is negative starts despawned, and only a script shows it, for a moment.
+  The travel map leaves those out (`EntryGuidpsValue`).
+  A mage spent an hour walking to hand in Bitter Rivals at the Unguarded Thunder Ale Barrel,
+  which is never there.
+- The loot scan finds objects without line of sight, so a crate behind a wall came back every few seconds.
+  A bot that spends a minute walking at one loot object without looting it
+  now leaves that object alone for ten minutes (`LootObjectStack::NoteApproach`).
+  A gap of ten seconds, such as a fight on the way, starts the minute again.
+
 ## Where they differ from random bots
 
 | Rule | Random bot | Autonomous bot |

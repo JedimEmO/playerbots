@@ -3292,6 +3292,14 @@ bool MoveToLootAction::Execute(Event& event)
         return false;
     }
 
+    // wow-playground: give up on loot the bot cannot get to, instead of walking at it for the rest of the session.
+    if (!AI_VALUE(LootObjectStack*, "available loot")->NoteApproach(loot.guid))
+    {
+        ai->TellDebug(GetMaster(), "Giving up on loot I cannot reach", "debug loot");
+        SET_AI_VALUE(LootObject, "loot target", LootObject());
+        return false;
+    }
+
     WorldObject *wo = loot.GetWorldObject(bot);
 
     if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT) || ai->HasStrategy("debug loot", BotState::BOT_STATE_NON_COMBAT))
