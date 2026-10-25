@@ -323,6 +323,7 @@ namespace ai
 		static constexpr float CELL_SIZE = 60.0f;
 		static constexpr uint32 MIN_SPAWNS = 3;
 		static constexpr float MAX_DISTANCE = 2500.0f;
+		static constexpr float TOWN_DISTANCE = 150.0f;
 		static constexpr uint32 IDLE_SECONDS = 75;
 		static constexpr uint32 MAX_SECONDS = 25 * MINUTE;
 		static constexpr uint32 LEFT_SECONDS = 15 * MINUTE;
@@ -341,8 +342,12 @@ namespace ai
 		const GuidPosition* GetRoamPoint(Player* bot) const;
 		// For debug why: how long the bot has been working the spot and without a fight, and how many creatures live.
 		std::string GetWorkStatus(Player* bot) const;
+		const WorldPosition& GetPoint() const { return point; }
+		// Not again for LEFT_SECONDS, so the next choice is another spot.
+		void Leave(Player* bot, const std::string& reason) const;
 	private:
 		bool IsHostileTo(Player* bot) const;
+		bool IsRoutable(Player* bot) const;
 		static bool IsBusy(Player* bot);
 
 		uint32 id;

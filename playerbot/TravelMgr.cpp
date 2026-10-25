@@ -626,6 +626,11 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     if (cInfo->MinLootGold == 0 && !info.IsAutonomous())
         return false;
 
+    // wow-playground: a player's character leaves named rares and rare elites alone, Sethir the Ancient and Ursal the
+    // Mauler on Teldrassil among them: one spawn, a long respawn, and often more than a solo character can take.
+    if (info.IsAutonomous() && (cInfo->Rank == CREATURE_ELITE_RARE || cInfo->Rank == CREATURE_ELITE_RAREELITE))
+        return false;
+
     if (cInfo->Rank > CREATURE_ELITE_NORMAL && !info.GetBoolValue("can fight elite"))
         return false;
 
@@ -772,9 +777,12 @@ bool GrindSpotTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& i
         return false;
 
     time_t now = time(0);
-    std::string leftName = "grind spot left " + std::to_string(id);
-    time_t left = AI_VALUE2(time_t, "manual time", leftName);
+    time_t left = AI_VALUE2(time_t, "manual time", "grind spot left " + std::to_string(id));
     if (left && left + LEFT_SECONDS > now)
+        return false;
+
+    // wow-playground: a spot beyond MAX_DISTANCE, found when none nearer fits, needs a route the travel nodes know.
+    if (!IsRoutable(bot))
         return false;
 
     TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
@@ -798,10 +806,31 @@ bool GrindSpotTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& i
     if (reason.empty())
         return true;
 
-    // Not again for a while, so the next choice is another spot.
-    SET_AI_VALUE2(time_t, "manual time", leftName, now);
-    ai->TellDebug(ai->GetMaster(), "Leaving " + GetTitle() + ": " + reason + ".", "debug travel");
+    Leave(bot, reason);
     return false;
+}
+
+void GrindSpotTravelDestination::Leave(Player* bot, const std::string& reason) const
+{
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    AiObjectContext* context = ai->GetAiObjectContext();
+    SET_AI_VALUE2(time_t, "manual time", "grind spot left " + std::to_string(id), time(0));
+    ai->TellDebug(ai->GetMaster(), "Leaving " + GetTitle() + ": " + reason + ".", "debug travel");
+}
+
+bool GrindSpotTravelDestination::IsRoutable(Player* bot) const
+{
+    WorldPosition botPos(bot);
+    if (botPos.getMapId() == point.getMapId() && botPos.distance(point) <= MAX_DISTANCE)
+        return true;
+
+    // The nearest node to each end; the travel nodes link walks, flights, boats, zeppelins and portals.
+    std::vector<TravelNode*> fromNodes = sTravelNodeMap.getNodes(botPos, 500.0f);
+    std::vector<TravelNode*> toNodes = sTravelNodeMap.getNodes(point, 500.0f);
+    if (fromNodes.empty() || toNodes.empty())
+        return false;
+
+    return fromNodes.front()->hasRouteTo(toNodes.front());
 }
 
 bool GrindSpotTravelDestination::IsIn(const WorldPosition& pos, float radius) const
@@ -2569,6 +2598,8 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
         bool hasElite = false;
     };
     std::map<std::tuple<uint32, uint32, int32, int32, int32>, Cell> cells;
+    // Creatures of each team's factions, by team index, map and cell of TOWN_DISTANCE.
+    std::map<std::tuple<uint32, uint32, int32, int32>, std::vector<WorldPosition>> towns;
 
     uint32 spawnCount = 0;
 
@@ -2599,18 +2630,32 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
         if (cInfo->ExperienceMultiplier <= 0.0f)
             continue;
 
-        // Rares are left out; elites only mark a cell.
-        if (cInfo->Rank == CREATURE_ELITE_RARE)
-            continue;
-        bool elite = cInfo->Rank != CREATURE_ELITE_NORMAL;
-
         FactionTemplateEntry const* creatureTemplate = sFactionTemplateStore.LookupEntry(cInfo->Faction);
         if (!creatureTemplate)
             continue;
 
-        // A faction of a player team: guards, villagers, the other team's people.
+        // A faction of a player team: guards, villagers, the other team's people. They are no grind, but they mark
+        // the team's towns and camps, where the other team's characters keep away.
         if (creatureTemplate->factionGroupMask & (FACTION_GROUP_MASK_ALLIANCE | FACTION_GROUP_MASK_HORDE))
+        {
+            for (auto& guidP : guidps)
+            {
+                if (!guidP.isOverworld())
+                    continue;
+
+                for (uint32 t = 0; t < 2; t++)
+                    if (creatureTemplate->factionGroupMask & (t ? FACTION_GROUP_MASK_HORDE : FACTION_GROUP_MASK_ALLIANCE))
+                        towns[std::make_tuple(t, guidP.getMapId(), (int32)floor(guidP.getX() / GrindSpotTravelDestination::TOWN_DISTANCE),
+                            (int32)floor(guidP.getY() / GrindSpotTravelDestination::TOWN_DISTANCE))].push_back(guidP);
+            }
             continue;
+        }
+
+        // Rares and rare elites never count: one spawn, a long respawn, often more than a solo character can take. An
+        // elite, rare elites included, only marks the cell.
+        if (cInfo->Rank == CREATURE_ELITE_RARE)
+            continue;
+        bool elite = cInfo->Rank != CREATURE_ELITE_NORMAL;
 
         bool hostile[2];
         for (uint32 t = 0; t < 2; t++)
@@ -2661,18 +2706,49 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
         }
     }
 
-    uint32 teamCount[2] = { 0, 0 };
+    // A spot near the other team's town or camp, by TOWN_DISTANCE, has its guards and people around.
+    auto nearEnemyTown = [&towns](uint32 team, const WorldPosition& point)
+    {
+        uint32 enemy = team == 0 ? 1 : 0;
+        int32 cx = (int32)floor(point.getX() / GrindSpotTravelDestination::TOWN_DISTANCE);
+        int32 cy = (int32)floor(point.getY() / GrindSpotTravelDestination::TOWN_DISTANCE);
+        for (int32 x = cx - 1; x <= cx + 1; x++)
+            for (int32 y = cy - 1; y <= cy + 1; y++)
+            {
+                auto it = towns.find(std::make_tuple(enemy, point.getMapId(), x, y));
+                if (it == towns.end())
+                    continue;
+
+                for (auto& npc : it->second)
+                    if (npc.distance(point) <= GrindSpotTravelDestination::TOWN_DISTANCE)
+                        return true;
+            }
+        return false;
+    };
+
+    uint32 teamCount[2] = { 0, 0 }, nearTowns = 0;
     for (auto& [key, cell] : cells)
     {
         if (cell.spawns.size() < GrindSpotTravelDestination::MIN_SPAWNS)
             continue;
 
         Team team = Team(std::get<0>(key));
-        grindSpots.push_back(new GrindSpotTravelDestination(grindSpots.size(), team, cell.spawns, cell.hasElite));
-        teamCount[team == ALLIANCE ? 0 : 1]++;
+        uint32 t = team == ALLIANCE ? 0 : 1;
+        GrindSpotTravelDestination* spot = new GrindSpotTravelDestination(grindSpots.size(), team, cell.spawns, cell.hasElite);
+
+        if (nearEnemyTown(t, spot->GetPoint()))
+        {
+            delete spot;
+            nearTowns++;
+            continue;
+        }
+
+        grindSpots.push_back(spot);
+        teamCount[t]++;
     }
 
-    sLog.outString("Loaded %u grind spots, %u for the alliance and %u for the horde, from %u creature spawns.", (uint32)grindSpots.size(), teamCount[0], teamCount[1], spawnCount);
+    sLog.outString("Loaded %u grind spots, %u for the alliance and %u for the horde, from %u creature spawns; %u left out near the other team's towns.",
+        (uint32)grindSpots.size(), teamCount[0], teamCount[1], spawnCount, nearTowns);
 }
 
 void TravelMgr::GetPopulatedGrids()
@@ -3002,22 +3078,31 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
     DestinationList retDests;
 
     // wow-playground: a levelling character grinds at grind spots, the nearest first by the partitions, within
-    // GrindSpotTravelDestination::MAX_DISTANCE. The single entry destinations are left out, unless no spot is possible.
+    // GrindSpotTravelDestination::MAX_DISTANCE. A character that outgrew the zone finds none there; then any spot it
+    // can reach counts, on the continent first, since the partitions rank by the travel system's distance, which
+    // adds the crossing to another map. GrindSpotTravelDestination::IsActive keeps those it has no route to out. The
+    // single entry destinations are left out, unless no spot is possible anywhere.
     bool useGrindSpots = purposeFlag != (uint32)TravelDestinationPurpose::None && (purposeFlag & (uint32)TravelDestinationPurpose::Grind) &&
         entries.empty() && info.GetBoolValue2("has strategy", "levelling");
 
     if (useGrindSpots)
     {
-        for (auto& spot : grindSpots)
+        for (float spotDistance : { std::min(maxDistance > 0 ? maxDistance : FLT_MAX, GrindSpotTravelDestination::MAX_DISTANCE), FLT_MAX })
         {
-            if (onlyPossible && !spot->IsPossible(info))
-                continue;
+            for (auto& spot : grindSpots)
+            {
+                if (onlyPossible && !spot->IsPossible(info))
+                    continue;
 
-            float distance = spot->DistanceTo(center);
-            if (distance > std::min(maxDistance > 0 ? maxDistance : FLT_MAX, GrindSpotTravelDestination::MAX_DISTANCE))
-                continue;
+                float distance = spot->DistanceTo(center);
+                if (distance > spotDistance || distance == FLT_MAX)
+                    continue;
 
-            retDests.push_back(spot);
+                retDests.push_back(spot);
+            }
+
+            if (!retDests.empty())
+                break;
         }
 
         useGrindSpots = !retDests.empty();
@@ -3130,14 +3215,19 @@ PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, cons
         std::vector<WorldPosition*> points = pointRange.second;
         std::shuffle(points.begin(), points.end(), std::default_random_engine(seed));
 
+        // wow-playground: a grind spot's own creature levels decide (GrindSpotTravelDestination::IsPossible); the
+        // area level, an average of the zone, kept a character that outgrew its zone out of the next one.
+        bool isGrindSpot = dynamic_cast<GrindSpotTravelDestination*>(dest);
+
         for (auto& position : points)
         {
-            if (!IsLocationLevelValid(*position, info))
+            if (!isGrindSpot && !IsLocationLevelValid(*position, info))
                 continue;
 
             float distance = position->distance(center);
 
-            if (distance > maxDistance)
+            // wow-playground: GetDestinations already limited the grind spots.
+            if (distance > maxDistance && !isGrindSpot)
                 continue;
             
             point = TravelPoint(dest, position, distance);

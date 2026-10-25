@@ -388,6 +388,8 @@ So for an autonomous character only:
   A finished gray quest is still handed in, and the cleaning drops the rest when the log fills.
 - A grind spot's creatures are from three levels below the character, up to its own level at full durability,
   two below with worn gear. They need not drop gold; their loot sells.
+  Named rares and rare elites are no grind trip, Sethir the Ancient and Ursal the Mauler on Teldrassil among them:
+  one spawn, a long respawn, and often more than a solo character can take.
   Just above gray was the first floor; the nearest spots were then at the bottom,
   where a level 14 character earned under a percent of a level per kill.
 
@@ -437,17 +439,33 @@ and keeps a cell as a spot when it holds at least three spawns, of any entries, 
 hostile to a race of that team, not elite, rare, critter, totem or civilian,
 no npc, guard or member of a player faction, attackable, worth experience,
 on Kalimdor or the Eastern Kingdoms, outside the capitals, and not spawned by an event.
-An elite in the cell does not count, but it marks the spot, which then needs `can fight elite`.
-The server log says how many: `Loaded N grind spots, A for the alliance and H for the horde, from S creature spawns.`
+An elite in the cell does not count, but it marks the spot, which then needs `can fight elite`;
+a rare elite marks it too, since it is just as dangerous to pull by accident.
+A spot within 150 yards of a creature of the other team's factions, a town, a camp or a guard post, is left out:
+the guards attack, and the creatures there are no grind for the other team either.
+The server log says how many:
+`Loaded N grind spots, A for the alliance and H for the horde, from S creature spawns; T left out near the other team's towns.`
 
 A spot's point is the spawn nearest the spawns' mean, so the bot travels to ground it can stand on.
 Its radius reaches the farthest spawn, 20 yards at least, and arriving inside it starts the work.
 The spot carries its creatures' lowest and highest level, and it is open to a bot when that band overlaps
 the grind window above, from three levels below the character to its own level,
 when its highest creatures are within a level of the window's top,
-when the bot need not sell or repair first, and when it is within 2500 yards on the same map.
+and when the bot need not sell or repair first.
 The travel partitions take the nearest open spot first, as they do for every destination.
-When no spot within reach fits the character, it falls back to the single entry destinations;
+The zone's area level does not count for a spot; the creatures' own levels decide.
+
+The bot looks within 2500 yards first.
+A character outgrows its starting zone; Teldrassil tops out near level 11,
+and a level 15 warrior found nothing there that fit.
+So when no spot within 2500 yards fits, any spot counts, the nearest first by the travel system's distance,
+which is the straight line on the same map and adds the crossing to another one.
+A spot that far needs a route in the travel nodes, from the node nearest the bot to the node nearest the spot,
+and the nodes link walks, flights, boats, zeppelins and portals.
+Teldrassil to Darkshore goes by the Darnassus portal and the Rut'theran flight master,
+Kalimdor to the Eastern Kingdoms by the Ratchet boat.
+A spot the bot fails to walk to, after its move retries, counts as left.
+Only when no spot fits anywhere does the bot fall back to the single entry destinations;
 a spot it left recently still counts as fitting, so the bot looks farther away instead.
 
 While the bot works a spot, it attacks any creature in sight, quest or not.
