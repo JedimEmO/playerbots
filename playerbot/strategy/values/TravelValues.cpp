@@ -263,6 +263,9 @@ bool NeedTravelPurposeValue::Calculate()
 
     SkillType skill;
 
+    // wow-playground: see LevellingStrategy.
+    bool levelling = AI_VALUE2(bool, "has strategy", "levelling");
+
     switch (purpose)
     {
     case TravelDestinationPurpose::Repair:
@@ -289,6 +292,9 @@ bool NeedTravelPurposeValue::Calculate()
     case TravelDestinationPurpose::GatherSkinning:
     case TravelDestinationPurpose::GatherMining:
     case TravelDestinationPurpose::GatherHerbalism:
+        if (levelling)
+            return false;
+
         skill = gatheringSkills.at(purpose);
         // wow-playground: a farming bot gathers for the materials, so any skill it has keeps the trips needed.
         if (AI_VALUE2(bool, "has strategy", "farm") && bot->GetSkillValue(skill) > 0)
@@ -301,13 +307,20 @@ bool NeedTravelPurposeValue::Calculate()
 
         return false;
     case TravelDestinationPurpose::Boss:
+        if (levelling)
+            return false;
         return AI_VALUE(bool, "can fight boss");
     case TravelDestinationPurpose::Mail:
         return AI_VALUE(bool, "can get mail") && AI_VALUE(bool, "should get mail");
     case TravelDestinationPurpose::Explore:
+        if (levelling)
+            return false;
         return ai->HasStrategy("explore", BotState::BOT_STATE_NON_COMBAT);    
     case TravelDestinationPurpose::GenericRpg:
     {
+        if (levelling)
+            return false;
+
         uint32 rpgPhase = ai->GetFixedBotNumber(BotTypeNumber::RPG_PHASE_NUMBER, 60, 1);
 
         if (rpgPhase < 15) //Only last 45 minutes of the hour allow generic rpg.
@@ -317,6 +330,9 @@ bool NeedTravelPurposeValue::Calculate()
     }
     case TravelDestinationPurpose::Grind:
     {
+        if (levelling)
+            return !AI_VALUE2(bool, "manual bool", "is travel refresh");
+
         uint32 rpgPhase = ai->GetFixedBotNumber(BotTypeNumber::RPG_PHASE_NUMBER, 60, 1);
 
         if (rpgPhase > 45) //Only first 45 minutes of the hour allow generic grind.
@@ -336,6 +352,10 @@ bool ShouldTravelNamedValue::Calculate()
     std::string name = getQualifier();
 
     WorldPosition botPos(bot);
+
+    // wow-playground: see LevellingStrategy.
+    if ((name == "city" || name == "pvp") && AI_VALUE2(bool, "has strategy", "levelling"))
+        return false;
 
     if (name == "city")
     {

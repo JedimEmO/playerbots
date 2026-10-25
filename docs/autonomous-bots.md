@@ -355,6 +355,13 @@ So for an autonomous character only:
 
 `PlayerTravelInfo::IsAutonomous` carries the difference into the travel destinations.
 
+The sidecar's level and grind tasks go further, and take questing off altogether (`-rpg quest`).
+They also turn on `levelling`, a strategy with no triggers that the travel values read.
+With it, a character travels only to grind, sell, repair, get mail, use the bank and train.
+Grind spots are open at any time of the hour;
+without it a bot grinds only in the first 45 minutes of its hour, and wanders to random NPCs in the last 45.
+Boss, explore, generic rpg, city, world pvp and gathering trips are off.
+
 Two traps held characters for an hour on the live server, and their fixes apply to every bot.
 
 - A game object whose respawn time is negative starts despawned, and only a script shows it, for a moment.

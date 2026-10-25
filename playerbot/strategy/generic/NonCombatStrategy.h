@@ -187,4 +187,22 @@ namespace ai
         virtual std::vector<std::string> GetRelatedStrategies() { return {}; }
 #endif
     };
+
+    // wow-playground: levelling a player's character by grinding. No triggers of its own either; the travel values that
+    // ask for it leave only the trips that serve grinding: grind spots at any time of the hour, vendors, repairs, mail,
+    // the bank and trainers. Boss, explore, generic rpg, city, world pvp and gathering trips are off.
+    class LevellingStrategy : public Strategy
+    {
+    public:
+        LevellingStrategy(PlayerbotAI* ai) : Strategy(ai) {}
+
+        virtual std::string getName() override { return "levelling"; }
+#ifdef GenerateBotHelp
+        virtual std::string GetHelpName() { return "levelling"; } //Must equal iternal name
+        virtual std::string GetHelpDescription() {
+            return "Travels only to grind, sell, repair, get mail, bank and train.";
+        }
+        virtual std::vector<std::string> GetRelatedStrategies() { return {}; }
+#endif
+    };
 }
