@@ -350,8 +350,10 @@ So for an autonomous character only:
   unless the quest is on its focus list (`doquest`).
   Gray is the server's `Quests.LowLevelHideDiff`, as the bot's own quest log cleaning reads it.
   A finished gray quest is still handed in, and the cleaning drops the rest when the log fills.
-- A grind spot's creatures are above the gray level, up to the character's own level at full durability,
+- A grind spot's creatures are from four levels below the character, up to its own level at full durability,
   two below with worn gear. They need not drop gold; their loot sells.
+  Just above gray was the first floor; the nearest spots were then at the bottom,
+  where a level 14 character earned under a percent of a level per kill.
 
 `PlayerTravelInfo::IsAutonomous` carries the difference into the travel destinations.
 
@@ -360,7 +362,11 @@ They also turn on `levelling`, a strategy with no triggers that the travel value
 With it, a character travels only to grind, sell, repair, get mail, use the bank and train.
 Grind spots are open at any time of the hour;
 without it a bot grinds only in the first 45 minutes of its hour, and wanders to random NPCs in the last 45.
-Boss, explore, generic rpg, city, world pvp and gathering trips are off.
+Auction house, boss, explore, generic rpg, city, world pvp and gathering trips are off;
+a vendor nearby buys the loot.
+And near a grind spot the bot picks an npc to walk to only for business, a weight of 25 and up
+in `ChooseRpgTargetAction`: healing, buying, selling, repairing, training, mail, the bank.
+Chat, emotes, gossip and duels, 1 to 10, kept a druid walking around Kharanos instead of fighting.
 
 Two traps held characters for an hour on the live server, and their fixes apply to every bot.
 

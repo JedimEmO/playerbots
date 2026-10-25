@@ -190,7 +190,8 @@ namespace ai
 
     // wow-playground: levelling a player's character by grinding. No triggers of its own either; the travel values that
     // ask for it leave only the trips that serve grinding: grind spots at any time of the hour, vendors, repairs, mail,
-    // the bank and trainers. Boss, explore, generic rpg, city, world pvp and gathering trips are off.
+    // the bank and trainers. Auction house, boss, explore, generic rpg, city, world pvp and gathering trips are off,
+    // and ChooseRpgTargetAction skips npcs it has no business with.
     class LevellingStrategy : public Strategy
     {
     public:

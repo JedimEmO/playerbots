@@ -622,14 +622,14 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     int32 maxLevel = std::max(botLevel * (0.5f + levelMod), botLevel - 5.0f + levelBoost);
     int32 minLevel = std::max(botLevel * (0.4f + levelMod), botLevel - 12.0f + levelBoost);
 
-    // wow-playground: a player's character grinds for experience, on creatures that still give it: above the gray
-    // level, up to its own level at full durability (two below with worn gear). Random bots grind three to six levels
-    // down for gold, which gives a character levelling on its own almost nothing. Creatures need not drop gold; their
-    // loot sells.
+    // wow-playground: a player's character grinds for experience: from four levels below its own, up to its own
+    // level at full durability (two below with worn gear). A creature's experience falls off fast below the player's
+    // level; one just above gray gives a level 14 character under a percent of a level, one at its level two. Random
+    // bots grind three to six levels down for gold. Creatures need not drop gold; their loot sells.
     if (info.IsAutonomous())
     {
         maxLevel = botLevel - 2 + int32(levelBoost);
-        minLevel = int32(MaNGOS::XP::GetGrayLevel(botLevel)) + 1;
+        minLevel = std::max(int32(MaNGOS::XP::GetGrayLevel(botLevel)) + 1, botLevel - 4);
     }
 
     if ((int32)cInfo->MaxLevel > maxLevel) //@lvl5 max = 3, @lvl60 max = 57

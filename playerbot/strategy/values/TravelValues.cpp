@@ -281,6 +281,8 @@ bool NeedTravelPurposeValue::Calculate()
             return true;
         break;
     case TravelDestinationPurpose::AH:
+        if (levelling)
+            return false;
         if (AI_VALUE2(bool, "group or", "should ah sell,can ah sell,following party"))
             return true;
         if (AI_VALUE2(bool, "has strategy", "free") && AI_VALUE(bool, "should ah sell") && AI_VALUE(bool, "can ah sell"))

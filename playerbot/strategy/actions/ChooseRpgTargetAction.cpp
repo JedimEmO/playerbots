@@ -128,6 +128,9 @@ std::unordered_map<ObjectGuid, float> ChooseRpgTargetAction::GetTargets(Player* 
     bool hasGoodRelevance = false;
     rgpActionReason.clear();
 
+    // wow-playground: a levelling bot only goes to an npc it has business with (see below).
+    bool levelling = ai->HasStrategy("levelling", BotState::BOT_STATE_NON_COMBAT);
+
     //Shuffle the target list to randomly process it each time.
     for (auto& target : targets)
         targetList.push_back(target.first);
@@ -210,6 +213,11 @@ std::unordered_map<ObjectGuid, float> ChooseRpgTargetAction::GetTargets(Player* 
 
         //For all rpg actions that are triggered/possible for this target get the highest relevance.
         float relevance = getMaxRelevance(guidP);
+
+        // wow-playground: business is healing, buying, selling, repairing, training, mail, the bank and the like, 25 and
+        // up; chat, emotes, gossip, duels and the like score 1 to 10 and kept a grinding bot walking around town.
+        if (levelling && relevance < 25.0f)
+            SkipRpgTarget("Levelling, and nothing to do here.");
 
         bool travelHasQuest = false;
         if (isTravelTarget && guidP.GetEntry())
