@@ -393,6 +393,9 @@ So for an autonomous character only:
 
 `PlayerTravelInfo::IsAutonomous` carries the difference into the travel destinations.
 
+An autonomous character with a trip ready to start does not pick or walk to npcs to interact with,
+since a trip starts only once the bot has stood still for ten seconds;
+walking from npc to npc kept a farming priest's trip in "ready" for an hour, and quest trips before it.
 An autonomous character also thinks at the full rate out of combat, where other bots without a real master
 make one decision a second, and the server's activity level never throttles it,
 in combat or near a real player included (`PlayerbotAI::GetPriorityBracket`).

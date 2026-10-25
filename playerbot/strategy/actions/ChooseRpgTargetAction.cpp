@@ -540,6 +540,11 @@ bool ChooseRpgTargetAction::isUseful()
     if (!ai->AllowActivity(RPG_ACTIVITY))
         return false;
 
+    // wow-playground: a player's character with a trip ready to start sets off. The trip starts only once the bot has
+    // stood still for ten seconds, and walking from npc to npc kept a farming priest in "ready" for an hour.
+    if (sRandomPlayerbotMgr.IsAutonomousBot(bot) && AI_VALUE(TravelTarget*, "travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_READY)
+        return false;
+
     GuidPosition guidP = AI_VALUE(GuidPosition, "rpg target");
 
     if (guidP && guidP.distance(bot) < sPlayerbotAIConfig.reactDistance * 2)
