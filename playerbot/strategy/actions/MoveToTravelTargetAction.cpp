@@ -7,6 +7,7 @@
 #include "MotionGenerators/PathFinder.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
+#include "playerbot/strategy/values/FarmOrderValues.h"
 #include <iomanip>
 
 using namespace ai;
@@ -26,6 +27,37 @@ bool MoveToTravelTargetAction::Execute(Event& event)
     // wow-playground: working a grind spot with nothing to fight, walk to one of its spawns, a living creature's if
     // the bot knows of one, so it finds the next pull. Like mod-playerbots' MoveRandomNear, a few points are tried
     // until one has a path.
+    // wow-playground: see FarmOrders. Working a farm order's gather trip with no node to gather, walk to the nearest
+    // spawn point not seen lately; most are empty, since nodes are pooled. With none left in range the trip ends, and
+    // the next farm order trip goes to the nearest point not seen. Forced trips never end on their own.
+    if (GatherTravelDestination* gather = FarmOrders::WorkedGather(ai))
+    {
+        for (uint32 attempt = 0; attempt < 5; attempt++)
+        {
+            const WorldPosition* roamPoint = FarmOrders::RoamPoint(bot, gather);
+            if (!roamPoint)
+            {
+                ai->TellDebug(ai->GetMaster(), "Every spawn point of " + gather->GetTitle() + " within " +
+                    std::to_string(uint32(FarmOrders::ROAM_DISTANCE)) + "y seen, leaving it.", "debug travel");
+                target->SetForced(false);
+                target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+                context->ClearValues("no active travel destinations");
+                return false;
+            }
+
+            // Seen once walked to, or skipped for a while when there is no path.
+            FarmOrders::MarkVisited(bot, roamPoint);
+            if (MoveTo(roamPoint->getMapId(), roamPoint->getX(), roamPoint->getY(), roamPoint->getZ(), false, false))
+            {
+                if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
+                    ai->TellPlayerNoFacing(GetMaster(), "Roaming " + std::to_string(uint32(roamPoint->distance(bot))) + "y to a spawn point of " + gather->GetTitle());
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     if (target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK)
     {
         GrindSpotTravelDestination* spot = dynamic_cast<GrindSpotTravelDestination*>(target->GetDestination());
@@ -227,6 +259,8 @@ bool MoveToTravelTargetAction::isUseful()
     // stands, so a walk ends and eating or drinking is not cut short.
     TravelTarget* currentTarget = AI_VALUE(TravelTarget*, "travel target");
     bool roaming = currentTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK && dynamic_cast<GrindSpotTravelDestination*>(currentTarget->GetDestination());
+    // wow-playground: and between the spawn points of a farm order's gather trip (see Execute).
+    roaming = roaming || FarmOrders::WorkedGather(ai);
     if (roaming && (bot->IsMoving() || bot->IsSitState() || bot->IsInCombat()))
         return false;
 

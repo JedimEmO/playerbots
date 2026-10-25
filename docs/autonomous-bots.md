@@ -151,13 +151,27 @@ for each gathering skill it has, within the reach of its skill.
 The trip is the named travel purpose `farm order`, asked just above the guild order with the same forced target,
 so it outranks gathering trips, grinding and quests.
 Full bags and broken gear still send the bot to a vendor first.
-Three other rules change while it holds:
+
+A trip goes to one spawn point of a node or creature, but herb and mining nodes are pooled,
+so most of an herb's spawn points are empty at any time.
+A trip the order forces never ends on its own, so a bot that found its point empty stayed on the trip with nothing to do.
+Instead, once it arrives and has nothing to gather, it walks to the nearest spawn point of the same node within 400 yards,
+skipping points it saw in the last five minutes; a point within 30 yards counts as seen,
+and so does one with no path to it.
+Any node of the item it sees on the way, it gathers.
+With no point left in range the trip ends,
+and the next one goes to the nearest point of each source it has not seen.
+Near Goldshire, 11 of the 242 Peacebloom spawn points lie within 300 yards of the inn.
+
+Four other rules change while it holds:
 
 - A node or creature the bot no longer learns from, gray ones included, still counts as a destination.
 - It gathers only the herb and mining nodes that yield the item, even those it walks past.
   It still skins what it kills.
 - A skinning trip attacks the creature it is for; before, the grind target skipped creatures with no quest,
   so a skinning trip stood still at its destination. That fix holds for every bot.
+- It walks to an npc only for business, as a levelling bot does; the same holds for every bot with `farm`.
+  Small talk kept a priest on a Peacebloom order in the Goldshire inn, 250 yards from its trip.
 
 The order is finished when the count is gathered:
 what `.rndbot mailgoods` sent of the item since the order was set, plus what the bot holds of its own.

@@ -236,6 +236,86 @@ std::string FarmOrders::SkillName(SkillType skill)
     }
 }
 
+namespace
+{
+    // The spawn points each bot saw, by bot guid, with when. Bots on different maps ask from their own threads.
+    std::mutex visitedMutex;
+    std::unordered_map<uint32, std::unordered_map<const WorldPosition*, time_t>> visitedPoints;
+
+    // With visitedMutex held: the bot's points, those older than VISIT_SECONDS dropped.
+    std::unordered_map<const WorldPosition*, time_t>& VisitedOf(uint32 guid, time_t now)
+    {
+        auto& points = visitedPoints[guid];
+        for (auto it = points.begin(); it != points.end();)
+            it = it->second + FarmOrders::VISIT_SECONDS < now ? points.erase(it) : std::next(it);
+        return points;
+    }
+}
+
+GatherTravelDestination* FarmOrders::WorkedGather(PlayerbotAI* ai)
+{
+    TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+    if (!target || target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
+        return nullptr;
+
+    GatherTravelDestination* gather = dynamic_cast<GatherTravelDestination*>(target->GetDestination());
+    if (!gather || gather->GetPurpose() == TravelDestinationPurpose::GatherFishing)
+        return nullptr;
+
+    for (auto& condition : target->GetConditions())
+        if (condition == "should travel named::farm order")
+            return gather;
+
+    return nullptr;
+}
+
+const WorldPosition* FarmOrders::RoamPoint(Player* bot, const TravelDestination* destination)
+{
+    WorldPosition botPos(bot);
+    time_t now = time(nullptr);
+
+    std::lock_guard<std::mutex> guard(visitedMutex);
+    auto& visited = VisitedOf(bot->GetGUIDLow(), now);
+
+    const WorldPosition* nearest = nullptr;
+    float nearestDistance = ROAM_DISTANCE;
+    for (WorldPosition* point : destination->GetPoints())
+    {
+        if (point->getMapId() != botPos.getMapId())
+            continue;
+
+        float distance = point->distance(botPos);
+        if (distance <= SEEN_DISTANCE)
+        {
+            visited[point] = now;
+            continue;
+        }
+
+        if (distance < nearestDistance && visited.find(point) == visited.end())
+        {
+            nearest = point;
+            nearestDistance = distance;
+        }
+    }
+
+    return nearest;
+}
+
+void FarmOrders::MarkVisited(Player* bot, const WorldPosition* point)
+{
+    std::lock_guard<std::mutex> guard(visitedMutex);
+    visitedPoints[bot->GetGUIDLow()][point] = time(nullptr);
+}
+
+std::set<const WorldPosition*> FarmOrders::Visited(Player* bot)
+{
+    std::lock_guard<std::mutex> guard(visitedMutex);
+    std::set<const WorldPosition*> points;
+    for (auto& [point, when] : VisitedOf(bot->GetGUIDLow(), time(nullptr)))
+        points.insert(point);
+    return points;
+}
+
 bool HasFarmOrderValue::Calculate()
 {
     RandomPlayerbotMgr::FarmOrder order;

@@ -1203,7 +1203,8 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
         SET_AI_VALUE2(std::string, "manual string", "future travel detail", orderTarget);
     }
     // wow-playground: see FarmOrders. The nodes and creatures that yield the ordered item, for each gathering skill
-    // the bot has; GetPartitions keeps those its skill reaches, gray ones included.
+    // the bot has, those its skill reaches, gray ones included; of each, the nearest spawn point the bot has not seen
+    // lately, since most of a pooled herb's points are empty.
     else if (travelName == "farm order")
     {
         RandomPlayerbotMgr::FarmOrder order;
@@ -1230,12 +1231,44 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
             return false;
         }
 
-        *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [sources, partitions = travelPartitions, travelInfo = PlayerTravelInfo(bot), center]()
+        *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [sources, partitions = travelPartitions, travelInfo = PlayerTravelInfo(bot), center, visited = FarmOrders::Visited(bot)]()
             {
                 PartitionedTravelList list;
+                sTravelMgr.GetPartitionsLock();
                 for (auto& [purpose, entries] : sources)
-                    for (auto& [partition, points] : sTravelMgr.GetPartitions(center, partitions, travelInfo, (uint32)purpose, entries, true))
-                        list[partition].insert(list[partition].end(), points.begin(), points.end());
+                {
+                    for (TravelDestination* destination : sTravelMgr.GetDestinations(travelInfo, (uint32)purpose, entries, true))
+                    {
+                        WorldPosition* nearest = nullptr;
+                        float nearestDistance = FLT_MAX;
+                        for (WorldPosition* point : destination->GetPoints())
+                        {
+                            if (point->getMapId() != center.getMapId() || visited.count(point) || !TravelMgr::IsLocationLevelValid(*point, travelInfo))
+                                continue;
+
+                            float distance = point->distance(center);
+                            if (distance < nearestDistance)
+                            {
+                                nearest = point;
+                                nearestDistance = distance;
+                            }
+                        }
+
+                        if (!nearest)
+                            continue;
+
+                        // Keyed by the squared partition, as GetPartitions keys them.
+                        uint32 partition = partitions.back();
+                        for (uint32 p : partitions)
+                            if (nearestDistance < p)
+                            {
+                                partition = p;
+                                break;
+                            }
+                        list[partition * partition].push_back(TravelPoint(destination, nearest, nearestDistance));
+                    }
+                }
+                sTravelMgr.GetPartitionsLock(false);
                 return list;
             });
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "playerbot/strategy/Value.h"
+#include "playerbot/TravelMgr.h"
 
 namespace ai
 {
@@ -34,6 +35,23 @@ namespace ai
         // Gathered so far: what went to the player by .rndbot mailgoods since the order was set, and what the bot holds.
         static uint32 Gathered(Player* bot, uint32 itemId, uint32 mailed);
         static std::string SkillName(SkillType skill);
+
+        // Herb nodes are pooled, so most spawn points of a gather destination are empty at any time. A bot working a
+        // farm order's gather trip walks from spawn point to spawn point, nearest first, skipping the ones it saw in the
+        // last VISIT_SECONDS; with none left within ROAM_DISTANCE the trip ends, and the next trip goes to the nearest
+        // point it has not seen.
+        static constexpr time_t VISIT_SECONDS = 5 * MINUTE;
+        static constexpr float ROAM_DISTANCE = 400.0f;
+        // A point this close to the bot counts as seen: a node there would be in sight.
+        static constexpr float SEEN_DISTANCE = 30.0f;
+
+        // The gather destination of the farm order trip the bot works, or none.
+        static GatherTravelDestination* WorkedGather(PlayerbotAI* ai);
+        // The next spawn point to walk to, after marking those in sight as seen; nullptr when none is left in range.
+        static const WorldPosition* RoamPoint(Player* bot, const TravelDestination* destination);
+        static void MarkVisited(Player* bot, const WorldPosition* point);
+        // The points the bot saw in the last VISIT_SECONDS.
+        static std::set<const WorldPosition*> Visited(Player* bot);
     };
 
     // The bot has a farm order it has not finished: an autonomous bot, an order, and its count not yet gathered.

@@ -128,8 +128,10 @@ std::unordered_map<ObjectGuid, float> ChooseRpgTargetAction::GetTargets(Player* 
     bool hasGoodRelevance = false;
     rgpActionReason.clear();
 
-    // wow-playground: a levelling bot only goes to an npc it has business with (see below).
-    bool levelling = ai->HasStrategy("levelling", BotState::BOT_STATE_NON_COMBAT);
+    // wow-playground: a levelling or farming bot only goes to an npc it has business with (see below). Small talk kept a
+    // priest on a farm order in Goldshire, 250 yards from the Peacebloom it was sent for.
+    bool levelling = ai->HasStrategy("levelling", BotState::BOT_STATE_NON_COMBAT) || ai->HasStrategy("farm", BotState::BOT_STATE_NON_COMBAT) ||
+        AI_VALUE(bool, "has farm order");
 
     //Shuffle the target list to randomly process it each time.
     for (auto& target : targets)
@@ -217,7 +219,7 @@ std::unordered_map<ObjectGuid, float> ChooseRpgTargetAction::GetTargets(Player* 
         // wow-playground: business is healing, buying, selling, repairing, training, mail, the bank and the like, 25 and
         // up; chat, emotes, gossip, duels and the like score 1 to 10 and kept a grinding bot walking around town.
         if (levelling && relevance < 25.0f)
-            SkipRpgTarget("Levelling, and nothing to do here.");
+            SkipRpgTarget("Levelling or farming, and nothing to do here.");
 
         bool travelHasQuest = false;
         if (isTravelTarget && guidP.GetEntry())

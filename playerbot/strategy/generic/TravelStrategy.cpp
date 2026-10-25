@@ -110,6 +110,12 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
         "val::not::travel target active",
         NextAction::array(0, new NextAction("choose travel target", 6.98f), NULL)));
 
+    // wow-playground: see FarmOrders. Working a farm order's gather trip, walk between its spawn points; as levelling's
+    // trigger for grind spots, below eating, drinking, looting and attacking.
+    triggers.push_back(new TriggerNode(
+        "val::and::{travel target working,has farm order}",
+        NextAction::array(0, new NextAction("move to travel target", 1.5f), NULL)));
+
     triggers.push_back(new TriggerNode(
         "val::not::travel target active",
         NextAction::array(0, new NextAction("reset travel target", 6.0f), NULL)));
