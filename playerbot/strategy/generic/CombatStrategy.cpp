@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "CombatStrategy.h"
 #include "playerbot/ServerFacade.h"
+#include "playerbot/strategy/actions/GenericSpellActions.h"
 
 using namespace ai;
 
@@ -169,6 +170,10 @@ uint8 WaitForAttackStrategy::GetWaitTime(PlayerbotAI* ai)
 
 float WaitForAttackMultiplier::GetValue(Action* action)
 {
+    // Healers keep healing while the others wait: the player holding the pull still takes damage
+    if (dynamic_cast<CastHealingSpellAction*>(action))
+        return 1.0f;
+
     // Allow some movement and targeting actions and non threat actions (like cc!)
     const std::string& actionName = action->getName();
     if ((actionName != "wait for attack keep safe distance") && 
