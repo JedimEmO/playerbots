@@ -83,6 +83,11 @@ bool TradeAction::TradeItem(const Item& item, int8 slot)
     int8 tradeSlot = -1;
     Item* itemPtr = const_cast<Item*>(&item);
 
+    // wow-playground: what the player left on the character is never traded away. The slot that is not traded, where
+    // the other side may only enchant the item, stays open to it.
+    if (slot != TRADE_SLOT_NONTRADED && ai->IsOwnersItem(itemPtr))
+        return false;
+
     TradeData* pTrade = bot->GetTradeData();
     if ((slot >= 0 && slot < TRADE_SLOT_COUNT) && pTrade->GetItem(TradeSlots(slot)) == NULL)
         tradeSlot = slot;

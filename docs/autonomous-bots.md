@@ -258,6 +258,69 @@ such as `train`, `food` or `do`,
 but `add`, `login`, `remove`, `logout`, `rm`, `always`, `init`, `gear`, `equip`, `levelup`, `level` and `random`
 answer `Not allowed on autonomous bots`.
 
+## The player's things
+
+An autonomous character is its player's, and so is what they leave on it.
+The bot playing it never sells, destroys, disenchants, enchants, auctions, trades, gives away, mails,
+banks, withdraws, uses up, puts on or takes off any of it,
+and never spends the player's money.
+
+The line is drawn when the player hands the character over.
+When a player logs out of a character on an autonomous account,
+everything it holds is recorded as theirs: each item by its guid, equipped, in the bags, the backpack,
+the bank and its bags, and the keyring, and its money as a floor.
+A character never recorded is recorded the first time anything asks about it while a bot plays it,
+from what it holds then.
+Items and money that arrive in a normal letter count as the player's when the bot takes them;
+auction house letters bring the bot's own and do not.
+Everything else the bot loots, gathers or buys is its own, to sell or use as it likes,
+until the player next logs out of the character.
+
+The record lives in `ai_playerbot_owned_items` (`owner`, `item`), made on first use,
+and the money floor in `ai_playerbot_random_bots` as the event `ownermoney`, stored as the floor plus one.
+
+`RandomPlayerbotMgr::IsOwnersItem` answers for one item, and `PlayerbotAI::IsOwnersItem` asks it.
+Every path that parts with an item asks first:
+
+| Path | Where |
+|---|---|
+| Selling to a vendor | `SellAction::Sell`, and the `can sell` trip value |
+| Auction house | `AhAction::PostItem`, and the `can ah sell` trip value |
+| Destroying | `DestroyItemAction::DestroyItem` (also `smart destroy item`), `destroy all gray` |
+| Disenchanting | `disenchant random item` skips an item id the player left any of, since the cast picks by id |
+| Enchanting | `enchant random item` leaves the player's items as they are |
+| Trading | `TradeAction::TradeItem`, and the `items useful to give` value for `rpg trade useful` |
+| Giving | `GiveItemAction`, `guild share item` |
+| Mail | `sendmail` answers `I cannot send mail` for an autonomous bot; `.rndbot mailgoods` leaves the player's goods |
+| Mail bounce | `check mail` does nothing for an autonomous bot; it would send a player's letter back and delete the rest of it |
+| Bank | deposits and withdrawals, by hand and automatic, and the `should bank deposit` and `should bank withdraw` trip values |
+| Equipping | `equip upgrades` does not put on the player's bag items or take off their equipped ones; `EquipAction::EquipItem` refuses either |
+| Using up | `use random recipe`, `open random item` and `use random quest item` leave the player's items |
+| Soul shards | a warlock's extra shard is never one of the player's |
+
+The trip values matter as much as the actions.
+A bot whose only sellable items are its player's would otherwise walk to a vendor, sell nothing, and walk there again.
+
+Money: `free money for` and `has all money for`, which every spending decision reads,
+count only the money above the floor.
+A bot that has not earned anything yet buys, trains and repairs nothing.
+
+A core patch, `autonomous-owned-items.patch`, refuses the same items a second time
+in the handlers the bot tree sells, auctions and trades through:
+`HandleSellItemOpcode`, `HandleAuctionSellItem` and `HandleSetTradeItemOpcode`.
+Each refusal is logged as an error starting `Owned items: refused`, naming the bot and the item,
+since it means a path in the bot tree missed the check.
+Destroying, mailing, giving and banking call the core directly, without a handler that could refuse,
+and rely on the checks above.
+
+Known gaps:
+- A player's stack and the bot's stack of the same item can merge, when the bot loots or takes mail.
+  The merged stack keeps one guid, so it is all the player's or all the bot's.
+- The record is made at a clean logout. A server crash while the player is on the character
+  leaves the record from before, so what they picked up in that session counts as the bot's.
+- A looted item better than one of the player's equipped items counts as an upgrade
+  that the bot can never put on, so it is kept, not sold.
+
 ## Where they differ from random bots
 
 | Rule | Random bot | Autonomous bot |

@@ -13,13 +13,10 @@ bool ShouldBankDepositValue::Calculate()
     if (AI_VALUE(uint8, "bank space") > 80)
         return false;
 
-    // Check if we have items worth banking
-    uint32 toBankCount = AI_VALUE2(uint32, "item count", "usage " + std::to_string((uint8)ItemUsage::ITEM_USAGE_BANK));
-
-    if (toBankCount == 0)
-        return false;
-
-    return true;
+    // Check if we have items worth banking. wow-playground: what the player left on the character is never banked, so
+    // only the bot's own items count, or the bot would keep walking to a bank it cannot use.
+    std::list<Item*> toBank = AI_VALUE2(std::list<Item*>, "inventory items", "usage " + std::to_string((uint8)ItemUsage::ITEM_USAGE_BANK));
+    return std::any_of(toBank.begin(), toBank.end(), [this](Item* item) { return item && !ai->IsOwnersItem(item); });
 }
 
 bool ShouldBankWithdrawValue::Calculate()
@@ -27,13 +24,18 @@ bool ShouldBankWithdrawValue::Calculate()
     if (AI_VALUE(uint8, "bag space") > 80)
         return false;
 
-    uint32 inBankCount = AI_VALUE2(uint32, "bank item count", "all");
-    uint32 stayInBankCount = AI_VALUE2(uint32, "bank item count", "usage " + std::to_string((uint8)ItemUsage::ITEM_USAGE_BANK));
+    // wow-playground: what the player left in the bank stays there, so only the bot's own items that do not belong in
+    // the bank count.
+    for (Item* item : AI_VALUE2(std::list<Item*>, "bank items", "all"))
+    {
+        if (!item || ai->IsOwnersItem(item))
+            continue;
 
-    if (inBankCount == stayInBankCount)
-        return false;    
+        if (AI_VALUE2(ItemUsage, "item usage", std::to_string(item->GetProto()->ItemId)) != ItemUsage::ITEM_USAGE_BANK)
+            return true;
+    }
 
-    return true;
+    return false;
 }
 
 #ifndef MANGOSBOT_ZERO

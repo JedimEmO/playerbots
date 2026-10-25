@@ -95,6 +95,10 @@ namespace ai
             if (!item)
                 return 0;
 
+            // wow-playground: an item the player left on the character keeps its enchant, or its lack of one.
+            if (ai->IsOwnersItem(item))
+                return 0;
+
             uint32 castCount = AI_VALUE2(uint32, "has reagents for", pSpellInfo->Id);
 
             if (!castCount)

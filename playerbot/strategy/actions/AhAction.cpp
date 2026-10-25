@@ -130,6 +130,10 @@ bool AhAction::ExecuteCommand(Player* requester, std::string text, Unit* auction
 
 bool AhAction::PostItem(Player* requester, Item* item, uint32 price, Unit* auctioneer, uint32 time)
 {
+    // wow-playground: what the player left on the character is never put up for auction.
+    if (ai->IsOwnersItem(item))
+        return false;
+
     ObjectGuid itemGuid = item->GetObjectGuid();
     ItemPrototype const* proto = item->GetProto();
 

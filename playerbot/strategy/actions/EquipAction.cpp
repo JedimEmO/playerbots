@@ -283,6 +283,10 @@ void EquipAction::EquipItem(PlayerbotAI* ai, Player* requester, Item* item, bool
             oldOffhand = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
     }
 
+    // wow-playground: what the player left equipped stays in its slot, and what they left in the bags stays there.
+    if (ai->IsOwnersItem(item) || (oldItem && ai->IsOwnersItem(oldItem)) || (oldOffhand && ai->IsOwnersItem(oldOffhand)))
+        return;
+
     if (item->GetProto()->InventoryType == INVTYPE_AMMO)
     {
         bot->SetAmmo(itemId);
@@ -404,9 +408,10 @@ bool EquipUpgradesAction::Execute(Event& event)
     Item* oldMainhand = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
     Item* oldOffhand = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
         
-    if (oldMainhand)
+    // wow-playground: weapons the player left equipped are not taken off to be weighed against the bags.
+    if (oldMainhand && !ai->IsOwnersItem(oldMainhand))
         UnequipAction::UnequipItem(ai, bot, oldMainhand, true);
-    if (oldOffhand)
+    if (oldOffhand && !ai->IsOwnersItem(oldOffhand))
         UnequipAction::UnequipItem(ai, bot, oldOffhand, true);
 
     context->ClearExpiredValues("item usage", 10); //Clear old item usage.
@@ -437,6 +442,10 @@ bool EquipUpgradesAction::Execute(Event& event)
             continue;
 #endif
 
+        // wow-playground: what the player left in the bags is not put on.
+        if (ai->IsOwnersItem(item))
+            continue;
+
         ItemUsage usage = AI_VALUE2(ItemUsage, "item usage", ItemQualifier(item).GetQualifier());
         if (usage == ItemUsage::ITEM_USAGE_EQUIP || usage == ItemUsage::ITEM_USAGE_BAD_EQUIP)
         {
@@ -458,7 +467,7 @@ bool EquipUpgradesAction::Execute(Event& event)
         Item* mh = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
         Item* oh = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
 
-        if (mh && oh
+        if (mh && oh && !ai->IsOwnersItem(mh) && !ai->IsOwnersItem(oh)
             && mh->GetProto()->Class == ITEM_CLASS_WEAPON
             && oh->GetProto()->Class == ITEM_CLASS_WEAPON
             && mh->GetProto()->InventoryType != INVTYPE_2HWEAPON)

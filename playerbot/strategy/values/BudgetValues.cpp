@@ -317,7 +317,9 @@ uint32 TotalMoneyNeededForValue::Calculate()
 
 bool HasAllMoneyForValue::Calculate()
 {
-    uint32 money = bot->GetMoney();
+    // wow-playground: the money the player left on an autonomous character is not the bot's to spend.
+    uint32 floor = sRandomPlayerbotMgr.GetOwnersMoneyFloor(bot);
+    uint32 money = bot->GetMoney() > floor ? bot->GetMoney() - floor : 0;
 
     if (ai->HasCheat(BotCheatMask::gold))
         return true;
@@ -338,7 +340,9 @@ bool HasAllMoneyForValue::Calculate()
 
 uint32 FreeMoneyForValue::Calculate() 
 {
-    uint32 money = bot->GetMoney();
+    // wow-playground: the money the player left on an autonomous character is not the bot's to spend.
+    uint32 floor = sRandomPlayerbotMgr.GetOwnersMoneyFloor(bot);
+    uint32 money = bot->GetMoney() > floor ? bot->GetMoney() - floor : 0;
 
     if (ai->HasCheat(BotCheatMask::gold))
         return 10000000;

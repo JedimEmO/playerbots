@@ -27,6 +27,9 @@ void DestroyItemAction::DestroyItem(FindItemVisitor* visitor, Player* requester)
 	for (std::list<Item*>::iterator i = items.begin(); i != items.end(); ++i)
     {
 		Item* item = *i;
+        // wow-playground: what the player left on the character is never destroyed.
+        if (ai->IsOwnersItem(item))
+            continue;
         std::ostringstream out; out << chat->formatItem(item) << " destroyed";
         bot->DestroyItem(item->GetBagSlot(),item->GetSlot(), true);
         ai->TellPlayer(requester, out, PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL, false);
@@ -131,7 +134,7 @@ bool DestroyAllGrayItemsAction::Execute(Event& event)
                 {
                     if (const ItemPrototype* proto = pItem->GetProto())
                     {
-                        if (proto->Quality == ITEM_QUALITY_POOR)
+                        if (proto->Quality == ITEM_QUALITY_POOR && !ai->IsOwnersItem(pItem))
                         {
                             std::ostringstream out; out << ai->GetChatHelper()->formatItem(pItem->GetProto()) << " destroyed";
                             sLog.outDetail("%s via DestroyAllGrayItemsAction", out.str().c_str());
@@ -152,7 +155,7 @@ bool DestroyAllGrayItemsAction::Execute(Event& event)
         {
             if (const ItemPrototype* proto = pItem->GetProto())
             {
-                if (proto->Quality == ITEM_QUALITY_POOR)
+                if (proto->Quality == ITEM_QUALITY_POOR && !ai->IsOwnersItem(pItem))
                 {
                     std::ostringstream out; out << ai->GetChatHelper()->formatItem(pItem->GetProto()) << " destroyed";
                     sLog.outDetail("%s via DestroyAllGrayItemsAction", out.str().c_str());

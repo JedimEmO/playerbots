@@ -10,6 +10,7 @@
 #include <list>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 class WorldPacket;
@@ -114,6 +115,22 @@ public:
         void SetXpCap(uint32 guid, uint32 level);
         // The level a bot-played autonomous character stops gaining experience at, or 0. Any thread; Player::GiveXP asks.
         uint32 GetXpCap(Player* bot);
+        // wow-playground: what a player left on their autonomous characters, which a bot playing one never parts with.
+        // Everything a character holds when its player logs out of it is the player's: each item by guid, and its
+        // money as a floor the bot does not spend below. A character never recorded is recorded the first time a bot
+        // playing it is asked, from what it holds then. Items a player mails to it are added when the bot takes them.
+        // See docs/autonomous-bots.md.
+        // Records everything player holds as theirs, replacing the last record. While the player is in the world.
+        void RecordOwnersItems(Player* player);
+        // Whether item is one the player left on the autonomous character bot plays. False for every other bot and
+        // for a character a client plays. Any thread.
+        bool IsOwnersItem(Player* bot, const Item* item);
+        // Adds item to what the player left on the autonomous character bot plays.
+        void AddOwnersItem(Player* bot, const Item* item);
+        // Raises the money floor of the autonomous character bot plays, as for money a player mails to it.
+        void AddOwnersMoney(Player* bot, uint32 money);
+        // The money the bot playing an autonomous character may not spend below, in copper; 0 for every other bot.
+        uint32 GetOwnersMoneyFloor(Player* bot);
         void InstaRandomize(Player* bot);
         void Randomize(Player* bot);
         void RandomizeFirst(Player* bot);
@@ -325,6 +342,19 @@ public:
         time_t autonomousRefreshTime = 0;
         // When each autonomous character may next be sent to log in, so a slow login is not started twice.
         std::map<uint32, time_t> autonomousLoginRetry;
+        // What the players left on their autonomous characters, by character guid; see RecordOwnersItems. Loaded from
+        // ai_playerbot_owned_items and the 'ownermoney' event (the floor plus one, so a row means recorded).
+        struct OwnersItems
+        {
+            std::unordered_set<uint32> items;
+            uint32 moneyFloor = 0;
+        };
+        // The record for bot, loaded or made on first use. With ownersItemsMutex held.
+        OwnersItems& OwnersItemsFor(Player* bot);
+        OwnersItems RecordFrom(Player* player);
+        void StoreOwnersItems(uint32 guid, const OwnersItems& owned);
+        std::map<uint32, OwnersItems> ownersItems;
+        std::mutex ownersItemsMutex;
         std::list<uint32> arenaTeamMembers;
         uint32 bgBotsCount;
         uint32 playersLevel = 0;

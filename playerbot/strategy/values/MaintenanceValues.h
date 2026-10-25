@@ -5,6 +5,18 @@
 
 namespace ai
 {
+    // wow-playground: how many items in the bags with this usage are the bot's own, not left there by the player.
+    inline uint32 BotsOwnCount(PlayerbotAI* ai, ItemUsage usage)
+    {
+        uint32 count = 0;
+        for (Item* item : ai->GetAiObjectContext()->GetValue<std::list<Item*>>("inventory items", "usage " + std::to_string((uint8)usage))->Get())
+        {
+            if (item && !ai->IsOwnersItem(item))
+                count += item->GetCount();
+        }
+        return count;
+    }
+
     class CanMoveAroundValue : public BoolCalculatedValue
     {
     public:
@@ -73,7 +85,8 @@ namespace ai
     {
     public:
         CanSellValue(PlayerbotAI* ai) : BoolCalculatedValue(ai, "can sell",2) {}
-        virtual bool Calculate() override { return ai->HasStrategy("rpg vendor", BotState::BOT_STATE_NON_COMBAT) && AI_VALUE2(uint32, "item count", "usage " + std::to_string((uint8)ItemUsage::ITEM_USAGE_VENDOR)) > 0; };
+        // wow-playground: only the bot's own items count; what the player left on the character is never sold.
+        virtual bool Calculate() override { return ai->HasStrategy("rpg vendor", BotState::BOT_STATE_NON_COMBAT) && BotsOwnCount(ai, ItemUsage::ITEM_USAGE_VENDOR) > 0; };
     };
 
     class CanBuyValue : public BoolCalculatedValue
@@ -94,7 +107,8 @@ namespace ai
     {
     public:
         CanAHSellValue(PlayerbotAI* ai) : BoolCalculatedValue(ai, "can ah sell", 2) {}
-        virtual bool Calculate() override { return ai->HasStrategy("rpg vendor", BotState::BOT_STATE_NON_COMBAT) && AI_VALUE2(uint32, "item count", "usage " + std::to_string((uint8)ItemUsage::ITEM_USAGE_AH)) > 1 && AI_VALUE2(uint32, "free money for", (uint32)NeedMoneyFor::ah) > GetAuctionDeposit(); };
+        // wow-playground: only the bot's own items count; what the player left on the character is never auctioned.
+        virtual bool Calculate() override { return ai->HasStrategy("rpg vendor", BotState::BOT_STATE_NON_COMBAT) && BotsOwnCount(ai, ItemUsage::ITEM_USAGE_AH) > 1 && AI_VALUE2(uint32, "free money for", (uint32)NeedMoneyFor::ah) > GetAuctionDeposit(); };
 
         uint32 GetAuctionDeposit()
         {

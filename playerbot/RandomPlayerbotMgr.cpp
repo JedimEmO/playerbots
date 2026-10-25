@@ -1,6 +1,7 @@
 #include "Config/Config.h"
 
 #include "playerbot/playerbot.h"
+#include <functional>
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/PlayerbotControl.h"
 #include "playerbot/PlayerbotFactory.h"
@@ -1295,6 +1296,162 @@ uint32 RandomPlayerbotMgr::GetXpCap(Player* bot)
     std::lock_guard<std::mutex> guard(autonomousBotsMutex);
     auto it = autonomousBots.find(bot->GetGUIDLow());
     return it == autonomousBots.end() ? 0 : it->second.xpCap;
+}
+
+// Every item player holds that is still theirs to keep: equipped, in the bags and the backpack, in the bank and its
+// bags, and on the keyring. Bought-back slots are left out; those items were sold.
+static void ForEachHeldItem(Player* player, const std::function<void(Item*)>& visit)
+{
+    auto visitSlot = [&](uint8 slot)
+    {
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item)
+            return;
+
+        visit(item);
+        if (Bag* bag = dynamic_cast<Bag*>(item))
+        {
+            for (uint32 i = 0; i < bag->GetBagSize(); ++i)
+            {
+                if (Item* inner = bag->GetItemByPos(i))
+                    visit(inner);
+            }
+        }
+    };
+
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < BUYBACK_SLOT_START; ++slot)
+        visitSlot(slot);
+    for (uint8 slot = KEYRING_SLOT_START; slot < KEYRING_SLOT_END; ++slot)
+        visitSlot(slot);
+}
+
+RandomPlayerbotMgr::OwnersItems RandomPlayerbotMgr::RecordFrom(Player* player)
+{
+    OwnersItems owned;
+    ForEachHeldItem(player, [&owned](Item* item) { owned.items.insert(item->GetGUIDLow()); });
+    owned.moneyFloor = player->GetMoney();
+    return owned;
+}
+
+void RandomPlayerbotMgr::StoreOwnersItems(uint32 guid, const OwnersItems& owned)
+{
+    static bool tableReady = false;
+    if (!tableReady)
+    {
+        CharacterDatabase.DirectExecute(
+            "CREATE TABLE IF NOT EXISTS `ai_playerbot_owned_items` ("
+            "`owner` int(10) unsigned NOT NULL, `item` int(10) unsigned NOT NULL, PRIMARY KEY (`owner`, `item`)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='wow-playground: items players left on their autonomous characters'");
+        tableReady = true;
+    }
+
+    CharacterDatabase.BeginTransaction();
+    CharacterDatabase.PExecute("DELETE FROM ai_playerbot_owned_items WHERE owner = '%u'", guid);
+    std::ostringstream values;
+    uint32 inBatch = 0;
+    auto flush = [&]()
+    {
+        if (inBatch)
+            CharacterDatabase.PExecute("INSERT INTO ai_playerbot_owned_items (owner, item) VALUES %s", values.str().c_str());
+        values.str("");
+        inBatch = 0;
+    };
+    for (uint32 item : owned.items)
+    {
+        values << (inBatch ? "," : "") << "(" << guid << "," << item << ")";
+        if (++inBatch == 100)
+            flush();
+    }
+    flush();
+    CharacterDatabase.PExecute("DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '%u' AND event = 'ownermoney'", guid);
+    CharacterDatabase.PExecute(
+        "INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES (0, '%u', '%u', 0, 'ownermoney', '%u')",
+        guid, (uint32)time(nullptr), owned.moneyFloor + 1);
+    CharacterDatabase.CommitTransaction();
+}
+
+RandomPlayerbotMgr::OwnersItems& RandomPlayerbotMgr::OwnersItemsFor(Player* bot)
+{
+    uint32 guid = bot->GetGUIDLow();
+    auto it = ownersItems.find(guid);
+    if (it != ownersItems.end())
+        return it->second;
+
+    OwnersItems owned;
+    bool recorded = false;
+    if (auto result = CharacterDatabase.PQuery(
+            "SELECT `value` FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '%u' AND event = 'ownermoney' LIMIT 1", guid))
+    {
+        recorded = true;
+        uint32 value = result->Fetch()[0].GetUInt32();
+        owned.moneyFloor = value ? value - 1 : 0;
+        if (auto items = CharacterDatabase.PQuery("SELECT item FROM ai_playerbot_owned_items WHERE owner = '%u'", guid))
+        {
+            do
+                owned.items.insert(items->Fetch()[0].GetUInt32());
+            while (items->NextRow());
+        }
+    }
+
+    if (!recorded)
+    {
+        // Never logged out of by its player since the record began: everything it holds now counts as theirs.
+        owned = RecordFrom(bot);
+        StoreOwnersItems(guid, owned);
+        sLog.outString("Owned items: recorded %u items and %u copper for %s, never recorded before", (uint32)owned.items.size(), owned.moneyFloor, bot->GetName());
+    }
+
+    return ownersItems[guid] = std::move(owned);
+}
+
+void RandomPlayerbotMgr::RecordOwnersItems(Player* player)
+{
+    OwnersItems owned = RecordFrom(player);
+    StoreOwnersItems(player->GetGUIDLow(), owned);
+    sLog.outString("Owned items: recorded %u items and %u copper for %s at its player's logout", (uint32)owned.items.size(), owned.moneyFloor, player->GetName());
+
+    std::lock_guard<std::mutex> guard(ownersItemsMutex);
+    ownersItems[player->GetGUIDLow()] = std::move(owned);
+}
+
+bool RandomPlayerbotMgr::IsOwnersItem(Player* bot, const Item* item)
+{
+    if (!bot || !item || !IsAutonomousBot(bot))
+        return false;
+
+    std::lock_guard<std::mutex> guard(ownersItemsMutex);
+    return OwnersItemsFor(bot).items.count(item->GetGUIDLow()) > 0;
+}
+
+void RandomPlayerbotMgr::AddOwnersItem(Player* bot, const Item* item)
+{
+    if (!bot || !item || !IsAutonomousBot(bot))
+        return;
+
+    std::lock_guard<std::mutex> guard(ownersItemsMutex);
+    OwnersItems& owned = OwnersItemsFor(bot);
+    if (owned.items.insert(item->GetGUIDLow()).second)
+        CharacterDatabase.PExecute("INSERT IGNORE INTO ai_playerbot_owned_items (owner, item) VALUES ('%u', '%u')", bot->GetGUIDLow(), item->GetGUIDLow());
+}
+
+void RandomPlayerbotMgr::AddOwnersMoney(Player* bot, uint32 money)
+{
+    if (!bot || !money || !IsAutonomousBot(bot))
+        return;
+
+    std::lock_guard<std::mutex> guard(ownersItemsMutex);
+    OwnersItems& owned = OwnersItemsFor(bot);
+    owned.moneyFloor += money;
+    StoreAutonomousValue(bot->GetGUIDLow(), "ownermoney", owned.moneyFloor + 1);
+}
+
+uint32 RandomPlayerbotMgr::GetOwnersMoneyFloor(Player* bot)
+{
+    if (!bot || !IsAutonomousBot(bot))
+        return 0;
+
+    std::lock_guard<std::mutex> guard(ownersItemsMutex);
+    return OwnersItemsFor(bot).moneyFloor;
 }
 
 bool RandomPlayerbotMgr::IsAutonomousBot(Player* bot)
@@ -3905,6 +4062,10 @@ void RandomPlayerbotMgr::HandleCommand(uint32 type, const std::string& text, Pla
 
 void RandomPlayerbotMgr::OnPlayerLogout(Player* player)
 {
+    // wow-playground: a player handing their character back to the server leaves everything on it in the bot's care.
+    if (player->isRealPlayer() && player->GetSession() && sPlayerbotAIConfig.IsInAutonomousAccountList(player->GetSession()->GetAccountId()))
+        RecordOwnersItems(player);
+
     bool hadPlayerBot = GetPlayerBot(player->GetGUIDLow());
 
     DisablePlayerBot(player->GetGUIDLow());

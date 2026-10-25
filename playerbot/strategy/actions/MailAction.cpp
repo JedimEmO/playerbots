@@ -106,6 +106,10 @@ public:
                 ai->TellPlayer(requester, out.str(), PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL, false);
             }
 
+            // wow-playground: money a player mails to an autonomous character is theirs, not the bot's to spend.
+            if (mail->messageType == MAIL_NORMAL)
+                sRandomPlayerbotMgr.AddOwnersMoney(bot, mail->money);
+
             WorldPacket packet;
             packet << mailbox;
             packet << mail->messageID;
@@ -147,6 +151,14 @@ public:
                 }
 
                 bot->GetSession()->HandleMailTakeItem(packet);
+
+                // wow-playground: an item a player mails to an autonomous character is theirs. Auction house mail
+                // brings the bot's own purchases and is left out.
+                if (mail->messageType == MAIL_NORMAL)
+                {
+                    if (Item* taken = bot->GetItemByGuid(ObjectGuid(HIGHGUID_ITEM, *i)))
+                        sRandomPlayerbotMgr.AddOwnersItem(bot, taken);
+                }
             }
 
             RemoveMail(bot, mail->messageID, mailbox);

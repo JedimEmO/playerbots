@@ -52,6 +52,10 @@ std::list<Item*> ItemsUsefulToGiveValue::Calculate()
             if (!item->CanBeTraded())
                 continue;
 
+            // wow-playground: what the player left on the character is never given away.
+            if (ai->IsOwnersItem(item))
+                continue;
+
             // do not trade equipped items
             if (item->IsEquipped())
                 continue;

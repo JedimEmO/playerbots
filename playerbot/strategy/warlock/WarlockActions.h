@@ -53,7 +53,8 @@ namespace ai
                     if (target && AI_VALUE2(uint8, "health", GetTargetName()) <= 20)
                     {
                         Item* soulShard = bot->GetItemByEntry(6265);
-                        if (soulShard)
+                        // wow-playground: a shard the player left on the character stays.
+                        if (soulShard && !ai->IsOwnersItem(soulShard))
                         {
                             bot->DestroyItem(soulShard->GetBagSlot(), soulShard->GetSlot(), true);
                         }

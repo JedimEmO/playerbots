@@ -6610,6 +6610,22 @@ bool PlayerbotAI::AllowActivity(ActivityType activityType, bool checkNow)
     return allowed;
 }
 
+bool PlayerbotAI::IsOwnersItem(const Item* item) const
+{
+    return sRandomPlayerbotMgr.IsOwnersItem(bot, item);
+}
+
+bool PlayerbotAI::HoldsOwnersItemWithId(uint32 itemId)
+{
+    if (!sRandomPlayerbotMgr.IsAutonomousBot(bot))
+        return false;
+
+    FindItemByIdVisitor visitor(itemId);
+    InventoryIterateItems(&visitor, IterateItemsMask::ITERATE_ITEMS_IN_BAGS);
+    std::list<Item*> items = visitor.GetResult();
+    return std::any_of(items.begin(), items.end(), [this](Item* item) { return IsOwnersItem(item); });
+}
+
 bool PlayerbotAI::HasCheat(BotCheatMask mask) const
 {
     if (((uint32)mask & (uint32)cheatMask) != 0)

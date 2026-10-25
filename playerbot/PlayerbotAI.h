@@ -683,6 +683,12 @@ public:
     bool AllowActivity(ActivityType activityType = ALL_ACTIVITY, bool checkNow = false);
 
     bool HasCheat(BotCheatMask mask) const;
+    // wow-playground: an item the player left on the autonomous character this bot plays, which the bot never parts
+    // with: not sold, destroyed, disenchanted, mailed, traded, banked, used up or taken off. See RandomPlayerbotMgr.
+    bool IsOwnersItem(const Item* item) const;
+    // wow-playground: whether any item with this id in the bags is the player's. For actions that name an item by id
+    // and let the core pick which one, such as a cast on it or a use of it.
+    bool HoldsOwnersItemWithId(uint32 itemId);
     BotCheatMask GetCheat() { return cheatMask; }
     void SetCheat(BotCheatMask mask) { cheatMask = mask; }
 

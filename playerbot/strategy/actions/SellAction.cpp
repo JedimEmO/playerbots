@@ -76,6 +76,10 @@ bool SellAction::Sell(Player* requester, Item* item)
 {
     bool didSell = false;
 
+    // wow-playground: what the player left on the character is never sold.
+    if (ai->IsOwnersItem(item))
+        return false;
+
     // wow-playground: a farming bot keeps the trade goods it gathers for `.rndbot mailgoods`.
     if (item->GetProto()->Class == ITEM_CLASS_TRADE_GOODS && ai->HasStrategy("farm", BotState::BOT_STATE_NON_COMBAT))
         return false;

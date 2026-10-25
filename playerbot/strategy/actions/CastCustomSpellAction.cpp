@@ -753,6 +753,10 @@ bool DisenchantRandomItemAction::Execute(Event& event)
             continue;
         }
 
+        // wow-playground: the cast picks an item by id, so an id the player left any of on the character is skipped.
+        if (ai->HoldsOwnersItemWithId(item))
+            continue;
+
         ItemQualifier itemQualifier(item);
 
         Event disenchantEvent = Event("disenchant random item", "13262 " + chat->formatQItem(item));

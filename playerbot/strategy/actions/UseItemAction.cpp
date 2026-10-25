@@ -1329,6 +1329,10 @@ bool UseRandomRecipeAction::Execute(Event& event)
         if (bot->HasSpell(ItemUsageValue::GetRecipeSpell(recipe->GetProto())))
             continue;
 
+        // wow-playground: a recipe the player left on the character is theirs to learn. The use names the item by id.
+        if (ai->HoldsOwnersItemWithId(recipe->GetProto()->ItemId))
+            continue;
+
         recipeName = chat->formatItem(recipe);
         if (!urand(0, 10))
             break;
@@ -1368,6 +1372,10 @@ bool OpenRandomItemAction::Execute(Event& event)
     {
         if (!urand(0, 10))
             break;
+
+        // wow-playground: what the player left on the character stays closed. The use names the item by id.
+        if (ai->HoldsOwnersItemWithId(item->GetProto()->ItemId))
+            continue;
 
         itemName = chat->formatItem(item);
     }
@@ -1417,7 +1425,8 @@ bool UseRandomQuestItemAction::Execute(Event& event)
         if (proto->StartQuest)
         {
             Quest const* qInfo = sObjectMgr.GetQuestTemplate(proto->StartQuest);
-            if (bot->CanTakeQuest(qInfo, false))
+            // wow-playground: a quest item the player left on the character is theirs to start.
+            if (bot->CanTakeQuest(qInfo, false) && !ai->IsOwnersItem(questItem))
             {
                 item = questItem;
                 break;

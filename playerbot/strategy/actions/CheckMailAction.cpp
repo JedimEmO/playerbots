@@ -8,6 +8,11 @@ using namespace ai;
 
 bool CheckMailAction::Execute(Event& event)
 {
+    // wow-playground: this sends a letter's first item back to a player who mailed the bot and deletes the rest of the
+    // letter, money and other items with it. An autonomous character's mail is its player's, so it is left alone.
+    if (sRandomPlayerbotMgr.IsAutonomousBot(bot))
+        return false;
+
     WorldPacket p;
     bot->GetSession()->HandleQueryNextMailTime(p);   
 

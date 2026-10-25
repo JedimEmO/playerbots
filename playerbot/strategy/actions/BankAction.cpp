@@ -94,6 +94,10 @@ bool BankAction::Withdraw(Player* requester, const uint32 itemid)
     if (!pItem)
         return false;
 
+    // wow-playground: what the player left in the bank stays where they put it.
+    if (ai->IsOwnersItem(pItem))
+        return false;
+
     const ItemPrototype* proto = pItem->GetProto();
     if (!proto)
         return false;
@@ -130,6 +134,10 @@ bool BankAction::Deposit(Player* requester, Item* pItem)
 
     const ItemPrototype* proto = pItem ? pItem->GetProto() : nullptr;
     if (!proto)
+        return false;
+
+    // wow-playground: what the player left in the bags stays where they put it.
+    if (ai->IsOwnersItem(pItem))
         return false;
 
     const std::string itemId = std::to_string(proto->ItemId);
@@ -251,6 +259,10 @@ bool BankAction::AutoDeposit()
         if (!item)
             continue;
 
+        // wow-playground: what the player left in the bags stays where they put it.
+        if (ai->IsOwnersItem(item))
+            continue;
+
         const ItemPrototype* proto = item->GetProto();
         if (!proto)
             continue;
@@ -291,6 +303,10 @@ bool BankAction::AutoWithdraw()
     auto checkAndWithdraw = [&](Item* pItem) -> bool
     {
         if (!pItem)
+            return false;
+
+        // wow-playground: what the player left in the bank stays where they put it.
+        if (ai->IsOwnersItem(pItem))
             return false;
 
         ItemPrototype const* proto = pItem->GetProto();

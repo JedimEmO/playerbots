@@ -14,6 +14,15 @@ bool SendMailAction::Execute(Event& event)
     uint32 account = sObjectMgr.GetPlayerAccountIdByGUID(bot->GetObjectGuid());
     bool randomBot = sPlayerbotAIConfig.IsInRandomAccountList(account);
 
+    // wow-playground: sendmail is a command anyone may give, and an autonomous character's money and items are its
+    // player's. Its player cannot be on another character of the account to ask, so nobody can.
+    if (sRandomPlayerbotMgr.IsAutonomousBot(bot))
+    {
+        if (requester)
+            bot->Whisper("I cannot send mail", LANG_UNIVERSAL, requester->GetObjectGuid());
+        return false;
+    }
+
     std::string text = event.getParam();
     Player* receiver = requester;
     Player* tellTo = requester;

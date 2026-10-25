@@ -35,6 +35,10 @@ bool GuildShareItemAction::Execute(Event& event)
         if (item->GetProto()->ItemId != itemId)
             continue;
 
+        // wow-playground: what the player left on the character is never shared away.
+        if (ai->IsOwnersItem(item))
+            continue;
+
         uint32 stackCount = item->GetCount();
         uint32 giveCount = (shareAmount > 0 && shareAmount < stackCount) ? shareAmount : stackCount;
 

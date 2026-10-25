@@ -2716,9 +2716,11 @@ std::list<std::string> PlayerbotHolder::HandleMailGoods(Player* master, const st
 
     // Collected first: moving an item out changes the slots being walked.
     std::vector<Item*> goods;
-    auto consider = [&goods](Item* item)
+    // The goods the bot gathered; what the player left on the character stays on it.
+    PlayerbotAI* botAI = bot->GetPlayerbotAI();
+    auto consider = [&goods, botAI](Item* item)
     {
-        if (item && item->GetProto()->Class == ITEM_CLASS_TRADE_GOODS && !item->IsSoulBound())
+        if (item && item->GetProto()->Class == ITEM_CLASS_TRADE_GOODS && !item->IsSoulBound() && !botAI->IsOwnersItem(item))
             goods.push_back(item);
     };
 

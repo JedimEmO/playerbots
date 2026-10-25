@@ -30,6 +30,10 @@ bool GiveItemAction::Execute(Event& event)
     {
         Item* item = *j;
 
+        // wow-playground: what the player left on the character is never given away.
+        if (ai->IsOwnersItem(item))
+            continue;
+
         if (receiver->CanUseItem(item->GetProto()) != EQUIP_ERR_OK)
             continue;
 
