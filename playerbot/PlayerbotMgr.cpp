@@ -9,6 +9,7 @@
 #include "playerbot/ServerFacade.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/WorldPosition.h"
+#include "playerbot/strategy/values/FarmOrderValues.h"
 #include "Chat/ChannelMgr.h"
 #include "Social/SocialMgr.h"
 #include "Accounts/AccountMgr.h"
@@ -55,6 +56,7 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["ik"] = &PlayerbotHolder::HandleInnkeeper;
     m_holderHandlers["mailgoods"] = &PlayerbotHolder::HandleMailGoods;
     m_holderHandlers["unstick"] = &PlayerbotHolder::HandleUnstick;
+    m_holderHandlers["farm"] = &PlayerbotHolder::HandleFarm;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -2740,6 +2742,16 @@ std::list<std::string> PlayerbotHolder::HandleMailGoods(Player* master, const st
     if (goods.empty())
         return {"Nothing to mail"};
 
+    // wow-playground: what goes of a farm order's item counts towards the order. See FarmOrders.
+    uint32 farmed = 0;
+    RandomPlayerbotMgr::FarmOrder order;
+    if (sRandomPlayerbotMgr.GetFarmOrder(bot, order))
+    {
+        for (Item* item : goods)
+            if (item->GetEntry() == order.item)
+                farmed += item->GetCount();
+    }
+
     // Online or not; MailReceiver puts the letter in an online player's mailbox at once.
     Player* receiver = sObjectMgr.GetPlayer(receiverGuid);
 
@@ -2764,6 +2776,9 @@ std::list<std::string> PlayerbotHolder::HandleMailGoods(Player* master, const st
 
     // For an offline receiver the mail frees the items, so no cached list of the bot's items may outlive them.
     bot->GetPlayerbotAI()->GetAiObjectContext()->ClearValues("inventory item");
+
+    if (farmed)
+        sRandomPlayerbotMgr.AddFarmMailed(bot->GetGUIDLow(), farmed);
 
     std::string count = std::to_string(goods.size());
     return {"Mailed " + count + " items in " + count + " mails to " + playerName};
@@ -2829,6 +2844,140 @@ std::list<std::string> PlayerbotHolder::HandleUnstick(Player* master, const std:
     bot->GetHomebindLocation(homeX, homeY, homeZ, homeMap);
     sLog.outString("Unstick: %s to its home on map %u", bot->GetName(), homeMap);
     return {"Unstuck " + std::string(bot->GetName())};
+}
+
+// wow-playground: the answer to .rndbot farm, the character's order as it stands:
+// `<Name> farms <item> (item <id>): <gathered> of <count>`, without ` of <count>` for an order with no count, or
+// `<Name> farms nothing`. Gathered is what was mailed since the order was set, and what the character holds of its
+// own while it is online.
+static std::string FarmLine(const std::string& name, uint32 guid, Player* bot)
+{
+    RandomPlayerbotMgr::FarmOrder order = sRandomPlayerbotMgr.GetFarmOrder(guid);
+    ItemPrototype const* proto = order.item ? sItemStorage.LookupEntry<ItemPrototype>(order.item) : nullptr;
+    if (!proto)
+        return name + " farms nothing";
+
+    std::string line = name + " farms " + proto->Name1 + " (item " + std::to_string(order.item) + "): " +
+        std::to_string(FarmOrders::Gathered(bot, order.item, order.mailed));
+    if (order.count)
+        line += " of " + std::to_string(order.count);
+    return line;
+}
+
+// The skill a character has, online from the character, offline from the database.
+static uint32 FarmSkill(uint32 guid, Player* bot, SkillType skill)
+{
+    if (bot)
+        return bot->GetSkillValue(skill);
+
+    auto result = CharacterDatabase.PQuery("SELECT `value` FROM character_skills WHERE guid = '%u' AND skill = '%u'", guid, uint32(skill));
+    return result ? result->Fetch()[0].GetUInt32() : 0;
+}
+
+// Why the character cannot gather the item, or empty when its skill reaches one of the item's sources.
+static std::string FarmRefusal(const std::string& name, uint32 guid, Player* bot, uint32 itemId)
+{
+    std::map<SkillType, uint32> lowest;
+    for (const FarmSource& source : FarmOrders::Sources(itemId))
+    {
+        auto it = lowest.find(source.skill);
+        if (it == lowest.end() || source.reqSkill < it->second)
+            lowest[source.skill] = source.reqSkill;
+    }
+
+    for (auto& [skill, reqSkill] : lowest)
+        if (FarmSkill(guid, bot, skill) >= reqSkill)
+            return "";
+
+    std::string itemName = sItemStorage.LookupEntry<ItemPrototype>(itemId)->Name1;
+    for (auto& [skill, reqSkill] : lowest)
+    {
+        uint32 has = FarmSkill(guid, bot, skill);
+        if (has)
+            return name + " needs " + FarmOrders::SkillName(skill) + " " + std::to_string(reqSkill) + " for " + itemName +
+                ", and has " + std::to_string(has);
+    }
+
+    std::string skills;
+    for (auto& [skill, reqSkill] : lowest)
+        skills += (skills.empty() ? "" : " or ") + FarmOrders::SkillName(skill);
+    return name + " has no " + skills + " for " + itemName;
+}
+
+// .rndbot farm <bot>                                  the character's farm order and how far it got
+// .rndbot farm <bot> off                              ends it
+// .rndbot farm <bot> <item name or id> [<count>]      gathers that herb, ore or skin and nothing else, until it has
+//                                                     gathered the count
+// wow-playground: a farm order (FarmOrders) for an autonomous character, online or not, kept across restarts. Setting
+// one is refused when the character's skill reaches none of the item's sources. Runs on the world thread while the map
+// threads are parked, as HandleMailGoods does, so the bot's travel target can be cleared for the order to take over.
+std::list<std::string> PlayerbotHolder::HandleFarm(Player* master, const std::string param, AccountTypes security)
+{
+    const std::string usage = "Usage: .rndbot farm <bot> [off|<item name or id> [<count>]]";
+
+    if (security < SEC_GAMEMASTER)
+        return {"You may not give farm orders"};
+
+    std::vector<std::string> words;
+    split(words, param, " ");
+    words.erase(std::remove(words.begin(), words.end(), std::string()), words.end());
+
+    if (words.empty())
+        return {usage};
+
+    uint32 guid = 0;
+    RandomPlayerbotMgr::AutonomousStatus status;
+    if (!sRandomPlayerbotMgr.FindAutonomousBot(words[0], guid, status))
+        return {"No autonomous character named " + words[0]};
+
+    Player* bot = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false);
+    if (bot && (!bot->IsInWorld() || bot->IsBeingTeleported()))
+        bot = nullptr;
+
+    if (words.size() == 1)
+        return {FarmLine(status.name, guid, bot)};
+
+    uint32 item = 0;
+    uint32 count = 0;
+    std::string off = words[1];
+    std::transform(off.begin(), off.end(), off.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (words.size() > 2 || off != "off")
+    {
+        size_t itemWords = words.size() - 1;
+        if (words.size() > 2 && Qualified::isValidNumberString(words.back()))
+        {
+            count = words.back().size() <= 4 ? uint32(std::stoul(words.back())) : 0;
+            if (!count || count > FarmOrders::MAX_COUNT)
+                return {"Count must be from 1 to " + std::to_string(FarmOrders::MAX_COUNT)};
+            itemWords--;
+        }
+
+        std::string text;
+        for (size_t i = 1; i <= itemWords; ++i)
+            text += (i > 1 ? " " : "") + words[i];
+
+        std::string error;
+        item = FarmOrders::FindItem(text, error);
+        if (!item)
+            return {error};
+
+        std::string refusal = FarmRefusal(status.name, guid, bot, item);
+        if (!refusal.empty())
+            return {refusal};
+    }
+
+    sRandomPlayerbotMgr.SetFarmOrder(guid, item, count);
+
+    // The order takes over at once: the bot gives up the trip it is on and chooses again.
+    if (bot && bot->GetPlayerbotAI())
+    {
+        AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
+        context->GetValue<bool>("has farm order")->Reset();
+        context->ClearValues("no active travel destinations");
+        sTravelMgr.SetNullTravelTarget(context->GetValue<TravelTarget*>("travel target")->Get());
+    }
+
+    return {FarmLine(status.name, guid, bot)};
 }
 
 // .rndbot teleport <bot> <player>
@@ -4106,6 +4255,8 @@ std::unordered_map<std::string, std::string> PlayerbotHolder::GetCommandTexts()
         {"teleport", "Teleport an online bot next to an online real player, on any map. Game masters and the console only.\nUsage: .rndbot teleport <bot> <player>\nExample: .rndbot teleport Dunpriest Thrain\nWith one name, .rndbot teleport still sends random bots whose names start with it to a grinding spot."},
 
         {"unstick", "Free an online bot held in combat by a creature that never fights it: end its combat, clear every threat on it and send it to its hearthstone location. Refused for a bot in a group, a dungeon or a battleground. Game masters and the console only.\nUsage: .rndbot unstick <bot>\nExample: .rndbot unstick Dunpriest"},
+
+        {"farm", "Give an autonomous character a farm order: it gathers that one herb, ore or skin, at the nodes and creatures that yield it within its skill, until it has gathered the count, what .rndbot mailgoods sent plus what it holds. With no count it never stops. Refused when its skill reaches none of them. Kept across restarts. With the name alone, the order and how far it got. Game masters and the console only.\nUsage: .rndbot farm <bot> [off|<item name or id> [<count>]]\nExample: .rndbot farm Dunpriest Peacebloom 20"},
 
         {"autonomous", "List the autonomous bots, the characters on AiPlayerbot.AutonomousAccounts, one per line with online or offline. Game masters and the console only.\nUsage: .rndbot autonomous"},
 

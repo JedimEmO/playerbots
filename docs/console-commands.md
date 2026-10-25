@@ -7,7 +7,7 @@ which SOAP returns as the command's result.
 
 They also work as `.bot <subcommand>` in game.
 There the speaker commands use the spoofed or current character as the sender,
-and `deliver`, `profession`, `teleport`, `autonomous` and `mailgoods` still need a game master account.
+and `deliver`, `profession`, `teleport`, `autonomous`, `mailgoods` and `farm` still need a game master account.
 
 One more, `.bot ik`, is for players in the game rather than the console:
 it carries a request to innkeeper and the answer back as addon messages.
@@ -284,6 +284,7 @@ Each item moves the way a player's own mail moves it: it leaves the bot and chan
 The command runs on the world thread while the maps are parked, as `teleport` does,
 so the reply counts what was sent.
 The sidecar calls it for a bot on the [`farm` strategy](autonomous-bots.md#farming).
+What it sends of a [farm order](#farm)'s item counts towards that order.
 
 | Reply | When |
 |---|---|
@@ -293,6 +294,52 @@ The sidecar calls it for a bot on the [`farm` strategy](autonomous-bots.md#farmi
 | `No player found` | No character has that name, or it is the bot itself. |
 | `Usage: .rndbot mailgoods <bot> <player>` | Anything but two names. |
 | `You may not mail goods` | The account is below game master. SOAP runs as the console, which passes. |
+
+## farm
+
+```
+.rndbot farm <bot>
+.rndbot farm <bot> off
+.rndbot farm <bot> <item name or id> [<count>]
+```
+
+Gives an autonomous character a farm order:
+it gathers that one herb, ore or skin and nothing else, until it has gathered the count.
+Without a count it never stops.
+`off` ends the order, and the name alone answers how it stands.
+
+```
+.rndbot farm Dunpriest Peacebloom 20
+Dunpriest farms Peacebloom (item 2447): 0 of 20
+```
+
+The item is an item id or a name, ignoring case.
+An exact name wins; otherwise the text must match part of exactly one item's name,
+so `kingsb` finds Kingsblood.
+Only items that some herb node, mining node or skinnable creature yields count.
+The order is refused when the character's skill reaches none of them,
+read from the character when it is online and from the database when it is not.
+It is kept across restarts.
+[Farm orders](autonomous-bots.md#farm-orders) describes what the bot does with it.
+
+Gathered is what `mailgoods` sent of the item since the order was set,
+plus what the character holds of its own while it is online.
+Offline, the answer counts only what was mailed.
+A new order starts the mailed count again at nothing.
+
+| Reply | When |
+|---|---|
+| `<Name> farms <item> (item <id>): <gathered> of <count>` | The order, after a change or with the name alone. |
+| `<Name> farms <item> (item <id>): <gathered>` | The same for an order with no count. |
+| `<Name> farms nothing` | No order, or it was just ended. |
+| `<Name> needs <Skill> <n> for <item>, and has <m>` | The character has the skill, too low for every source. |
+| `<Name> has no <Skill> for <item>` | It lacks the skill; with two skills, `Herbalism or Mining`. |
+| `No herb, ore or skin named <text>` | No farmable item matches, or `with item id <id>` for an id. |
+| `Several herbs, ores and skins match <text>: <names>` | The text matches part of more than one, and none exactly. |
+| `Count must be from 1 to 1000` | The last word is a number out of range. |
+| `No autonomous character named <name>` | The character is on no autonomous account. |
+| `Usage: .rndbot farm <bot> [off\|<item name or id> [<count>]]` | No name. |
+| `You may not give farm orders` | The account is below game master. SOAP runs as the console, which passes. |
 
 ## cmd
 

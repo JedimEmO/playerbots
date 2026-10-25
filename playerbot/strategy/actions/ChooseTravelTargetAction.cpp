@@ -6,6 +6,7 @@
 #include "playerbot/strategy/values/TravelValues.h"
 #include "playerbot/strategy/values/SharedValueContext.h"
 #include "playerbot/strategy/values/GuildValues.h"
+#include "playerbot/strategy/values/FarmOrderValues.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "Guilds/GuildMgr.h"
 #include <iomanip>
@@ -62,7 +63,8 @@ bool ChooseTravelTargetAction::Execute(Event& event)
         newTarget.SetForced(true);
         newTarget.SetRelevance(std::max<uint32>(targetRelevance, 199u));
     }
-    else if (AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::guild order")
+    else if (AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::guild order" ||
+        AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::farm order")
     {
         newTarget.SetForced(true);
         newTarget.SetRelevance(std::max<uint32>(targetRelevance, 198u));
@@ -1190,6 +1192,46 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
 
         SET_AI_VALUE2(std::string, "manual string", "future travel detail", orderTarget);
     }
+    // wow-playground: see FarmOrders. The nodes and creatures that yield the ordered item, for each gathering skill
+    // the bot has; GetPartitions keeps those its skill reaches, gray ones included.
+    else if (travelName == "farm order")
+    {
+        RandomPlayerbotMgr::FarmOrder order;
+        if (!sRandomPlayerbotMgr.GetFarmOrder(bot, order))
+        {
+            ai->TellDebug(ai->GetMaster(), "No farm order", "debug travel");
+            return false;
+        }
+
+        std::map<TravelDestinationPurpose, std::vector<int32>> sources;
+        for (const FarmSource& source : FarmOrders::Sources(order.item))
+        {
+            if (!bot->GetSkillValue(source.skill))
+                continue;
+
+            TravelDestinationPurpose purpose = source.skill == SKILL_HERBALISM ? TravelDestinationPurpose::GatherHerbalism :
+                source.skill == SKILL_MINING ? TravelDestinationPurpose::GatherMining : TravelDestinationPurpose::GatherSkinning;
+            sources[purpose].push_back(source.entry);
+        }
+
+        if (sources.empty())
+        {
+            ai->TellDebug(ai->GetMaster(), "No skill for the farm order", "debug travel");
+            return false;
+        }
+
+        *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [sources, partitions = travelPartitions, travelInfo = PlayerTravelInfo(bot), center]()
+            {
+                PartitionedTravelList list;
+                for (auto& [purpose, entries] : sources)
+                    for (auto& [partition, points] : sTravelMgr.GetPartitions(center, partitions, travelInfo, (uint32)purpose, entries, true))
+                        list[partition].insert(list[partition].end(), points.begin(), points.end());
+                return list;
+            });
+
+        if (ItemPrototype const* proto = sItemStorage.LookupEntry<ItemPrototype>(order.item))
+            SET_AI_VALUE2(std::string, "manual string", "future travel detail", std::string(proto->Name1));
+    }
     else if (travelName.find("trainer") == 0)
     {
         TrainerType type = TRAINER_TYPE_CLASS;
@@ -1292,6 +1334,7 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
     SET_AI_VALUE2(std::string, "manual string", "future travel condition",
         travelName == "guild meeting" ? "should travel named::guild meeting" :
         travelName == "guild order" ? "should travel named::guild order" :
+        travelName == "farm order" ? "should travel named::farm order" :
         event.getSource());
     SET_AI_VALUE2(int, "manual int", "future travel relevance", relevance * 100);
 
@@ -1318,6 +1361,8 @@ bool RequestNamedTravelTargetAction::isAllowed() const
     else if (name == "reagent vendor")
         return true;
     else if (name == "guild order")
+        return true;
+    else if (name == "farm order")
         return true;
     else if (name == "mount")
     {

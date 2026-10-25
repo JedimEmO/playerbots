@@ -1020,10 +1020,12 @@ bool GatherTravelDestination::IsPossible(const PlayerTravelInfo& info) const
         return false;
 
     // wow-playground: a farming bot wants the materials, not the skill, so a node it cannot learn from still counts.
-    if (info.GetSkillMax((SkillType)skillId) <= skillValue && !info.GetBoolValue("has strategy::farm")) //Not able to increase skill.
+    // A bot on a farm order (FarmOrders) wants its one resource, so even a gray one counts.
+    bool farmOrder = info.GetBoolValue("has farm order");
+    if (info.GetSkillMax((SkillType)skillId) <= skillValue && !info.GetBoolValue("has strategy::farm") && !farmOrder) //Not able to increase skill.
         return false;
 
-    if (GetPurpose() != TravelDestinationPurpose::GatherFishing && reqSkillValue + 100 < skillValue) //Gray level = no skillup
+    if (GetPurpose() != TravelDestinationPurpose::GatherFishing && reqSkillValue + 100 < skillValue && !farmOrder) //Gray level = no skillup
         return false;
 
     return true;

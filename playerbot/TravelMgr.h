@@ -89,6 +89,8 @@ namespace ai
 			{"can get mail", false },
 			{"has strategy::rpg quest", false},
 			{"has strategy::farm", false},
+			// wow-playground: see FarmOrders.
+			{"has farm order", false},
 			// wow-playground: a levelling character grinds at grind spots (GrindSpotTravelDestination).
 			{"has strategy::levelling", false},
 			{"can fight equal", false},

@@ -81,6 +81,7 @@
 #include "BankValues.h"
 #include "GroupValues.h"
 #include "GuildValues.h"
+#include "FarmOrderValues.h"
 #include "TradeValues.h"
 #include "RpgValues.h"
 #include "RTSCValues.h"
@@ -408,6 +409,7 @@ namespace ai
             creators["can buy tabard"] = [](PlayerbotAI* ai) { return new CanBuyTabard(ai); };
             creators["guild order"] = [](PlayerbotAI* ai) { return new GuildOrderValue(ai); };
             creators["has guild travel order"] = [](PlayerbotAI* ai) { return new HasGuildTravelOrderValue(ai); };
+            creators["has farm order"] = [](PlayerbotAI* ai) { return new HasFarmOrderValue(ai); };
             creators["has guild craft order"] = [](PlayerbotAI* ai) { return new HasGuildCraftOrderValue(ai); };
             creators["guild share target"] = [](PlayerbotAI* ai) { return new GuildShareTargetValue(ai); };
             creators["has guild share target"] = [](PlayerbotAI* ai) { return new HasGuildShareTargetValue(ai); };

@@ -74,6 +74,10 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     // quest for. Grind destinations and grind spots are there for those creatures.
     bool isGrindTravelDest = travelTarget && (dynamic_cast<GrindTravelDestination*>(travelTarget->GetDestination()) ||
         dynamic_cast<GrindSpotTravelDestination*>(travelTarget->GetDestination()));
+    // wow-playground: a skinning trip is there for its creature, to kill and skin, so it is never skipped as one the bot
+    // has no quest for.
+    GatherTravelDestination* gatherDest = travelTarget ? dynamic_cast<GatherTravelDestination*>(travelTarget->GetDestination()) : nullptr;
+    int32 skinEntry = gatherDest && gatherDest->GetPurpose() == TravelDestinationPurpose::GatherSkinning ? gatherDest->GetEntry() : 0;
 
     struct MemberInfo {
         Player* player;
@@ -235,7 +239,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             }
         }
 
-        if (entry && !needForQuest)
+        if (entry && !needForQuest && int32(entry) != skinEntry)
         {
             if (urand(0, 100) < 99 && travelTargetWorking && !isGrindTravelDest)
             {

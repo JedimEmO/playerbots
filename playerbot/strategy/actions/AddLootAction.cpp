@@ -11,6 +11,7 @@
 #include "Grids/CellImpl.h"
 
 #include "playerbot/strategy/actions/DestroyItemAction.h"
+#include "playerbot/strategy/values/FarmOrderValues.h"
 
 using namespace ai;
 using namespace MaNGOS;
@@ -93,6 +94,18 @@ bool AddAllLootAction::AddLoot(Player* requester, ObjectGuid guid)
     {
         ai->TellDebug(requester, "Loot object is empty.", "debug loot");
         return false;
+    }
+
+    // wow-playground: see FarmOrders. A bot on a farm order gathers only the herb or mining nodes that yield its item;
+    // it still skins what it kills.
+    if (guid.IsGameObject() && (loot.skillId == SKILL_HERBALISM || loot.skillId == SKILL_MINING) && AI_VALUE(bool, "has farm order"))
+    {
+        RandomPlayerbotMgr::FarmOrder order;
+        if (sRandomPlayerbotMgr.GetFarmOrder(bot, order) && !FarmOrders::IsSource(order.item, -int32(guid.GetEntry())))
+        {
+            ai->TellDebug(requester, "Not the farm order's resource.", "debug loot");
+            return false;
+        }
     }
 
     if (abs(wo->GetPositionZ() - bot->GetPositionZ()) > INTERACTION_DISTANCE)

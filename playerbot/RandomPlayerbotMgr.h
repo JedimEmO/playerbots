@@ -115,6 +115,23 @@ public:
         void SetXpCap(uint32 guid, uint32 level);
         // The level a bot-played autonomous character stops gaining experience at, or 0. Any thread; Player::GiveXP asks.
         uint32 GetXpCap(Player* bot);
+        // wow-playground: a farm order, .rndbot farm: the item an autonomous character gathers and nothing else, the
+        // count it stops at (0 for none), and how many of the item .rndbot mailgoods sent the player since it was set.
+        // Stored in ai_playerbot_random_bots like the switch, so it survives a restart. See FarmOrders.
+        struct FarmOrder
+        {
+            uint32 item = 0;
+            uint32 count = 0;
+            uint32 mailed = 0;
+        };
+        // The order of the autonomous character bot plays, or false when it has none. Any thread.
+        bool GetFarmOrder(Player* bot, FarmOrder& order);
+        // The order of the autonomous character guid, item 0 for none. Any thread.
+        FarmOrder GetFarmOrder(uint32 guid);
+        // Sets an autonomous character's order, item 0 to end it; nothing is mailed yet. World thread only.
+        void SetFarmOrder(uint32 guid, uint32 item, uint32 count);
+        // Adds count of the order's item to what was mailed. World thread only.
+        void AddFarmMailed(uint32 guid, uint32 count);
         // wow-playground: what a player left on their autonomous characters, which a bot playing one never parts with.
         // Everything a character holds when its player logs out of it is the player's: each item by guid, and its
         // money as a floor the bot does not spend below. A character never recorded is recorded the first time a bot
@@ -332,6 +349,7 @@ public:
             std::string name;
             uint32 autonomy = 0;
             uint32 xpCap = 0;
+            FarmOrder farm;
             bool IsOn() const { return autonomy == AUTONOMY_ON; }
         };
         void StoreAutonomousValue(uint32 guid, const char* event, uint32 value);

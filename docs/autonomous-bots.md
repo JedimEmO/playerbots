@@ -135,6 +135,42 @@ Three rules change while it has it:
 Like any strategy set by chat, `farm` lasts until the bot's next reset or login,
 so whoever wants it kept sends it again from time to time; adding it twice changes nothing.
 
+### Farm orders
+
+```
+.rndbot farm <name> Peacebloom 20
+```
+
+Gathering takes whatever nodes a bot finds,
+so a player who wants twenty Peacebloom gets a bag of Silverleaf and Earthroot with it.
+A farm order names the one resource, and optionally how many.
+The [console reference](console-commands.md#farm) has the command and its replies.
+
+While the order is unfinished, the bot travels to the nodes and creatures that yield the item,
+for each gathering skill it has, within the reach of its skill.
+The trip is the named travel purpose `farm order`, asked just above the guild order with the same forced target,
+so it outranks gathering trips, grinding and quests.
+Full bags and broken gear still send the bot to a vendor first.
+Three other rules change while it holds:
+
+- A node or creature the bot no longer learns from, gray ones included, still counts as a destination.
+- It gathers only the herb and mining nodes that yield the item, even those it walks past.
+  It still skins what it kills.
+- A skinning trip attacks the creature it is for; before, the grind target skipped creatures with no quest,
+  so a skinning trip stood still at its destination. That fix holds for every bot.
+
+The order is finished when the count is gathered:
+what `.rndbot mailgoods` sent of the item since the order was set, plus what the bot holds of its own.
+Items the player left on the character never count.
+The bot then gathers as before, and the order stays until it is ended or replaced.
+
+Orders are stored in `ai_playerbot_random_bots` as the events `farmitem`, `farmcount` and `farmmailed`,
+like the switch, so they survive a restart.
+Only autonomous bots take one.
+`FarmOrders` in `strategy/values/FarmOrderValues.cpp` finds the sources:
+herb and mining nodes from the gameobject loot in the drop map,
+and creatures whose skinning loot holds the item.
+
 ## Grouping with a player
 
 An autonomous bot accepts group invitations only from its own account,

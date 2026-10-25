@@ -1122,7 +1122,10 @@ void RandomPlayerbotMgr::RefreshAutonomousBots()
         auto result = CharacterDatabase.PQuery(
             "SELECT c.guid, c.account, c.name, "
             "IFNULL((SELECT r.value FROM ai_playerbot_random_bots r WHERE r.owner = 0 AND r.bot = c.guid AND r.event = 'autonomy' LIMIT 1), 0), "
-            "IFNULL((SELECT r.value FROM ai_playerbot_random_bots r WHERE r.owner = 0 AND r.bot = c.guid AND r.event = 'xpcap' LIMIT 1), 0) "
+            "IFNULL((SELECT r.value FROM ai_playerbot_random_bots r WHERE r.owner = 0 AND r.bot = c.guid AND r.event = 'xpcap' LIMIT 1), 0), "
+            "IFNULL((SELECT r.value FROM ai_playerbot_random_bots r WHERE r.owner = 0 AND r.bot = c.guid AND r.event = 'farmitem' LIMIT 1), 0), "
+            "IFNULL((SELECT r.value FROM ai_playerbot_random_bots r WHERE r.owner = 0 AND r.bot = c.guid AND r.event = 'farmcount' LIMIT 1), 0), "
+            "IFNULL((SELECT r.value FROM ai_playerbot_random_bots r WHERE r.owner = 0 AND r.bot = c.guid AND r.event = 'farmmailed' LIMIT 1), 0) "
             "FROM characters c WHERE c.account IN (%s)", accounts.str().c_str());
         if (result)
         {
@@ -1134,6 +1137,9 @@ void RandomPlayerbotMgr::RefreshAutonomousBots()
                 bot.name = fields[2].GetCppString();
                 bot.autonomy = fields[3].GetUInt32();
                 bot.xpCap = fields[4].GetUInt32();
+                bot.farm.item = fields[5].GetUInt32();
+                bot.farm.count = fields[6].GetUInt32();
+                bot.farm.mailed = fields[7].GetUInt32();
                 bots[fields[0].GetUInt32()] = bot;
             } while (result->NextRow());
         }
@@ -1285,6 +1291,48 @@ void RandomPlayerbotMgr::SetXpCap(uint32 guid, uint32 level)
     auto it = autonomousBots.find(guid);
     if (it != autonomousBots.end())
         it->second.xpCap = level;
+}
+
+bool RandomPlayerbotMgr::GetFarmOrder(Player* bot, FarmOrder& order)
+{
+    if (!bot || sPlayerbotAIConfig.autonomousAccounts.empty() || !IsAutonomousBot(bot))
+        return false;
+
+    order = GetFarmOrder(bot->GetGUIDLow());
+    return order.item != 0;
+}
+
+RandomPlayerbotMgr::FarmOrder RandomPlayerbotMgr::GetFarmOrder(uint32 guid)
+{
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    auto it = autonomousBots.find(guid);
+    return it == autonomousBots.end() ? FarmOrder() : it->second.farm;
+}
+
+void RandomPlayerbotMgr::SetFarmOrder(uint32 guid, uint32 item, uint32 count)
+{
+    StoreAutonomousValue(guid, "farmitem", item);
+    StoreAutonomousValue(guid, "farmcount", item ? count : 0);
+    StoreAutonomousValue(guid, "farmmailed", 0);
+
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    auto it = autonomousBots.find(guid);
+    if (it != autonomousBots.end())
+        it->second.farm = { item, item ? count : 0, 0 };
+}
+
+void RandomPlayerbotMgr::AddFarmMailed(uint32 guid, uint32 count)
+{
+    FarmOrder order = GetFarmOrder(guid);
+    if (!order.item)
+        return;
+
+    StoreAutonomousValue(guid, "farmmailed", order.mailed + count);
+
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    auto it = autonomousBots.find(guid);
+    if (it != autonomousBots.end())
+        it->second.farm.mailed = order.mailed + count;
 }
 
 // The cap holds while a bot plays the character, grouped with a player or on its own. A client playing it has none.

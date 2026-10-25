@@ -457,6 +457,21 @@ bool ShouldTravelNamedValue::Calculate()
     {
         return AI_VALUE(bool, "has guild travel order");
     }
+    // wow-playground: see FarmOrders. Full bags and broken gear still go to a vendor first, or the bot could carry
+    // nothing more and fight with nothing.
+    else if (name == "farm order")
+    {
+        if (!AI_VALUE(bool, "has farm order"))
+            return false;
+
+        if (AI_VALUE(bool, "should sell") && AI_VALUE(bool, "can sell"))
+            return false;
+
+        if (AI_VALUE(bool, "should repair") && AI_VALUE(bool, "can repair"))
+            return false;
+
+        return true;
+    }
     else if (name == "reagent vendor")
     {
         return AI_VALUE(bool, "needs profession reagents");
