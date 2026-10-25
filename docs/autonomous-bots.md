@@ -336,6 +336,25 @@ On the live server six characters between levels 11 and 16 carried 2 to 42 silve
 against 16 silver to a gold for their training, and none of them had trained since level 1.
 The same rule holds for profession trainers.
 
+## Levelling
+
+A random bot fills the world, and its choices suit that:
+it takes gray quests for their rewards or their money, and grinds for gold three to six levels below itself.
+An autonomous character levels for its player, and those choices gave it next to no experience.
+On the live server, characters between levels 11 and 14 spent an afternoon on starter zone quests
+and on creatures gray to them.
+
+So for an autonomous character only:
+
+- It picks up no gray quest, and chases no objective of a gray quest already in its log,
+  unless the quest is on its focus list (`doquest`).
+  Gray is the server's `Quests.LowLevelHideDiff`, as the bot's own quest log cleaning reads it.
+  A finished gray quest is still handed in, and the cleaning drops the rest when the log fills.
+- A grind spot's creatures are above the gray level, up to the character's own level at full durability,
+  two below with worn gear. They need not drop gold; their loot sells.
+
+`PlayerTravelInfo::IsAutonomous` carries the difference into the travel destinations.
+
 ## Where they differ from random bots
 
 | Rule | Random bot | Autonomous bot |

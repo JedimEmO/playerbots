@@ -14,6 +14,8 @@
 #include "Globals/ObjectAccessor.h"
 
 using namespace ai;
+#include "Tools/Formulas.h"
+
 using namespace MaNGOS;
 
 PlayerTravelInfo::PlayerTravelInfo(Player* player)
@@ -37,6 +39,8 @@ PlayerTravelInfo::PlayerTravelInfo(Player* player)
 
     money = player->GetMoney();
 
+    autonomous = sRandomPlayerbotMgr.IsAutonomousBot(player);
+
     if (player->GetGroup())
         groupSize = player->GetGroup()->GetMembersCount();
 
@@ -50,6 +54,16 @@ PlayerTravelInfo::PlayerTravelInfo(Player* player)
 
     for (auto& [valueName, value] : uint32Values)
         value = AI_VALUE(uint32, valueName);
+}
+
+bool PlayerTravelInfo::IsGrayQuest(const Quest* quest) const
+{
+    int32 lowLevelDiff = sWorld.getConfig(CONFIG_INT32_QUEST_LOW_LEVEL_HIDE_DIFF);
+    if (!quest || lowLevelDiff < 0)
+        return false;
+
+    int32 questLevel = quest->GetQuestLevel() > 0 ? quest->GetQuestLevel() : (int32)level;
+    return (int32)level > questLevel + lowLevelDiff;
 }
 
 std::string EntryTravelDestination::GetShortName() const
@@ -115,6 +129,11 @@ bool QuestRelationTravelDestination::IsPossible(const PlayerTravelInfo& info) co
     if (GetRelation() == 0)
     {
         if (!forceThisQuest && (int32)quest->GetQuestLevel() >= (int32)info.GetLevel() + (int32)5)
+            return false;
+
+        // wow-playground: a player's character levels; a gray quest gives it next to no experience, whatever its
+        // reward. Random bots still take them, for the reward or the money.
+        if (!forceThisQuest && info.IsAutonomous() && info.IsGrayQuest(quest))
             return false;
 
         if ((int32)info.GetLevel() < quest->GetMinLevel() || (int32)info.GetLevel() > quest->GetMaxLevel())
@@ -226,6 +245,11 @@ bool QuestObjectiveTravelDestination::IsPossible(const PlayerTravelInfo& info) c
     bool forceThisQuest = info.HasFocusQuest();
 
     if (forceThisQuest && !info.IsFocusQuest(GetQuestId()))
+        return false;
+
+    // wow-playground: a player's character does not chase the objectives of a quest gone gray in its log; it gives
+    // next to no experience. A finished one is still handed in, and the quest log cleaning drops the rest.
+    if (!forceThisQuest && info.IsAutonomous() && info.IsGrayQuest(GetQuestTemplate()))
         return false;
 
     bool skipShouldGrindCheck = false;
@@ -596,16 +620,25 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     float levelBoost = botPowerLevel / 50.0f; //(0-2.0f)
 
     int32 maxLevel = std::max(botLevel * (0.5f + levelMod), botLevel - 5.0f + levelBoost);
+    int32 minLevel = std::max(botLevel * (0.4f + levelMod), botLevel - 12.0f + levelBoost);
+
+    // wow-playground: a player's character grinds for experience, on creatures that still give it: above the gray
+    // level, up to its own level at full durability (two below with worn gear). Random bots grind three to six levels
+    // down for gold, which gives a character levelling on its own almost nothing. Creatures need not drop gold; their
+    // loot sells.
+    if (info.IsAutonomous())
+    {
+        maxLevel = botLevel - 2 + int32(levelBoost);
+        minLevel = int32(MaNGOS::XP::GetGrayLevel(botLevel)) + 1;
+    }
 
     if ((int32)cInfo->MaxLevel > maxLevel) //@lvl5 max = 3, @lvl60 max = 57
         return false;
 
-    int32 minLevel = std::max(botLevel * (0.4f + levelMod), botLevel - 12.0f + levelBoost);
-
     if ((int32)cInfo->MaxLevel < minLevel) //@lvl5 min = 3, @lvl60 max = 50
         return false;
 
-    if (cInfo->MinLootGold == 0)
+    if (cInfo->MinLootGold == 0 && !info.IsAutonomous())
         return false;
 
     if (cInfo->Rank > CREATURE_ELITE_NORMAL && !info.GetBoolValue("can fight elite"))

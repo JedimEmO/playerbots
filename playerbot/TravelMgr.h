@@ -53,6 +53,11 @@ namespace ai
 		uint32 GetMoney() const { return money; }
 
 		bool HasFocusQuest() const {return !focusList.empty();}
+		// wow-playground: a player's character played by the server, which levels for its player instead of filling the world.
+		bool IsAutonomous() const { return autonomous; }
+		// wow-playground: a quest whose level is so far below the bot's that the quest log shows it gray, by the
+		// server's Quests.LowLevelHideDiff, as the bot's own quest log cleaning reads it.
+		bool IsGrayQuest(const Quest* quest) const;
 		bool IsFocusQuest(uint32 questId) const { return focusList.find(questId) != focusList.end(); }
 
 		bool GetBoolValue(const std::string& valueName) const {return boolValues.at(valueName);};
@@ -64,6 +69,7 @@ namespace ai
 		WorldPosition position;
 		Team team = TEAM_NONE;
 		uint32 level = 0;
+		bool autonomous = false;
 		uint16 currentSkill[MAX_SKILL_TYPE] = {0};
 		uint16 skillMax[MAX_SKILL_TYPE] = { 0 };
 		uint8 groupSize = 0;
