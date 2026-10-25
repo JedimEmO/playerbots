@@ -362,8 +362,8 @@ make one decision a second, and the server's activity level never throttles it,
 in combat or near a real player included (`PlayerbotAI::GetPriorityBracket`).
 
 The sidecar's level and grind tasks go further, and take questing off altogether (`-rpg quest`).
-They also turn on `levelling`, a strategy with no triggers that the travel values read.
-With it, a character travels only to grind, sell, repair, get mail, use the bank and train.
+They also turn on `levelling`, a strategy that the travel values read.
+With it, a character travels only to grind spots, sell, repair, get mail, use the bank and train.
 Grind spots are open at any time of the hour;
 without it a bot grinds only in the first 45 minutes of its hour, and wanders to random NPCs in the last 45.
 Auction house, boss, explore, generic rpg, city, world pvp and gathering trips are off;
@@ -382,6 +382,47 @@ Two traps held characters for an hour on the live server, and their fixes apply 
   A bot that spends a minute walking at one loot object without looting it
   now leaves that object alone for ten minutes (`LootObjectStack::NoteApproach`).
   A gap of ten seconds, such as a fight on the way, starts the minute again.
+
+### Grind spots
+
+A grind trip without `levelling` goes to one creature entry, a few spawns here and a few there across a zone.
+On the live server a druid walked far between kills, went back to travel every five minutes,
+and stood for minutes at its destination, since a bot working any travel target skipped
+nearly every creature it had no quest for.
+
+So a levelling character grinds at grind spots instead (`GrindSpotTravelDestination`).
+At startup the travel manager buckets creature spawns into cells of 60 yards, height included,
+and keeps a cell as a spot when it holds at least three spawns, of any entries, that suit a team:
+hostile to a race of that team, not elite, rare, critter, totem or civilian,
+no npc, guard or member of a player faction, attackable, worth experience,
+on Kalimdor or the Eastern Kingdoms, outside the capitals, and not spawned by an event.
+An elite in the cell does not count, but it marks the spot, which then needs `can fight elite`.
+The server log says how many: `Loaded N grind spots, A for the alliance and H for the horde, from S creature spawns.`
+
+A spot's point is the spawn nearest the spawns' mean, so the bot travels to ground it can stand on.
+Its radius reaches the farthest spawn, 20 yards at least, and arriving inside it starts the work.
+The spot carries its creatures' lowest and highest level, and it is open to a bot when that band overlaps
+the grind window above, from three levels below the character to its own level,
+when the bot need not sell or repair first, and when it is within 2500 yards on the same map.
+The travel partitions take the nearest open spot first, as they do for every destination.
+When no spot within reach fits the character, it falls back to the single entry destinations;
+a spot it left recently still counts as fitting, so the bot looks farther away instead.
+
+While the bot works a spot, it attacks any creature in sight, quest or not.
+With nothing to fight it walks to one of the spot's spawns at least 15 yards away,
+one with a living creature when there is one, trying five until one has a path.
+That walk is the one trigger of `levelling`, at 1.5, below eating, drinking, looting and attacking.
+Fighting, looting and resting count as work; a fight counts when it ends, since the spot is checked out of combat.
+After 75 seconds without work, or 25 minutes in all, the bot leaves the spot,
+and does not pick it again for 15 minutes.
+Full bags or worn gear, with a vendor or repairer known, end the work at once.
+A trainer trip waits until the spot ends, which takes at most 25 minutes.
+The next trip starts a second later: a vendor or repairer when the bags or the gear need one, otherwise another spot.
+
+`.rndbot do <bot> debug why` names the spot on the travel line,
+for instance `grind spot [Riverpaw Gnoll, Riverpaw Scout] L11-13 (7 spawns)`,
+and adds a line below it with the living creatures, the radius, the time worked and the time without a fight.
+`debug travel` reports why the bot left a spot.
 
 ## Where they differ from random bots
 

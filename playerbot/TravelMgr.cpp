@@ -613,25 +613,9 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
         return true;
 #endif
 
-    int32 botLevel = info.GetLevel();
-
-    uint8 botPowerLevel = info.GetUint8Value("durability");
-    float levelMod = botPowerLevel / 500.0f; //(0-0.2f)
-    float levelBoost = botPowerLevel / 50.0f; //(0-2.0f)
-
-    int32 maxLevel = std::max(botLevel * (0.5f + levelMod), botLevel - 5.0f + levelBoost);
-    int32 minLevel = std::max(botLevel * (0.4f + levelMod), botLevel - 12.0f + levelBoost);
-
-    // wow-playground: a player's character grinds for experience: from three levels below its own, up to its own
-    // level at full durability (two below with worn gear). A creature's experience falls off fast below the player's
-    // level, by a level's share of the zero difference (8 at levels 12-15): three below gives 62%, one just above gray
-    // a level 14 character under a percent of a level. Random bots grind three to six levels down for gold. Creatures
-    // need not drop gold; their loot sells.
-    if (info.IsAutonomous())
-    {
-        maxLevel = botLevel - 2 + int32(levelBoost);
-        minLevel = std::max(int32(MaNGOS::XP::GetGrayLevel(botLevel)) + 1, botLevel - 3);
-    }
+    // wow-playground: the window moved to GetLevelWindow, which the grind spots share.
+    int32 minLevel, maxLevel;
+    GetLevelWindow(info, minLevel, maxLevel);
 
     if ((int32)cInfo->MaxLevel > maxLevel) //@lvl5 max = 3, @lvl60 max = 57
         return false;
@@ -646,6 +630,229 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
         return false;
 
     return true;
+}
+
+void GrindTravelDestination::GetLevelWindow(const PlayerTravelInfo& info, int32& minLevel, int32& maxLevel)
+{
+    int32 botLevel = info.GetLevel();
+
+    uint8 botPowerLevel = info.GetUint8Value("durability");
+    float levelMod = botPowerLevel / 500.0f; //(0-0.2f)
+    float levelBoost = botPowerLevel / 50.0f; //(0-2.0f)
+
+    maxLevel = std::max(botLevel * (0.5f + levelMod), botLevel - 5.0f + levelBoost);
+    minLevel = std::max(botLevel * (0.4f + levelMod), botLevel - 12.0f + levelBoost);
+
+    // wow-playground: a player's character grinds for experience: from three levels below its own, up to its own
+    // level at full durability (two below with worn gear). A creature's experience falls off fast below the player's
+    // level, by a level's share of the zero difference (8 at levels 12-15): three below gives 62%, one just above gray
+    // a level 14 character under a percent of a level. Random bots grind three to six levels down for gold. Creatures
+    // need not drop gold; their loot sells.
+    if (info.IsAutonomous())
+    {
+        maxLevel = botLevel - 2 + int32(levelBoost);
+        minLevel = std::max(int32(MaNGOS::XP::GetGrayLevel(botLevel)) + 1, botLevel - 3);
+    }
+}
+
+GrindSpotTravelDestination::GrindSpotTravelDestination(uint32 id, Team team, const std::vector<AsyncGuidPosition>& spawns, bool hasElite)
+    : TravelDestination(), id(id), team(team), hasElite(hasElite), spawns(spawns)
+{
+    SetExpireDelay((MAX_SECONDS + MINUTE) * IN_MILLISECONDS); // IsActive ends the work first, at MAX_SECONDS
+    SetCooldownShort(); // on to the next spot, or a vendor, right away
+
+    float meanX = 0, meanY = 0;
+    std::map<uint32, uint32> counts;
+    for (auto& spawn : spawns)
+    {
+        meanX += spawn.getX() / spawns.size();
+        meanY += spawn.getY() / spawns.size();
+        counts[spawn.GetEntry()]++;
+
+        CreatureInfo const* cInfo = ObjectMgr::GetCreatureTemplate(spawn.GetEntry());
+        if (!minLevel || cInfo->MinLevel < minLevel)
+            minLevel = cInfo->MinLevel;
+        if (cInfo->MaxLevel > maxLevel)
+            maxLevel = cInfo->MaxLevel;
+    }
+
+    entries.assign(counts.begin(), counts.end());
+    std::stable_sort(entries.begin(), entries.end(), [](auto& a, auto& b) { return a.second > b.second; });
+
+    // The mean itself can be in the air above a slope or inside a rock; the spawn nearest to it stands on the ground.
+    WorldPosition mean(spawns.front().getMapId(), meanX, meanY, spawns.front().getZ());
+    point = *std::min_element(this->spawns.begin(), this->spawns.end(), [&mean](auto& a, auto& b) { return a.sqDistance2d(mean) < b.sqDistance2d(mean); });
+
+    for (auto& spawn : spawns)
+        radius = std::max(radius, spawn.distance(point));
+    radius = std::max(radius, 20.0f);
+
+    AddPoint(&point);
+}
+
+std::string GrindSpotTravelDestination::GetTitle() const
+{
+    std::ostringstream out;
+    out << "grind spot [";
+    for (uint32 i = 0; i < entries.size() && i < 3; i++)
+    {
+        CreatureInfo const* cInfo = ObjectMgr::GetCreatureTemplate(entries[i].first);
+        out << (i ? ", " : "") << (cInfo ? cInfo->Name : "?");
+    }
+    if (entries.size() > 3)
+        out << ", +" << (entries.size() - 3);
+    out << "] L" << minLevel;
+    if (maxLevel != minLevel)
+        out << "-" << maxLevel;
+    out << " (" << spawns.size() << " spawns";
+    if (hasElite)
+        out << ", elites near";
+    out << ")";
+    return out.str();
+}
+
+bool GrindSpotTravelDestination::IsPossible(const PlayerTravelInfo& info) const
+{
+    if (info.GetTeam() != team)
+        return false;
+
+    // As for the single entry grind destinations: the bot sells first. A spot also waits for a repair.
+    if (info.GetBoolValue("should sell") && (info.GetBoolValue("can sell") || info.GetBoolValue("can ah sell")))
+        return false;
+
+    if (info.GetBoolValue("should repair") && info.GetBoolValue("can repair"))
+        return false;
+
+    if (hasElite && !info.GetBoolValue("can fight elite"))
+        return false;
+
+    int32 windowMin, windowMax;
+    GrindTravelDestination::GetLevelWindow(info, windowMin, windowMax);
+
+    return (int32)maxLevel >= windowMin && (int32)minLevel <= windowMax;
+}
+
+bool GrindSpotTravelDestination::IsHostileTo(Player* bot) const
+{
+    // The spot was built for the team by a representative race; this is the bot's own faction.
+    return GuidPosition(bot).IsHostileTo(GuidPosition(HIGHGUID_UNIT, entries.front().first), bot->GetInstanceId());
+}
+
+bool GrindSpotTravelDestination::IsBusy(Player* bot)
+{
+    if (bot->IsInCombat() || !bot->getAttackers().empty())
+        return true;
+
+    if (!bot->IsAlive())
+        return false;
+
+    // Eating, drinking, or a corpse to loot or skin.
+    if (bot->IsSitState())
+        return true;
+
+    AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
+    return AI_VALUE(bool, "has available loot");
+}
+
+bool GrindSpotTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& info) const
+{
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai)
+        return false;
+
+    AiObjectContext* context = ai->GetAiObjectContext();
+
+    if (!IsPossible(info) || !IsHostileTo(bot))
+        return false;
+
+    time_t now = time(0);
+    std::string leftName = "grind spot left " + std::to_string(id);
+    time_t left = AI_VALUE2(time_t, "manual time", leftName);
+    if (left && left + LEFT_SECONDS > now)
+        return false;
+
+    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+    if (target->GetDestination() != this || target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
+        return true;
+
+    // Working the spot. It stays active while the bot keeps fighting, looting and resting.
+    if (IsBusy(bot))
+        SET_AI_VALUE2(time_t, "manual time", "grind spot busy", now);
+
+    uint32 worked = target->GetExpiredTime() / IN_MILLISECONDS;
+    time_t busy = std::max(AI_VALUE2(time_t, "manual time", "grind spot busy"), now - (time_t)worked);
+    uint32 idle = now - busy;
+
+    std::string reason;
+    if (idle >= IDLE_SECONDS)
+        reason = "nothing to fight for " + std::to_string(idle) + "s";
+    else if (worked >= MAX_SECONDS)
+        reason = "worked it for " + std::to_string(worked / MINUTE) + " minutes";
+
+    if (reason.empty())
+        return true;
+
+    // Not again for a while, so the next choice is another spot.
+    SET_AI_VALUE2(time_t, "manual time", leftName, now);
+    ai->TellDebug(ai->GetMaster(), "Leaving " + GetTitle() + ": " + reason + ".", "debug travel");
+    return false;
+}
+
+bool GrindSpotTravelDestination::IsIn(const WorldPosition& pos, float radius) const
+{
+    // Inside the spot is close enough to start working it; the creatures are around.
+    return point.getMapId() == pos.getMapId() && point.distance(pos) <= (radius ? radius : this->radius);
+}
+
+const GuidPosition* GrindSpotTravelDestination::GetRoamPoint(Player* bot) const
+{
+    WorldPosition botPos(bot);
+    std::vector<const GuidPosition*> alive, others;
+    for (auto& spawn : spawns)
+    {
+        if (spawn.sqDistance2d(botPos) < 15.0f * 15.0f)
+            continue;
+
+        Creature* creature = spawn.GetCreature(bot->GetInstanceId());
+        if (creature && creature->IsInWorld() && creature->IsAlive())
+            alive.push_back(&spawn);
+        else
+            others.push_back(&spawn);
+    }
+
+    std::vector<const GuidPosition*>& points = alive.empty() ? others : alive;
+    if (points.empty())
+        return nullptr;
+
+    return points[urand(0, points.size() - 1)];
+}
+
+std::string GrindSpotTravelDestination::GetWorkStatus(Player* bot) const
+{
+    AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
+    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+
+    uint32 alive = 0;
+    for (auto& spawn : spawns)
+    {
+        Creature* creature = spawn.GetCreature(bot->GetInstanceId());
+        if (creature && creature->IsInWorld() && creature->IsAlive())
+            alive++;
+    }
+
+    std::ostringstream out;
+    out << "grind spot " << id << ": " << alive << "/" << spawns.size() << " alive, radius " << uint32(radius) << "y";
+
+    if (target->GetDestination() == this && target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK)
+    {
+        time_t now = time(0);
+        uint32 worked = target->GetExpiredTime() / IN_MILLISECONDS;
+        time_t busy = std::max(AI_VALUE2(time_t, "manual time", "grind spot busy"), now - (time_t)worked);
+        out << " | working " << worked / MINUTE << "m" << worked % MINUTE << "s of " << MAX_SECONDS / MINUTE << "m";
+        out << " | no fight for " << uint32(now - busy) << "s of " << IDLE_SECONDS << "s";
+    }
+
+    return out.str();
 }
 
 bool GrindTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& info) const
@@ -1119,6 +1326,11 @@ void TravelMgr::Clear()
     destinationMap.clear();
     pointsMap.clear();
     fishPoints.clear();
+
+    // wow-playground: see GrindSpotTravelDestination.
+    for (auto& spot : grindSpots)
+        delete spot;
+    grindSpots.clear();
 }
 
 int32 TravelMgr::GetAreaLevel(uint32 area_id)
@@ -1462,6 +1674,10 @@ void TravelMgr::LoadQuestTravelTable()
             }
         }       
     }     
+
+    // wow-playground: see GrindSpotTravelDestination.
+    sLog.outString("Loading grind spots.");
+    LoadGrindSpots(guidpMap);
 
     sLog.outString("Loading Explore locations.");
 
@@ -2330,6 +2546,127 @@ void TravelMgr::LoadQuestTravelTable()
 #endif     
 }
 
+// wow-playground: see GrindSpotTravelDestination. Creature spawns are bucketed into cells of CELL_SIZE yards, height
+// included so a cave is apart from the hill above it, for each team the creatures are hostile to. A cell with
+// MIN_SPAWNS non-elite spawns becomes a spot; elites in the cell only mark it.
+void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
+{
+    // A race of each team stands for it; IsActive checks the bot's own faction.
+    FactionTemplateEntry const* teamTemplates[2] = { sFactionTemplateStore.LookupEntry(1), sFactionTemplateStore.LookupEntry(2) }; // Human, Orc
+    const Team teams[2] = { ALLIANCE, HORDE };
+
+    struct Cell
+    {
+        std::vector<AsyncGuidPosition> spawns;
+        bool hasElite = false;
+    };
+    std::map<std::tuple<uint32, uint32, int32, int32, int32>, Cell> cells;
+
+    uint32 spawnCount = 0;
+
+    for (auto& [entry, guidps] : guidpMap)
+    {
+        if (entry <= 0)
+            continue;
+
+        CreatureInfo const* cInfo = ObjectMgr::GetCreatureTemplate(entry);
+        if (!cInfo)
+            continue;
+
+        if (cInfo->CreatureType == CREATURE_TYPE_CRITTER || cInfo->CreatureType == CREATURE_TYPE_TOTEM || cInfo->CreatureType == CREATURE_TYPE_NOT_SPECIFIED)
+            continue;
+
+        if (cInfo->NpcFlags)
+            continue;
+
+        if (cInfo->ExtraFlags & (CREATURE_EXTRA_FLAG_INVISIBLE | CREATURE_EXTRA_FLAG_CIVILIAN | CREATURE_EXTRA_FLAG_GUARD))
+            continue;
+
+        if (cInfo->UnitFlags & (UNIT_FLAG_SPAWNING | UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_UNTARGETABLE | UNIT_FLAG_UNINTERACTIBLE))
+            continue;
+
+        if (cInfo->StaticFlags & (uint32(CreatureStaticFlags::NO_XP) | uint32(CreatureStaticFlags::UNKILLABLE) | uint32(CreatureStaticFlags::IMMUNE_TO_PC) | uint32(CreatureStaticFlags::UNINTERACTIBLE)))
+            continue;
+
+        if (cInfo->ExperienceMultiplier <= 0.0f)
+            continue;
+
+        // Rares are left out; elites only mark a cell.
+        if (cInfo->Rank == CREATURE_ELITE_RARE)
+            continue;
+        bool elite = cInfo->Rank != CREATURE_ELITE_NORMAL;
+
+        FactionTemplateEntry const* creatureTemplate = sFactionTemplateStore.LookupEntry(cInfo->Faction);
+        if (!creatureTemplate)
+            continue;
+
+        // A faction of a player team: guards, villagers, the other team's people.
+        if (creatureTemplate->factionGroupMask & (FACTION_GROUP_MASK_ALLIANCE | FACTION_GROUP_MASK_HORDE))
+            continue;
+
+        bool hostile[2];
+        for (uint32 t = 0; t < 2; t++)
+            hostile[t] = teamTemplates[t] && PlayerbotAI::GetFactionReaction(teamTemplates[t], creatureTemplate) < REP_NEUTRAL;
+
+        if (!hostile[0] && !hostile[1])
+            continue;
+
+        for (auto guidP : guidps)
+        {
+            if (!guidP.isOverworld())
+                continue;
+
+            CreatureData const* data = guidP.GetCreatureData();
+            if (!data || (int32)data->spawntimesecsmin < 0)
+                continue;
+
+            // Event spawns come and go.
+            if (guidP.GetGameEventId())
+                continue;
+
+            AreaTableEntry const* area = guidP.GetArea();
+            if (!area)
+                continue;
+
+            AreaTableEntry const* zone = area->zone ? GetAreaEntryByAreaID(area->zone) : area;
+            const uint32 cityFlags = AREA_FLAG_CAPITAL | AREA_FLAG_CITY | AREA_FLAG_SLAVE_CAPITAL | AREA_FLAG_SLAVE_CAPITAL2;
+            if ((area->flags & cityFlags) || (zone && (zone->flags & cityFlags)))
+                continue;
+
+            spawnCount++;
+
+            for (uint32 t = 0; t < 2; t++)
+            {
+                if (!hostile[t])
+                    continue;
+
+                Cell& cell = cells[std::make_tuple((uint32)teams[t], guidP.getMapId(),
+                    (int32)floor(guidP.getX() / GrindSpotTravelDestination::CELL_SIZE),
+                    (int32)floor(guidP.getY() / GrindSpotTravelDestination::CELL_SIZE),
+                    (int32)floor(guidP.getZ() / GrindSpotTravelDestination::CELL_SIZE))];
+
+                if (elite)
+                    cell.hasElite = true;
+                else
+                    cell.spawns.push_back(guidP);
+            }
+        }
+    }
+
+    uint32 teamCount[2] = { 0, 0 };
+    for (auto& [key, cell] : cells)
+    {
+        if (cell.spawns.size() < GrindSpotTravelDestination::MIN_SPAWNS)
+            continue;
+
+        Team team = Team(std::get<0>(key));
+        grindSpots.push_back(new GrindSpotTravelDestination(grindSpots.size(), team, cell.spawns, cell.hasElite));
+        teamCount[team == ALLIANCE ? 0 : 1]++;
+    }
+
+    sLog.outString("Loaded %u grind spots, %u for the alliance and %u for the horde, from %u creature spawns.", (uint32)grindSpots.size(), teamCount[0], teamCount[1], spawnCount);
+}
+
 void TravelMgr::GetPopulatedGrids()
 {
     sLog.outString("Finding populated grids.");
@@ -2656,10 +2993,35 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
     WorldPosition center = info.GetPosition();
     DestinationList retDests;
 
+    // wow-playground: a levelling character grinds at grind spots, the nearest first by the partitions, within
+    // GrindSpotTravelDestination::MAX_DISTANCE. The single entry destinations are left out, unless no spot is possible.
+    bool useGrindSpots = purposeFlag != (uint32)TravelDestinationPurpose::None && (purposeFlag & (uint32)TravelDestinationPurpose::Grind) &&
+        entries.empty() && info.GetBoolValue2("has strategy", "levelling");
+
+    if (useGrindSpots)
+    {
+        for (auto& spot : grindSpots)
+        {
+            if (onlyPossible && !spot->IsPossible(info))
+                continue;
+
+            float distance = spot->DistanceTo(center);
+            if (distance > std::min(maxDistance > 0 ? maxDistance : FLT_MAX, GrindSpotTravelDestination::MAX_DISTANCE))
+                continue;
+
+            retDests.push_back(spot);
+        }
+
+        useGrindSpots = !retDests.empty();
+    }
+
     for (auto& [purpose, entryDests] : destinationMap)
     {
 
         if (purposeFlag != (uint32)TravelDestinationPurpose::None && !((uint32)purpose & (uint32)purposeFlag))
+            continue;
+
+        if (useGrindSpots && purpose == TravelDestinationPurpose::Grind)
             continue;
 
         for (auto& [destEntry, dests] : entryDests)

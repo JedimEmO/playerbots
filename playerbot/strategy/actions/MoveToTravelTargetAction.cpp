@@ -23,6 +23,32 @@ bool MoveToTravelTargetAction::Execute(Event& event)
 
     target->CheckStatus();
 
+    // wow-playground: working a grind spot with nothing to fight, walk to one of its spawns, a living creature's if
+    // the bot knows of one, so it finds the next pull. Like mod-playerbots' MoveRandomNear, a few points are tried
+    // until one has a path.
+    if (target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK)
+    {
+        GrindSpotTravelDestination* spot = dynamic_cast<GrindSpotTravelDestination*>(target->GetDestination());
+        if (!spot)
+            return true;
+
+        for (uint32 attempt = 0; attempt < 5; attempt++)
+        {
+            const GuidPosition* roamPoint = spot->GetRoamPoint(bot);
+            if (!roamPoint)
+                return false;
+
+            if (MoveTo(roamPoint->getMapId(), roamPoint->getX(), roamPoint->getY(), roamPoint->getZ(), false, false))
+            {
+                if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
+                    ai->TellPlayerNoFacing(GetMaster(), "Roaming " + std::to_string(uint32(roamPoint->distance(bot))) + "y in " + spot->GetTitle());
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     if (target->GetStatus() != TravelStatus::TRAVEL_STATUS_TRAVEL)
         return true;
 
@@ -193,7 +219,14 @@ bool MoveToTravelTargetAction::isUseful()
     if (!ai->AllowActivity(TRAVEL_ACTIVITY))
         return false;
 
-    if (!AI_VALUE(bool, "travel target traveling") && AI_VALUE(TravelTarget*, "travel target")->GetStatus() != TravelStatus::TRAVEL_STATUS_READY)
+    // wow-playground: also while working a grind spot, to walk between its spawns (see Execute). Only when the bot
+    // stands, so a walk ends and eating or drinking is not cut short.
+    TravelTarget* currentTarget = AI_VALUE(TravelTarget*, "travel target");
+    bool roaming = currentTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK && dynamic_cast<GrindSpotTravelDestination*>(currentTarget->GetDestination());
+    if (roaming && (bot->IsMoving() || bot->IsSitState() || bot->IsInCombat()))
+        return false;
+
+    if (!roaming && !AI_VALUE(bool, "travel target traveling") && AI_VALUE(TravelTarget*, "travel target")->GetStatus() != TravelStatus::TRAVEL_STATUS_READY)
         return false;
 
     if (bot->IsTaxiFlying())

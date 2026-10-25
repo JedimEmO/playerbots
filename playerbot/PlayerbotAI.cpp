@@ -1105,6 +1105,10 @@ void PlayerbotAI::OnCombatEnded()
         // Reset the combat start timestamp
         aiObjectContext->GetValue<time_t>("combat start time")->Set(0);
 
+        // wow-playground: a fight is work at a grind spot (GrindSpotTravelDestination::IsActive), which is only
+        // checked out of combat.
+        aiObjectContext->GetValue<time_t>("manual time", "grind spot busy")->Set(time(0));
+
         // Stop following on combat end
         if ((HasStrategy("follow", BotState::BOT_STATE_COMBAT) || HasStrategy("wander", BotState::BOT_STATE_COMBAT)) &&
             !(HasStrategy("follow", BotState::BOT_STATE_NON_COMBAT) || HasStrategy("wander", BotState::BOT_STATE_NON_COMBAT)))

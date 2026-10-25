@@ -137,6 +137,7 @@ namespace ai
             bool canFreeMove = false;
             bool differentMap = false;
             std::string travelTitle;
+            std::string travelSpot; // wow-playground: GrindSpotTravelDestination::GetWorkStatus
             std::vector<std::pair<std::string, bool>> travelConditions;
 
             bool canMoveAround = true;

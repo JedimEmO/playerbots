@@ -188,14 +188,18 @@ namespace ai
 #endif
     };
 
-    // wow-playground: levelling a player's character by grinding. No triggers of its own either; the travel values that
-    // ask for it leave only the trips that serve grinding: grind spots at any time of the hour, vendors, repairs, mail,
-    // the bank and trainers. Auction house, boss, explore, generic rpg, city, world pvp and gathering trips are off,
-    // and ChooseRpgTargetAction skips npcs it has no business with.
+    // wow-playground: levelling a player's character by grinding. The travel values that ask for it leave only the
+    // trips that serve grinding: grind spots (GrindSpotTravelDestination) at any time of the hour, vendors, repairs,
+    // mail, the bank and trainers. Auction house, boss, explore, generic rpg, city, world pvp and gathering trips are
+    // off, and ChooseRpgTargetAction skips npcs it has no business with. Its one trigger walks the bot between the
+    // spawns of the grind spot it works when it has nothing to fight.
     class LevellingStrategy : public Strategy
     {
     public:
         LevellingStrategy(PlayerbotAI* ai) : Strategy(ai) {}
+    protected:
+        virtual void InitNonCombatTriggers(std::list<TriggerNode*>& triggers) override;
+    public:
 
         virtual std::string getName() override { return "levelling"; }
 #ifdef GenerateBotHelp

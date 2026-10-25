@@ -5024,6 +5024,10 @@ DebugAction::StuckFacts DebugAction::GatherStuckFacts()
         if (travelTarget->GetDestination())
             f.travelTitle = travelTarget->GetDestination()->GetTitle();
 
+        // wow-playground: how the bot is getting on at its grind spot.
+        if (GrindSpotTravelDestination* spot = dynamic_cast<GrindSpotTravelDestination*>(travelTarget->GetDestination()))
+            f.travelSpot = spot->GetWorkStatus(bot);
+
         if (travelTarget->GetPosition())
         {
             f.hasTravelPos = true;
@@ -5327,6 +5331,10 @@ bool DebugAction::HandleWhy(Event& event, Player* requester, const std::string& 
             << " | can free move: " << (facts.canFreeMove ? "yes" : "no")
             << " | same map: " << (facts.differentMap ? "no" : "yes");
         ai->TellPlayerNoFacing(requester, tr2.str());
+
+        // wow-playground: see GrindSpotTravelDestination::GetWorkStatus.
+        if (!facts.travelSpot.empty())
+            ai->TellPlayerNoFacing(requester, "        " + facts.travelSpot);
 
         if (!facts.travelConditions.empty())
         {

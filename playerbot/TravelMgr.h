@@ -89,6 +89,8 @@ namespace ai
 			{"can get mail", false },
 			{"has strategy::rpg quest", false},
 			{"has strategy::farm", false},
+			// wow-playground: a levelling character grinds at grind spots (GrindSpotTravelDestination).
+			{"has strategy::levelling", false},
 			{"can fight equal", false},
 			{"can fight elite", false},
 			{"can fight boss", false},
@@ -135,6 +137,8 @@ namespace ai
 		void SetExpireFast() { expireDelay = 60000; } //1 minute
 		void SetCooldownShort() { cooldownDelay = 1000; } //1 second
 		void SetCooldownLong() { cooldownDelay = 300000; } //5 minutes
+		// wow-playground: a grind spot is worked for longer than the five minutes of the default.
+		void SetExpireDelay(uint32 delay) { expireDelay = delay; }
 		virtual std::vector<std::string> GetTravelConditions() const { return {}; }
 
 		virtual bool IsOut(const WorldPosition& pos, float radius = 0) const { return !OnMap(pos) || DistanceTo(pos) > (radius ? radius : radiusMax); }
@@ -300,6 +304,53 @@ namespace ai
 		virtual bool IsPossible(const PlayerTravelInfo& info) const override;
 		virtual bool IsActive(Player* bot, const PlayerTravelInfo& info) const override;
 		virtual std::string GetTitle() const override;
+
+		// wow-playground: the levels of creature a bot grinds, shared with the grind spots.
+		static void GetLevelWindow(const PlayerTravelInfo& info, int32& minLevel, int32& maxLevel);
+	};
+
+	// wow-playground: a grind spot for a levelling character. A single entry's spawns are spread over a zone, a few
+	// here and a few there, and a bot sent to one of them walked far between kills and went back to travel often. A
+	// spot is a cell of hostile, non-elite creature spawns of any entries standing together, at least MIN_SPAWNS of
+	// them, built once at startup (TravelMgr::LoadGrindSpots). The bot works it while it keeps fighting, walks between
+	// its spawns when there is nothing in sight (MoveToTravelTargetAction), and leaves it after IDLE_SECONDS without a
+	// fight or MAX_SECONDS in all, for another spot, or a vendor, repair or trainer trip first.
+	class GrindSpotTravelDestination : public TravelDestination
+	{
+	public:
+		static constexpr float CELL_SIZE = 60.0f;
+		static constexpr uint32 MIN_SPAWNS = 3;
+		static constexpr float MAX_DISTANCE = 2500.0f;
+		static constexpr uint32 IDLE_SECONDS = 75;
+		static constexpr uint32 MAX_SECONDS = 25 * MINUTE;
+		static constexpr uint32 LEFT_SECONDS = 15 * MINUTE;
+
+		GrindSpotTravelDestination(uint32 id, Team team, const std::vector<AsyncGuidPosition>& spawns, bool hasElite);
+
+		virtual std::string GetTitle() const override;
+		virtual std::string GetShortName() const override { return "grind spot"; }
+		virtual TravelDestinationPurpose GetPurpose() const override { return TravelDestinationPurpose::Grind; }
+
+		virtual bool IsPossible(const PlayerTravelInfo& info) const override;
+		virtual bool IsActive(Player* bot, const PlayerTravelInfo& info) const override;
+		virtual bool IsIn(const WorldPosition& pos, float radius = 0) const override;
+
+		// A spawn to walk to when there is nothing to fight: one whose creature is alive, if the bot is not there yet.
+		const GuidPosition* GetRoamPoint(Player* bot) const;
+		// For debug why: how long the bot has been working the spot and without a fight, and how many creatures live.
+		std::string GetWorkStatus(Player* bot) const;
+	private:
+		bool IsHostileTo(Player* bot) const;
+		static bool IsBusy(Player* bot);
+
+		uint32 id;
+		Team team;
+		bool hasElite;
+		uint32 minLevel = 0, maxLevel = 0;
+		float radius = 0;
+		std::vector<std::pair<uint32, uint32>> entries; // entry and spawn count, most spawns first
+		std::vector<AsyncGuidPosition> spawns;
+		AsyncGuidPosition point; // the spawn nearest the spawns' mean position, where the bot travels to
 	};
 
 	//A location with a boss
@@ -475,6 +526,9 @@ namespace ai
 		std::string GetCacheCensus() const;
 	private:
 		void Clear();
+		// wow-playground: see GrindSpotTravelDestination.
+		void LoadGrindSpots(const EntryGuidps& guidpMap);
+		std::vector<GrindSpotTravelDestination*> grindSpots;
 		void SetMobAvoidAreaMap(uint32 mapId);
 
 		void SetNullTravelTarget(Player* player) const;

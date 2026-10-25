@@ -69,7 +69,11 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     bool travelTargetWorking = AI_VALUE(bool, "travel target working");
     bool travelTargetTraveling = AI_VALUE(bool, "travel target traveling");
     TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
-    bool isGrindTravelDest = travelTarget && typeid(travelTarget->GetDestination()) == typeid(GrindTravelDestination);
+    // wow-playground: the typeid of the pointer never matches a destination type, so this was always false and a bot
+    // working any travel target skipped 99% of the creatures it had no quest for. A grind spot is there for those.
+    // Random bots at a single entry grind destination keep the old behaviour.
+    bool isGrindTravelDest = travelTarget && (typeid(travelTarget->GetDestination()) == typeid(GrindTravelDestination) ||
+        dynamic_cast<GrindSpotTravelDestination*>(travelTarget->GetDestination()));
 
     struct MemberInfo {
         Player* player;

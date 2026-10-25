@@ -5,6 +5,14 @@
 
 using namespace ai;
 
+// wow-playground: see LevellingStrategy. Below eating, drinking, looting and attacking, above the idle travel check.
+void LevellingStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+{
+    triggers.push_back(new TriggerNode(
+        "val::travel target working",
+        NextAction::array(0, new NextAction("move to travel target", 1.5f), NULL)));
+}
+
 void NonCombatStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
 {
     triggers.push_back(new TriggerNode(
