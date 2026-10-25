@@ -2764,20 +2764,72 @@ std::list<std::string> PlayerbotHolder::HandleTeleport(Player* master, const std
 // .rndbot autonomous
 // One line per character on the autonomous accounts, "<name> online" or "<name> offline", sorted by name. Runs on the
 // world thread and re-reads the characters first, so a character created a moment ago is listed.
+// One line per autonomous character: `<Name> online|offline on|off`, then ` cap <level>` when it has one.
+static std::string AutonomousLine(const RandomPlayerbotMgr::AutonomousStatus& s)
+{
+    std::string line = s.name + (s.online ? " online" : " offline") + (s.on ? " on" : " off");
+    if (s.xpCap)
+        line += " cap " + std::to_string(s.xpCap);
+    return line;
+}
+
+// .rndbot autonomous                             every autonomous character
+// .rndbot autonomous <Name>                      one of them
+// .rndbot autonomous <Name> on|off|default       switches it, or back to its account's default
+// .rndbot autonomous <Name> cap <level>|off      the level it stops gaining experience at while a bot plays it
 std::list<std::string> PlayerbotHolder::HandleAutonomous(Player* master, const std::string param, AccountTypes security)
 {
+    const std::string usage = "Usage: .rndbot autonomous [<name> [on|off|default|cap <level>|cap off]]";
+
     if (security < SEC_GAMEMASTER)
         return {"You may not list autonomous bots"};
 
-    std::list<std::string> lines;
-    for (const auto& [name, online] : sRandomPlayerbotMgr.GetAutonomousBots())
-        lines.push_back(name + (online ? " online" : " offline"));
+    std::vector<std::string> words;
+    split(words, param, " ");
+    words.erase(std::remove(words.begin(), words.end(), std::string()), words.end());
 
-    // The console answers an empty reply with its usage text, so say it.
-    if (lines.empty())
-        lines.push_back("No autonomous bots");
+    if (words.empty())
+    {
+        std::list<std::string> lines;
+        for (const auto& status : sRandomPlayerbotMgr.GetAutonomousBots())
+            lines.push_back(AutonomousLine(status));
 
-    return lines;
+        // The console answers an empty reply with its usage text, so say it.
+        if (lines.empty())
+            lines.push_back("No autonomous bots");
+
+        return lines;
+    }
+
+    uint32 guid = 0;
+    RandomPlayerbotMgr::AutonomousStatus status;
+    if (!sRandomPlayerbotMgr.FindAutonomousBot(words[0], guid, status))
+        return {"No autonomous character named " + words[0]};
+
+    if (words.size() == 1)
+        return {AutonomousLine(status)};
+
+    const std::string& what = words[1];
+    if (words.size() == 2 && (what == "on" || what == "off" || what == "default"))
+        sRandomPlayerbotMgr.SetAutonomy(guid, what == "on", what == "default");
+    else if (words.size() == 3 && what == "cap")
+    {
+        if (words[2] == "off")
+            sRandomPlayerbotMgr.SetXpCap(guid, 0);
+        else
+        {
+            uint32 maxLevel = sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
+            uint32 level = Qualified::isValidNumberString(words[2]) ? std::stoul(words[2]) : 0;
+            if (!level || level > maxLevel)
+                return {"Cap must be a level from 1 to " + std::to_string(maxLevel) + ", or off"};
+            sRandomPlayerbotMgr.SetXpCap(guid, level);
+        }
+    }
+    else
+        return {usage};
+
+    sRandomPlayerbotMgr.FindAutonomousBot(words[0], guid, status);
+    return {AutonomousLine(status)};
 }
 
 std::string PlayerbotHolder::HandleBotAddLogin(Player* bot, Player* master, const std::string param)

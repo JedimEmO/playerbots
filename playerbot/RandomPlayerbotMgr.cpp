@@ -1114,13 +1114,23 @@ void RandomPlayerbotMgr::RefreshAutonomousBots()
             first = false;
         }
 
-        auto result = CharacterDatabase.PQuery("SELECT guid, account, name FROM characters WHERE account IN (%s)", accounts.str().c_str());
+        auto result = CharacterDatabase.PQuery(
+            "SELECT c.guid, c.account, c.name, "
+            "IFNULL((SELECT r.value FROM ai_playerbot_random_bots r WHERE r.owner = 0 AND r.bot = c.guid AND r.event = 'autonomy' LIMIT 1), 0), "
+            "IFNULL((SELECT r.value FROM ai_playerbot_random_bots r WHERE r.owner = 0 AND r.bot = c.guid AND r.event = 'xpcap' LIMIT 1), 0) "
+            "FROM characters c WHERE c.account IN (%s)", accounts.str().c_str());
         if (result)
         {
             do
             {
                 Field* fields = result->Fetch();
-                bots[fields[0].GetUInt32()] = AutonomousBot{ fields[1].GetUInt32(), fields[2].GetCppString() };
+                AutonomousBot bot;
+                bot.account = fields[1].GetUInt32();
+                bot.name = fields[2].GetCppString();
+                bot.shared = sPlayerbotAIConfig.IsSharedAutonomousAccount(bot.account);
+                bot.autonomy = fields[3].GetUInt32();
+                bot.xpCap = fields[4].GetUInt32();
+                bots[fields[0].GetUInt32()] = bot;
             } while (result->NextRow());
         }
     }
@@ -1129,12 +1139,14 @@ void RandomPlayerbotMgr::RefreshAutonomousBots()
     autonomousBots = std::move(bots);
 }
 
-// Logs in every character on the autonomous accounts that is not in the world, and keeps doing so, so an autonomous
-// bot that logged out or was disconnected comes back. The characters are re-read every minute, so one created or
-// deleted while the server runs is picked up. Runs on the world thread before the maps update.
+// Logs in every autonomous character that is switched on and not in the world, and keeps doing so, so one that logged
+// out or was disconnected comes back; logs out one that is switched off, once it is in no group. The characters are
+// re-read every minute, so one created or deleted while the server runs is picked up. Runs on the world thread before
+// the maps update.
 void RandomPlayerbotMgr::UpdateAutonomousBots()
 {
-    if (sPlayerbotAIConfig.autonomousAccountNames.empty() || sWorld.IsShutdowning())
+    if ((sPlayerbotAIConfig.autonomousAccountNames.empty() && sPlayerbotAIConfig.sharedAutonomousAccountNames.empty()) ||
+        sWorld.IsShutdowning())
         return;
 
     time_t now = time(nullptr);
@@ -1152,18 +1164,38 @@ void RandomPlayerbotMgr::UpdateAutonomousBots()
 
     // AddPlayerBot only queues the login; a few per update keeps a full guild from loading in one tick.
     const uint32 maxLoginsPerUpdate = 5;
+    const uint32 maxLogoutsPerUpdate = 5;
     uint32 logins = 0;
+    uint32 logouts = 0;
     for (const auto& [guid, info] : bots)
     {
         if (logins >= maxLoginsPerUpdate)
             break;
 
-        if (sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false))
+        if (Player* online = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false))
+        {
+            // Switched off: the manager's own bot logs out, but not while grouped; it plays for its group until it leaves.
+            // A character a client plays, or a player's .bot add alt, is not the manager's.
+            if (!info.IsOn() && GetPlayerBot(guid) && !online->GetGroup() && logouts < maxLogoutsPerUpdate)
+            {
+                sLog.outDetail("Autonomous bot %s switched off, logging out", info.name.c_str());
+                LogoutPlayerBot(guid);
+                logouts++;
+            }
+            continue;
+        }
+
+        if (!info.IsOn())
             continue;
 
-        // Someone is playing on the account from a client. Leave its characters to them.
-        if (sWorld.FindSession(info.account))
-            continue;
+        // A client on the account with no character in the world is choosing or loading one, and it may be this one; a
+        // bot login now could race it. Once the client is in the world, the account's other characters log in.
+        if (WorldSession* client = sWorld.FindSession(info.account))
+        {
+            Player* played = client->GetPlayer();
+            if (!played || !played->IsInWorld() || client->PlayerLoading())
+                continue;
+        }
 
         time_t& retry = autonomousLoginRetry[guid];
         if (now < retry)
@@ -1176,22 +1208,91 @@ void RandomPlayerbotMgr::UpdateAutonomousBots()
     }
 }
 
-std::vector<std::pair<std::string, bool>> RandomPlayerbotMgr::GetAutonomousBots()
+std::vector<RandomPlayerbotMgr::AutonomousStatus> RandomPlayerbotMgr::GetAutonomousBots()
 {
     RefreshAutonomousBots();
 
-    std::vector<std::pair<std::string, bool>> list;
+    std::vector<AutonomousStatus> list;
     {
         std::lock_guard<std::mutex> guard(autonomousBotsMutex);
         for (const auto& [guid, info] : autonomousBots)
         {
             Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false);
-            list.push_back({ info.name, player && player->IsInWorld() });
+            list.push_back({ info.name, player && player->IsInWorld(), info.IsOn(), info.xpCap });
         }
     }
 
-    std::sort(list.begin(), list.end());
+    std::sort(list.begin(), list.end(), [](const AutonomousStatus& a, const AutonomousStatus& b) { return a.name < b.name; });
     return list;
+}
+
+bool RandomPlayerbotMgr::FindAutonomousBot(const std::string& name, uint32& guid, AutonomousStatus& status)
+{
+    RefreshAutonomousBots();
+
+    std::string wanted = name;
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(), ::tolower);
+
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    for (const auto& [id, info] : autonomousBots)
+    {
+        std::string have = info.name;
+        std::transform(have.begin(), have.end(), have.begin(), ::tolower);
+        if (have != wanted)
+            continue;
+
+        Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, id), false);
+        guid = id;
+        status = { info.name, player && player->IsInWorld(), info.IsOn(), info.xpCap };
+        return true;
+    }
+    return false;
+}
+
+// Writes one of the autonomous values straight to the database, so the next refresh reads it back; 0 deletes it. They
+// never expire, unlike most events in the table.
+void RandomPlayerbotMgr::StoreAutonomousValue(uint32 guid, const char* event, uint32 value)
+{
+    CharacterDatabase.DirectPExecute("DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '%u' AND event = '%s'", guid, event);
+    if (value)
+        CharacterDatabase.DirectPExecute(
+            "INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES (0, '%u', '%u', 0, '%s', '%u')",
+            guid, (uint32)time(nullptr), event, value);
+}
+
+void RandomPlayerbotMgr::SetAutonomy(uint32 guid, bool on, bool clear)
+{
+    uint32 value = clear ? 0 : (on ? AUTONOMY_ON : AUTONOMY_OFF);
+    StoreAutonomousValue(guid, "autonomy", value);
+
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    auto it = autonomousBots.find(guid);
+    if (it != autonomousBots.end())
+        it->second.autonomy = value;
+
+    // Logged out by hand or by a crash, it comes back within the retry; switched on, it should not wait for it.
+    autonomousLoginRetry.erase(guid);
+}
+
+void RandomPlayerbotMgr::SetXpCap(uint32 guid, uint32 level)
+{
+    StoreAutonomousValue(guid, "xpcap", level);
+
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    auto it = autonomousBots.find(guid);
+    if (it != autonomousBots.end())
+        it->second.xpCap = level;
+}
+
+// The cap holds while a bot plays the character, grouped with a player or on its own. A client playing it has none.
+uint32 RandomPlayerbotMgr::GetXpCap(Player* bot)
+{
+    if (!bot || sPlayerbotAIConfig.autonomousAccounts.empty() || !IsAutonomousBot(bot))
+        return 0;
+
+    std::lock_guard<std::mutex> guard(autonomousBotsMutex);
+    auto it = autonomousBots.find(bot->GetGUIDLow());
+    return it == autonomousBots.end() ? 0 : it->second.xpCap;
 }
 
 bool RandomPlayerbotMgr::IsAutonomousBot(Player* bot)
@@ -2358,12 +2459,26 @@ bool RandomPlayerbotMgr::AddRandomBot(uint32 bot)
     return true;
 }
 
+// The core calls this from HandlePlayerLoginOpcode when a client logs in to a character the manager plays: the client's
+// session takes the character over where it stands, and the bot's AI would move to a manager of the character's own
+// and keep playing it. For an autonomous character the client plays it now, so the AI stops, unless the player asked
+// for a self-bot with `.bot self login`.
 void RandomPlayerbotMgr::MovePlayerBot(uint32 guid, PlayerbotHolder* newHolder)
 {
     if (!sPlayerbotAIConfig.enabled)
         return;
 
-    players[guid] = this->GetPlayerBot(guid);
+    Player* bot = this->GetPlayerBot(guid);
+    players[guid] = bot;
+
+    if (bot && newHolder && bot->GetPlayerbotAI() && bot->GetPlayerbotAI()->IsRealPlayer() &&
+        sPlayerbotAIConfig.IsInAutonomousAccountList(bot->GetSession()->GetAccountId()) && !GetValue(guid, "selfbot"))
+    {
+        sLog.outDetail("Autonomous bot %s taken over by its client, stopping its AI", bot->GetName());
+        DisablePlayerBot(guid, false);
+        return;
+    }
+
     PlayerbotHolder::MovePlayerBot(guid, newHolder);
 }
 
@@ -3486,7 +3601,7 @@ uint32 RandomPlayerbotMgr::GetEventValue(uint32 bot, std::string event)
     }
     CachedEvent e = eventCache[bot][event];
 
-    if ((time(0) - e.lastChangeTime) >= e.validIn && event != "specNo" && event != "specLink" && event != "init" && event != "current_time" && event != "always" && event != "selfbot")
+    if ((time(0) - e.lastChangeTime) >= e.validIn && event != "specNo" && event != "specLink" && event != "init" && event != "current_time" && event != "always" && event != "selfbot" && event != "autonomy" && event != "xpcap")
         e.value = 0;
 
     return e.value;

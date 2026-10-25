@@ -30,14 +30,23 @@ PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* rea
     // If a bot is a random bot
     else
     {
+        // An autonomous character on a player's account belongs to that player, who passed the account check above.
+        // Nobody else commands it or invites it, whatever the group or the settings below say.
+        if (sRandomPlayerbotMgr.IsAutonomousBot(bot) && !sPlayerbotAIConfig.IsSharedAutonomousAccount(account))
+        {
+            if (reason) *reason = DenyReason::PLAYERBOT_DENY_NOT_YOURS;
+            return PlayerbotSecurityLevel::PLAYERBOT_SECURITY_DENY_ALL;
+        }
+
         // A real player who is a free bot's master, or in its group, commands it fully (AiPlayerbot.RealPlayersCommandFreeBots).
         // This runs before the level, gear score, battleground queue and LFG queue checks below, and also when
         // ignoreGroup is set, so a bot that queued on its own or out-geared the player still takes their commands.
         if (sPlayerbotAIConfig.realPlayersCommandFreeBots && sRandomPlayerbotMgr.IsFreeBot(bot) &&
             (!from->GetPlayerbotAI() || from->GetPlayerbotAI()->IsRealPlayer()))
         {
-            // An autonomous bot plays for the server's real players, so any of them commands it, grouped or not: a
-            // whisper is then a command or chat, never "Invite me to your group first". Random bots still need the group.
+            // An autonomous bot on a shared account plays for the server's real players, so any of them commands it,
+            // grouped or not: a whisper is then a command or chat, never "Invite me to your group first". Random bots
+            // still need the group.
             if (sRandomPlayerbotMgr.IsAutonomousBot(bot) && from->GetSession()->GetSecurity() >= SEC_PLAYER)
                 return PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL;
 

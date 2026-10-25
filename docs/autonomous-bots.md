@@ -5,35 +5,92 @@ but that keep the character they have, like a player's alts.
 This page is for whoever runs the server or writes a sidecar that talks to these characters;
 it describes the setting, what an autonomous bot does, and every place it differs from a random bot.
 
-## The setting
+## The settings
 
 ```
-AiPlayerbot.AutonomousAccounts = GUILD
+AiPlayerbot.AutonomousAccounts = ALICE,BOB
+AiPlayerbot.SharedAutonomousAccounts = GUILD
 ```
 
-The value is a comma-separated list of account names; case does not matter.
-Empty, the default, turns autonomous bots off.
+Each value is a comma-separated list of account names; case does not matter.
+Both empty, the default, turns autonomous bots off.
 Every character on a listed account is an autonomous bot,
 including characters created while the server runs.
+
+The two lists say who the characters belong to.
+`AutonomousAccounts` names players' accounts:
+a character there belongs to whoever plays that account,
+plays only while its switch is on, and takes commands only from its own account.
+`SharedAutonomousAccounts` names accounts the server owns:
+a character there plays unless switched off, and any real player may command it.
+An account on both lists is shared.
 
 An account whose name starts with `AiPlayerbot.RandomBotAccountPrefix`,
 or that is in the random bot account list, is ignored with an error in the log,
 because the random bot manager owns its characters and randomizes them.
 An account that does not exist yet is looked up again every minute.
 
+## The switch
+
+Each autonomous character has a switch, on or off, set with `.rndbot autonomous <name> on|off`
+and stored in `ai_playerbot_random_bots` as the event `autonomy`, so it survives a restart.
+`.rndbot autonomous <name> default` removes it,
+and the character follows its account again: off on a player's account, on on a shared one.
+
+A character switched off and not in a group is logged out within an update.
+One in a group stays until it leaves, since it plays for its group meanwhile.
+A character a client plays, or one a player logged in with `.bot add`, is not the manager's to log out.
+
 ## Logging in and staying online
 
-The random bot manager logs every autonomous character in at startup,
+The random bot manager logs every autonomous character that is switched on in at startup,
 whether or not `AiPlayerbot.RandomBotAutologin` is on and whether or not a real player is online.
 It checks every update.
-A character that is not in the world is sent to log in again,
+A character that is switched on and not in the world is sent to log in again,
 at most five per update and at most once every 30 seconds per character.
 So a bot that logged out, was told to log out, or crashed out comes back within half a minute.
-The list of characters is re-read from the database every minute.
+The list of characters, with each switch and cap, is re-read from the database every minute.
 
-While someone plays on an autonomous account from a client,
-the manager logs in none of its characters,
-and the character that person plays is theirs, not an autonomous bot.
+A client on an autonomous account changes this for that account only while it has no character in the world:
+at the character screen, or loading a character, the manager logs in none of the account's characters,
+because the one the client is about to play could be among them.
+Once the client is in the world, the account's other characters log in as usual,
+and the one it plays is the client's.
+
+## Taking a character over from its bot
+
+A client may log in to a character its bot is playing.
+The core's `HandlePlayerLoginOpcode` hands the client's session the character where it stands, with no reload,
+and calls `RandomPlayerbotMgr::MovePlayerBot`.
+For an autonomous character the manager then stops the bot's AI, saves the character and lets it go,
+so the client plays it from that moment.
+It does not log the character out.
+
+When the client logs out and leaves, the character is out of the world,
+and the manager logs it in again as a bot if its switch is on.
+
+A player who wants the AI to keep playing their character while they watch can say so with `.bot self login`,
+which the takeover then leaves alone.
+That is upstream's self-bot, with its warnings.
+
+## The level cap
+
+```
+.rndbot autonomous <name> cap 30
+```
+
+An autonomous character with a cap gains no experience at that level while a bot plays it,
+grouped with a player or on its own;
+experience that would carry it past the cap is dropped.
+`.rndbot autonomous <name> cap off` removes it.
+The cap is stored as the event `xpcap` and survives a restart.
+
+A client playing the character has no cap.
+Commands that set a level, such as `.character level`, ignore it.
+
+The cap needs a change in the core's `Player::GiveXP`, which asks `RandomPlayerbotMgr::GetXpCap`;
+in our server image it is the patch `autonomous-level-cap.patch`.
+Without it the cap is stored and listed, and has no effect.
 
 A real player logging out changes nothing for an autonomous bot,
 except that a bot whose master was that player loses its master and resets its strategies,
@@ -68,14 +125,16 @@ for a permanent change, edit the config lists.
 
 ## Grouping with a player
 
-An autonomous bot accepts a group invitation from any real player
+An autonomous bot on a shared account accepts a group invitation from any real player
 while `AiPlayerbot.RealPlayersCommandFreeBots` is on, the default;
 the core still keeps the factions apart unless two-side groups are allowed.
 With the setting off it accepts on the same terms as a random bot:
 the player must be of its faction, or two-side groups must be allowed,
 and not too far below its level or gear score.
+One on a player's account accepts invitations only from its own account,
+and refuses everyone else with `I have a master already`, whatever the setting.
 The player who invites it becomes its master,
-and while grouped it takes the normal chat commands from group members.
+and while grouped it takes the normal chat commands from group members it would take commands from.
 Leaving the group, it plays on its own again.
 [Following a real player](#following-a-real-player) describes the strategies it plays meanwhile.
 
@@ -151,11 +210,15 @@ AiPlayerbot.RealPlayersCommandFreeBots = 1
 ```
 
 A real player who is a free bot's master, or in its group, may give it every command.
-An autonomous bot goes further and takes every command from any real player, grouped or not,
+An autonomous bot on a shared account goes further and takes every command from any real player, grouped or not,
 because it plays for the server's players.
 A whisper to it is then a command or chat for the LLM hook,
 never `Invite me to your group first`.
 Random bots and free alt bots still need the player in their group.
+
+An autonomous bot on a player's account takes every command from its own account and none from anyone else,
+grouped or not and whatever this setting says.
+Chat for the LLM hook is not a command, so anyone can still talk to it.
 
 The security checks that would otherwise answer with a refusal or silence are skipped:
 the level check, the gear score check,
@@ -195,7 +258,8 @@ answer `Not allowed on autonomous bots`.
 
 | Rule | Random bot | Autonomous bot |
 |---|---|---|
-| Logged in and kept online | Random bot manager, by count and timers | Random bot manager, always |
+| Logged in and kept online | Random bot manager, by count and timers | Random bot manager, while switched on |
+| Experience | Free | Stops at its cap, when it has one |
 | Strategy set | Random bot set; alt bot set while it follows a real master | Random bot set, plus `ai chat` from `NonCombatStrategies`; alt bot set while it follows a real master |
 | Activity | Scaled by priority | Always active |
 | Randomized, levels and gear re-rolled | Yes | Never |
@@ -205,7 +269,7 @@ answer `Not allowed on autonomous bots`.
 | Instance reset limit on entering a dungeon | Checked | Not checked |
 | Trades | Sells, with discounts | Trades as a player's bot does |
 | Hired by a player | Possible | Never |
-| Full commands from a real player | Master or group member | Any real player, grouped or not |
+| Full commands from a real player | Master or group member | Shared account: any real player, grouped or not. Player's account: its own account only |
 | WTS adverts and activity suggestions in chat | Yes | No |
 | `level_up` event to the webhook | Never | When its master is a real player |
 
@@ -222,25 +286,35 @@ It only does what its guild rank allows.
 Give autonomous bots a rank without the invite, promote and demote rights
 unless they should recruit and manage members the way random bot officers do.
 
-## Listing them
+## Listing and switching them
 
 ```
 .rndbot autonomous
+.rndbot autonomous <name>
+.rndbot autonomous <name> on|off|default
+.rndbot autonomous <name> cap <level>|off
 ```
 
-Answers one line per autonomous character, sorted by name:
+Without a name it answers one line per autonomous character, sorted by name;
+with one, that character's line, after any change:
 
 ```
-Ana online
-Bob offline
+Ana online on
+Bob offline off
+Cid online on cap 30
 ```
+
+Each line is the name, whether the character is in the world, its switch, and its cap when it has one.
+An `offline on` character is about to be logged in; an `online off` one, out of a group, about to be logged out.
 
 | Reply | When |
 |---|---|
-| `<name> online` | The character is in the world. |
-| `<name> offline` | The character is not in the world; the manager will log it in. |
-| `No autonomous bots` | The setting is empty, or its accounts have no characters. |
+| `<name> online\|offline on\|off`, then ` cap <level>` | As above. |
+| `No autonomous bots` | The settings are empty, or their accounts have no characters. |
+| `No autonomous character named <name>` | No character of that name is on an autonomous account. |
+| `Cap must be a level from 1 to <max>, or off` | The cap is not a level the server allows. |
+| `Usage: .rndbot autonomous [<name> [on\|off\|default\|cap <level>\|cap off]]` | Anything else. |
 | `You may not list autonomous bots` | The account is below game master. SOAP runs as the console, which passes. |
 
-The command re-reads the characters first, so one created a moment ago is listed.
+The command re-reads the characters first, so one created a moment ago is found.
 It also works as `.bot autonomous` in game.

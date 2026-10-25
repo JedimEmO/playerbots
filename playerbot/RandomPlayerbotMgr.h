@@ -96,8 +96,24 @@ public:
         bool IsAutonomousBot(uint32 bot);
         // Re-reads the characters on the autonomous accounts. World thread only.
         void RefreshAutonomousBots();
-        // Name and whether the character is in the world, for every autonomous character, sorted by name.
-        std::vector<std::pair<std::string, bool>> GetAutonomousBots();
+        // One autonomous character as `.rndbot autonomous` reports it.
+        struct AutonomousStatus
+        {
+            std::string name;
+            bool online;
+            bool on;
+            uint32 xpCap;
+        };
+        // Every autonomous character, sorted by name.
+        std::vector<AutonomousStatus> GetAutonomousBots();
+        // The autonomous character named name, matched ignoring case, or false when there is none.
+        bool FindAutonomousBot(const std::string& name, uint32& guid, AutonomousStatus& status);
+        // Switches a character's autonomy on or off, or back to its account's default with clear. World thread only.
+        void SetAutonomy(uint32 guid, bool on, bool clear = false);
+        // Sets the level an autonomous character stops gaining experience at, 0 for none. World thread only.
+        void SetXpCap(uint32 guid, uint32 level);
+        // The level a bot-played autonomous character stops gaining experience at, or 0. Any thread; Player::GiveXP asks.
+        uint32 GetXpCap(Player* bot);
         void InstaRandomize(Player* bot);
         void Randomize(Player* bot);
         void RandomizeFirst(Player* bot);
@@ -290,11 +306,20 @@ public:
         BarGoLink* loginProgressBar;
         std::list<uint32> currentBots;
 
+        // The autonomy switch as stored in ai_playerbot_random_bots (event 'autonomy'); a missing row is the default.
+        static constexpr uint32 AUTONOMY_ON = 1;
+        static constexpr uint32 AUTONOMY_OFF = 2;
         struct AutonomousBot
         {
             uint32 account;
             std::string name;
+            bool shared = false;
+            uint32 autonomy = 0;
+            uint32 xpCap = 0;
+            // A character on a shared account plays unless switched off; one on a player's account only when switched on.
+            bool IsOn() const { return autonomy ? autonomy == AUTONOMY_ON : shared; }
         };
+        void StoreAutonomousValue(uint32 guid, const char* event, uint32 value);
         // Characters on the autonomous accounts by guid, written on the world thread by RefreshAutonomousBots and read
         // by IsAutonomousBot from any thread.
         std::map<uint32, AutonomousBot> autonomousBots;
