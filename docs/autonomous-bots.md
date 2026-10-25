@@ -350,12 +350,16 @@ So for an autonomous character only:
   unless the quest is on its focus list (`doquest`).
   Gray is the server's `Quests.LowLevelHideDiff`, as the bot's own quest log cleaning reads it.
   A finished gray quest is still handed in, and the cleaning drops the rest when the log fills.
-- A grind spot's creatures are from four levels below the character, up to its own level at full durability,
+- A grind spot's creatures are from three levels below the character, up to its own level at full durability,
   two below with worn gear. They need not drop gold; their loot sells.
   Just above gray was the first floor; the nearest spots were then at the bottom,
   where a level 14 character earned under a percent of a level per kill.
 
 `PlayerTravelInfo::IsAutonomous` carries the difference into the travel destinations.
+
+An autonomous character also thinks at the full rate out of combat, where other bots without a real master
+make one decision a second, and the server's activity level never throttles it,
+in combat or near a real player included (`PlayerbotAI::GetPriorityBracket`).
 
 The sidecar's level and grind tasks go further, and take questing off altogether (`-rpg quest`).
 They also turn on `levelling`, a strategy with no triggers that the travel values read.

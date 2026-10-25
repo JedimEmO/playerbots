@@ -639,7 +639,9 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         if (!inCombat)
             min = true;
 
-        if (bot && HasRealPlayerMaster())
+        // wow-playground: a player's character playing on its own thinks at the full rate out of combat too. At the
+        // minimal rate, one decision a second, the loot, rest and next pull between two kills took seconds each.
+        if (bot && (HasRealPlayerMaster() || sRandomPlayerbotMgr.IsAutonomousBot(bot)))
             min = false;
 
         YieldAIInternalThread(min);
@@ -6467,6 +6469,12 @@ ActivePiorityType PlayerbotAI::GetPriorityType()
 //Ie. 10,20 means all bots in this bracket will be inactive below 10% activityMod, all bots in this bracket will be active above 20% activityMod and scale between those values.
 std::pair<uint32, uint32> PlayerbotAI::GetPriorityBracket(ActivePiorityType type)
 {
+    // wow-playground: a player's character is never throttled by the server's activity level. In combat or near a real
+    // player it is typed IN_COMBAT or NEARBY_PLAYER before the autonomous check, which kept the per-type rules (detailed
+    // movement in combat) but put it in brackets that idle it when activity drops.
+    if (sRandomPlayerbotMgr.IsAutonomousBot(bot))
+        return { 0,0 };
+
     switch (type)
     {
     case ActivePiorityType::HAS_REAL_PLAYER_MASTER:
