@@ -2,6 +2,7 @@
 #include "playerbot/PlayerbotAIConfig.h"
 #include "PlayerbotDbStore.h"
 #include "PlayerbotEventSink.h"
+#include "playerbot/PlayerbotControl.h"
 #include "playerbot/PlayerbotFactory.h"
 #include "playerbot/RandomPlayerbotFactory.h"
 #include "playerbot/RandomPlayerbotMgr.h"
@@ -51,6 +52,7 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["profession"] = &PlayerbotHolder::HandleProfession;
     m_holderHandlers["teleport"] = &PlayerbotHolder::HandleTeleport;
     m_holderHandlers["autonomous"] = &PlayerbotHolder::HandleAutonomous;
+    m_holderHandlers["ik"] = &PlayerbotHolder::HandleInnkeeper;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -2830,6 +2832,37 @@ std::list<std::string> PlayerbotHolder::HandleAutonomous(Player* master, const s
 
     sRandomPlayerbotMgr.FindAutonomousBot(words[0], guid, status);
     return {AutonomousLine(status)};
+}
+
+// .bot ik [@<name>] <request>: an innkeeper request, carried to the sidecar by PlayerbotControl. The answer comes back
+// as addon messages with the prefix IK, so this reply is empty. A request about one character names it with @<name>,
+// and the character must be online. Only a player in the game can ask.
+std::list<std::string> PlayerbotHolder::HandleInnkeeper(Player* master, const std::string param, AccountTypes security)
+{
+    if (!master)
+        return {"ik needs a player in the game"};
+
+    std::string text = param;
+    text.erase(0, text.find_first_not_of(' '));
+    Player* target = nullptr;
+    if (!text.empty() && text[0] == '@')
+    {
+        size_t space = text.find(' ');
+        std::string name = text.substr(1, space == std::string::npos ? std::string::npos : space - 1);
+        text = space == std::string::npos ? "" : text.substr(space + 1);
+        text.erase(0, text.find_first_not_of(' '));
+        std::string shown = name;
+        if (normalizePlayerName(name))
+            target = sObjectAccessor.FindPlayerByName(name.c_str());
+        if (!target || !target->IsInWorld())
+        {
+            PlayerbotControl::Tell(master, "ik: error " + shown + " is not online");
+            return {};
+        }
+    }
+
+    PlayerbotControl::Ask(master, target, "ik " + text);
+    return {};
 }
 
 std::string PlayerbotHolder::HandleBotAddLogin(Player* bot, Player* master, const std::string param)

@@ -768,6 +768,22 @@ bool PlayerbotAIConfig::Initialize()
         }
     }
 
+    // Innkeeper requests from players (PlayerbotControl). An empty URL turns them off.
+    innkeeperControlUrl = config.GetStringDefault("AiPlayerbot.InnkeeperControlUrl", "");
+    innkeeperControlTimeout = config.GetIntDefault("AiPlayerbot.InnkeeperControlTimeout", 90);
+    innkeeperControlEnabled = false;
+    innkeeperControlEndPointUrl = ParsedUrl{};
+    if (!innkeeperControlUrl.empty())
+    {
+        try {
+            innkeeperControlEndPointUrl = parseUrl(innkeeperControlUrl);
+            innkeeperControlEnabled = true;
+        }
+        catch (const std::invalid_argument& e) {
+            sLog.outError("Unable to parse InnkeeperControlUrl url: %s", e.what());
+        }
+    }
+
     // Level tokens (PlayerbotMgr). Token n, counting from 0, has entry LevelTokenFirstEntry + n and cap LevelTokenCaps[n].
     levelTokenFirstEntry = config.GetIntDefault("AiPlayerbot.LevelTokenFirstEntry", 60001);
     LoadList<std::vector<uint32> >(config.GetStringDefault("AiPlayerbot.LevelTokenCaps", "25,40,55,60"), levelTokenCaps);

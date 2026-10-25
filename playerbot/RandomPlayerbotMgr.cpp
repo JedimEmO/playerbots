@@ -2,6 +2,7 @@
 
 #include "playerbot/playerbot.h"
 #include "playerbot/PlayerbotAIConfig.h"
+#include "playerbot/PlayerbotControl.h"
 #include "playerbot/PlayerbotFactory.h"
 #include "strategy/values/LastMovementValue.h"
 #include "Accounts/AccountMgr.h"
@@ -679,6 +680,9 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
     // Autonomous bots stay online whether or not random bots log in.
     if (sPlayerbotAIConfig.enabled)
         UpdateAutonomousBots();
+
+    // Innkeeper answers to players' `.bot ik` requests.
+    PlayerbotControl::Deliver();
 
     if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
         return;

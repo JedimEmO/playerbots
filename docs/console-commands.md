@@ -9,6 +9,10 @@ They also work as `.bot <subcommand>` in game.
 There the speaker commands use the spoofed or current character as the sender,
 and `deliver`, `profession`, `teleport` and `autonomous` still need a game master account.
 
+One more, `.bot ik`, is for players in the game rather than the console:
+it carries a request to innkeeper and the answer back as addon messages.
+[Innkeeper requests from players](innkeeper-control.md) describes it.
+
 ## say, yell and emote
 
 ```

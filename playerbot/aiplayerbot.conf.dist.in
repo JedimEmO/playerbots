@@ -1144,6 +1144,13 @@ AiPlayerbot.LLMDefaultPromptsFile = llm_character_card.txt
 # Seconds to wait for the webhook's response before closing the connection.
 # AiPlayerbot.EventWebhookTimeout = 2
 
+# Innkeeper requests from players. `.bot ik [@<name>] <request>` posts the request to this URL, and each line of the
+# answer goes back to the player as an addon message with the prefix IK. Empty turns `.bot ik` off.
+# See docs/innkeeper-control.md.
+# AiPlayerbot.InnkeeperControlUrl =
+# Seconds to wait for the answer.
+# AiPlayerbot.InnkeeperControlTimeout = 90
+
 # Level tokens. Using one raises a real player one level, up to the token's cap, and takes one token from the stack.
 # The tokens are items with consecutive entries starting at LevelTokenFirstEntry. LevelTokenCaps lists each token's cap
 # in entry order, so the number of caps is the number of tokens. An empty list turns tokens off.

@@ -420,6 +420,12 @@ public:
     uint32 eventWebhookTimeout = 2;
     bool eventWebhookEnabled = false;
     ParsedUrl eventWebhookEndPointUrl{};
+
+    // Innkeeper requests from players (PlayerbotControl). An empty URL turns them off.
+    std::string innkeeperControlUrl;
+    uint32 innkeeperControlTimeout = 90;
+    bool innkeeperControlEnabled = false;
+    ParsedUrl innkeeperControlEndPointUrl{};
     //LM END
 
     // Level tokens (PlayerbotMgr): the item entry of the first token, and each token's level cap in entry order.
