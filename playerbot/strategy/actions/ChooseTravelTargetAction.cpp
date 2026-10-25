@@ -149,6 +149,13 @@ void ChooseTravelTargetAction::setNewTarget(Player* requester, TravelTarget* new
 
     oldTarget->SetStatus(TravelStatus::TRAVEL_STATUS_READY);
 
+    // wow-playground: a player's character sets off at once. Ready lasts an hour and turns into travel only when
+    // "move to travel target" runs, after ten seconds standing still; a priest grinding and looting golems around a
+    // farm never stood still, so its Peacebloom trip never started. Travel also has the right time limit, and keeps
+    // the bot from grinding on the way.
+    if (sRandomPlayerbotMgr.IsAutonomousBot(bot))
+        oldTarget->SetStatus(TravelStatus::TRAVEL_STATUS_TRAVEL);
+
     //Clear rpg and attack/grind target. We want to travel, not hang around some more.
     RESET_AI_VALUE(GuidPosition,"rpg target");
     RESET_AI_VALUE(std::set<ObjectGuid>&, "ignore rpg target");
@@ -641,6 +648,9 @@ bool RefreshTravelTargetAction::Execute(Event& event)
     target->SetTarget(oldDestination, newPosition);
 
     target->SetStatus(TravelStatus::TRAVEL_STATUS_READY);
+    // wow-playground: see above, for a refreshed target too.
+    if (sRandomPlayerbotMgr.IsAutonomousBot(bot))
+        target->SetStatus(TravelStatus::TRAVEL_STATUS_TRAVEL);
     target->IncRetry(false);
 
     RESET_AI_VALUE(bool, "travel target active");    
