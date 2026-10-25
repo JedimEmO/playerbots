@@ -229,6 +229,32 @@ and never reach that prefix match.
 
 The bot is checked before the player.
 
+## unstick
+
+```
+.rndbot unstick <bot>
+```
+
+Frees an online bot held in combat by a creature that never fights it,
+such as one that cannot reach it.
+The bot's combat ends, every creature forgets its threat on the bot,
+the bot goes to its hearthstone location, and its AI is reset.
+
+```
+.rndbot unstick Dunpriest
+```
+
+A reset of the AI alone does not free such a bot:
+the creature puts it straight back in combat, and does the same after a relog.
+On the live server a level 13 hunter stood for 38 minutes beside a Prowler at full health,
+`in-combat=yes` with no attackers, through two resets and a relog.
+
+The answer is `Unstuck <bot>`, or `No bot found` for a bot not in the world.
+A bot in a group, in a dungeon or battleground, on a ship or mid-teleport
+gets `Could not unstick <bot>`, so a party never loses a member to it.
+Like `teleport`, it runs on the world thread while the maps wait.
+Game masters and the console only.
+
 ## autonomous
 
 ```

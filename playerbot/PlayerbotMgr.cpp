@@ -54,6 +54,7 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["autonomous"] = &PlayerbotHolder::HandleAutonomous;
     m_holderHandlers["ik"] = &PlayerbotHolder::HandleInnkeeper;
     m_holderHandlers["mailgoods"] = &PlayerbotHolder::HandleMailGoods;
+    m_holderHandlers["unstick"] = &PlayerbotHolder::HandleUnstick;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -2766,6 +2767,68 @@ std::list<std::string> PlayerbotHolder::HandleMailGoods(Player* master, const st
     return {"Mailed " + count + " items in " + count + " mails to " + playerName};
 }
 
+// .rndbot unstick <bot>
+// Frees a bot held in combat by a creature that never fights it, such as one that cannot reach it: the combat ends,
+// every creature forgets its threat on the bot, and the bot goes to its hearthstone location, where nothing holds it.
+// A reset of its AI alone does not free it; the creature puts it back in combat at once, and also after a relog.
+// Runs on the world thread while the map threads are parked, as HandleTeleport does. A bot in a group, in a dungeon or
+// in a battleground is refused, so a party never loses a member to it. wow-playground: the sidecar's watchdog calls it
+// for a stuck bot that a reset did not help.
+std::list<std::string> PlayerbotHolder::HandleUnstick(Player* master, const std::string param, AccountTypes security)
+{
+    const std::string usage = "Usage: .rndbot unstick <bot>";
+
+    // Moving another character is a game master's power, as .namego is.
+    if (security < SEC_GAMEMASTER)
+        return {"You may not unstick bots"};
+
+    std::vector<std::string> words;
+    split(words, param, " ");
+    words.erase(std::remove(words.begin(), words.end(), std::string()), words.end());
+
+    if (words.size() != 1)
+        return {usage};
+
+    std::string botName = words[0];
+    Player* bot = nullptr;
+    if (normalizePlayerName(botName))
+        bot = sObjectAccessor.FindPlayerByName(botName.c_str());
+
+    if (!bot || !bot->IsInWorld() || bot->isRealPlayer() || !bot->GetPlayerbotAI())
+        return {"No bot found"};
+
+    const std::string refused = "Could not unstick " + std::string(bot->GetName());
+
+    if (bot->IsBeingTeleported() || bot->GetGroup() || bot->GetTransport())
+        return {refused};
+
+    Map* map = bot->GetMap();
+    if (!map || map->Instanceable() || map->IsBattleGround())
+        return {refused};
+
+    // As RandomPlayerbotMgr::RandomTeleport, which also teleports bots from the world thread.
+    if (bot->IsTaxiFlying())
+    {
+        bot->TaxiFlightInterrupt();
+        bot->GetMotionMaster()->MovementExpired();
+    }
+
+    bot->GetMotionMaster()->Clear();
+    bot->CombatStopWithPets(true);
+    sServerFacade.GetHostileRefManager(bot).deleteReferences();
+
+    if (!bot->TeleportToHomebind())
+        return {refused};
+
+    bot->GetPlayerbotAI()->Reset(true);
+
+    float homeX, homeY, homeZ;
+    uint32 homeMap;
+    bot->GetHomebindLocation(homeX, homeY, homeZ, homeMap);
+    sLog.outString("Unstick: %s to its home on map %u", bot->GetName(), homeMap);
+    return {"Unstuck " + std::string(bot->GetName())};
+}
+
 // .rndbot teleport <bot> <player>
 // Runs on the world thread while the map threads are parked, as the core's own .namego (summon) and .goname (appear)
 // GM commands do: both call Player::TeleportTo on another player straight from the chat handler. So the teleport is
@@ -4039,6 +4102,8 @@ std::unordered_map<std::string, std::string> PlayerbotHolder::GetCommandTexts()
         {"deliver", "Send a courier with items to an online player. It says the line, bows and hands the items over; what does not fit in the bags is mailed. Game masters and the console only.\nUsage: .rndbot deliver <player> <item>:<count>[,<item>:<count>...] <line>\nExample: .rndbot deliver Thrain 4536:5,159:5 Compliments of the house!"},
 
         {"teleport", "Teleport an online bot next to an online real player, on any map. Game masters and the console only.\nUsage: .rndbot teleport <bot> <player>\nExample: .rndbot teleport Dunpriest Thrain\nWith one name, .rndbot teleport still sends random bots whose names start with it to a grinding spot."},
+
+        {"unstick", "Free an online bot held in combat by a creature that never fights it: end its combat, clear every threat on it and send it to its hearthstone location. Refused for a bot in a group, a dungeon or a battleground. Game masters and the console only.\nUsage: .rndbot unstick <bot>\nExample: .rndbot unstick Dunpriest"},
 
         {"autonomous", "List the autonomous bots, the characters on AiPlayerbot.AutonomousAccounts, one per line with online or offline. Game masters and the console only.\nUsage: .rndbot autonomous"},
 
