@@ -729,6 +729,12 @@ bool GrindSpotTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     int32 windowMin, windowMax;
     GrindTravelDestination::GetLevelWindow(info, windowMin, windowMax);
 
+    // wow-playground: a spot's best creatures are within a level of the window's top, not only some creature inside the
+    // window: overlap alone sent a level 12 druid to level 8-10 spots at the window's bottom, worth little experience.
+    // Where no spot fits, the bot falls back to the single entry destinations of the whole window.
+    if ((int32)maxLevel < windowMax - 1)
+        return false;
+
     return (int32)maxLevel >= windowMin && (int32)minLevel <= windowMax;
 }
 
