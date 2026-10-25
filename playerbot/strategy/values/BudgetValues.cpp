@@ -315,10 +315,24 @@ uint32 TotalMoneyNeededForValue::Calculate()
     return moneyWanted;
 }
 
+// wow-playground: the money the player left on an autonomous character is not the bot's to spend, except on what the
+// player would spend it on themselves: training its spells and professions, and repairing its gear.
+static uint32 OwnersFloorFor(Player* bot, const std::string& qualifier)
+{
+    switch (NeedMoneyFor(stoi(qualifier)))
+    {
+    case NeedMoneyFor::repair:
+    case NeedMoneyFor::spells:
+    case NeedMoneyFor::skilltraining:
+        return 0;
+    default:
+        return sRandomPlayerbotMgr.GetOwnersMoneyFloor(bot);
+    }
+}
+
 bool HasAllMoneyForValue::Calculate()
 {
-    // wow-playground: the money the player left on an autonomous character is not the bot's to spend.
-    uint32 floor = sRandomPlayerbotMgr.GetOwnersMoneyFloor(bot);
+    uint32 floor = OwnersFloorFor(bot, getQualifier());
     uint32 money = bot->GetMoney() > floor ? bot->GetMoney() - floor : 0;
 
     if (ai->HasCheat(BotCheatMask::gold))
@@ -340,8 +354,7 @@ bool HasAllMoneyForValue::Calculate()
 
 uint32 FreeMoneyForValue::Calculate() 
 {
-    // wow-playground: the money the player left on an autonomous character is not the bot's to spend.
-    uint32 floor = sRandomPlayerbotMgr.GetOwnersMoneyFloor(bot);
+    uint32 floor = OwnersFloorFor(bot, getQualifier());
     uint32 money = bot->GetMoney() > floor ? bot->GetMoney() - floor : 0;
 
     if (ai->HasCheat(BotCheatMask::gold))

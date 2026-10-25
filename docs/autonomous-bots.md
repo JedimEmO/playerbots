@@ -262,8 +262,11 @@ answer `Not allowed on autonomous bots`.
 
 An autonomous character is its player's, and so is what they leave on it.
 The bot playing it never sells, destroys, disenchants, enchants, auctions, trades, gives away, mails,
-banks, withdraws, uses up, puts on or takes off any of it,
-and never spends the player's money.
+banks, withdraws, puts on or takes off any of it,
+and spends the player's money only on what the player would spend it on themselves:
+training and repairs.
+What the game itself uses up in play still goes, as it would for the player:
+arrows fired, a quest item handed in, reagents a spell takes.
 
 The line is drawn when the player hands the character over.
 When a player logs out of a character on an autonomous account,
@@ -295,15 +298,15 @@ Every path that parts with an item asks first:
 | Mail bounce | `check mail` does nothing for an autonomous bot; it would send a player's letter back and delete the rest of it |
 | Bank | deposits and withdrawals, by hand and automatic, and the `should bank deposit` and `should bank withdraw` trip values |
 | Equipping | `equip upgrades` does not put on the player's bag items or take off their equipped ones; `EquipAction::EquipItem` refuses either |
-| Using up | `use random recipe`, `open random item` and `use random quest item` leave the player's items |
+| Using up by choice | `use random recipe`, `open random item` and `use random quest item` leave the player's items |
 | Soul shards | a warlock's extra shard is never one of the player's |
 
 The trip values matter as much as the actions.
 A bot whose only sellable items are its player's would otherwise walk to a vendor, sell nothing, and walk there again.
 
 Money: `free money for` and `has all money for`, which every spending decision reads,
-count only the money above the floor.
-A bot that has not earned anything yet buys, trains and repairs nothing.
+count only the money above the floor, except for training spells and professions and for repairs.
+A bot that has not earned anything yet buys nothing, but it trains and repairs.
 
 A core patch, `autonomous-owned-items.patch`, refuses the same items a second time
 in the handlers the bot tree sells, auctions and trades through:
@@ -320,6 +323,18 @@ Known gaps:
   leaves the record from before, so what they picked up in that session counts as the bot's.
 - A looted item better than one of the player's equipped items counts as an upgrade
   that the bot can never put on, so it is kept, not sold.
+
+## Training
+
+A bot goes to its class trainer as soon as it can pay for one spell it is missing,
+and the trainer teaches what the money covers, a spell at a time.
+Upstream waited until the bot could pay for every missing spell at once,
+plus its repairs and ammunition.
+A random bot gets money from the random bot manager, so it got there;
+an autonomous one earns its own, and a full training costs more than it carries.
+On the live server six characters between levels 11 and 16 carried 2 to 42 silver,
+against 16 silver to a gold for their training, and none of them had trained since level 1.
+The same rule holds for profession trainers.
 
 ## Where they differ from random bots
 

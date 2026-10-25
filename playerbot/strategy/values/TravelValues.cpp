@@ -465,6 +465,21 @@ bool ShouldTravelNamedValue::Calculate()
         if (AI_VALUE2(uint32, "train cost", trainerType) == 0) //Has nothing to train
             return false;
 
+        // wow-playground: spells and profession ranks are worth a trip as soon as the bot can pay for one of them; the
+        // trainer then teaches what the money covers. Waiting until it can pay for all of them kept bots that earn
+        // their own money on their first spells for good, since a full training costs more than they ever carry.
+        if (budgetType == NeedMoneyFor::spells || budgetType == NeedMoneyFor::skilltraining)
+        {
+            uint32 cheapest = 0;
+            for (auto& spell : AI_VALUE2(std::vector<TrainerSpell const*>, "trainable spells", (uint32)trainerType))
+            {
+                if (spell && (!cheapest || spell->spellCost < cheapest))
+                    cheapest = spell->spellCost;
+            }
+
+            return AI_VALUE2(uint32, "free money for", (uint32)budgetType) >= cheapest;
+        }
+
         if (!AI_VALUE2(bool, "has all money for", (uint32)budgetType))
             return false;
 
