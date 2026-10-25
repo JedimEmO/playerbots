@@ -297,7 +297,7 @@ Every path that parts with an item asks first:
 | Mail | `sendmail` answers `I cannot send mail` for an autonomous bot; `.rndbot mailgoods` leaves the player's goods |
 | Mail bounce | `check mail` does nothing for an autonomous bot; it would send a player's letter back and delete the rest of it |
 | Bank | deposits and withdrawals, by hand and automatic, and the `should bank deposit` and `should bank withdraw` trip values |
-| Equipping | `equip upgrades` does not put on the player's bag items or take off their equipped ones; `EquipAction::EquipItem` refuses either |
+| Equipping | `equip upgrades` does not put on the player's bag items; `EquipAction::EquipItem` lets an equipped item of theirs give way only to an upgrade with a tenth more stat weight, and that item goes to the bags, still theirs |
 | Using up by choice | `use random recipe`, `open random item` and `use random quest item` leave the player's items |
 | Soul shards | a warlock's extra shard is never one of the player's |
 
@@ -321,8 +321,8 @@ Known gaps:
   The merged stack keeps one guid, so it is all the player's or all the bot's.
 - The record is made at a clean logout. A server crash while the player is on the character
   leaves the record from before, so what they picked up in that session counts as the bot's.
-- A looted item better than one of the player's equipped items counts as an upgrade
-  that the bot can never put on, so it is kept, not sold.
+- A looted item a little better than one of the player's equipped items, by less than a tenth of its stat weight,
+  counts as an upgrade that the bot does not put on, so it is kept, not sold.
 
 ## Training
 

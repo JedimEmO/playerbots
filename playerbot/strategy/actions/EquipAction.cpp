@@ -283,9 +283,18 @@ void EquipAction::EquipItem(PlayerbotAI* ai, Player* requester, Item* item, bool
             oldOffhand = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
     }
 
-    // wow-playground: what the player left equipped stays in its slot, and what they left in the bags stays there.
-    if (ai->IsOwnersItem(item) || (oldItem && ai->IsOwnersItem(oldItem)) || (oldOffhand && ai->IsOwnersItem(oldOffhand)))
+    // wow-playground: what the player left in the bags stays there. What they left equipped gives way only to a clear
+    // upgrade, a tenth more stat weight, and then goes to the bags, where it stays the player's: never sold, destroyed,
+    // mailed or traded away.
+    if (ai->IsOwnersItem(item))
         return;
+
+    for (Item* old : { oldItem, oldOffhand })
+    {
+        if (old && ai->IsOwnersItem(old)
+            && 10 * sRandomItemMgr.ItemStatWeight(bot, item) < 11 * sRandomItemMgr.ItemStatWeight(bot, old))
+            return;
+    }
 
     if (item->GetProto()->InventoryType == INVTYPE_AMMO)
     {
