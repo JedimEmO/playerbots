@@ -97,6 +97,7 @@ private:
     std::list<std::string> HandleTeleport(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleAutonomous(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleInnkeeper(Player* master, const std::string param, AccountTypes security);
+    std::list<std::string> HandleMailGoods(Player* master, const std::string param, AccountTypes security);
     std::list<std::string> HandleCreate(Player* master, const std::string param, AccountTypes security);
 #ifdef GenerateBotTests
     std::list<std::string> HandleRunTest(Player* master, const std::string param, AccountTypes security);

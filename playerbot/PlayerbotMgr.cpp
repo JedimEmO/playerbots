@@ -53,6 +53,7 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_holderHandlers["teleport"] = &PlayerbotHolder::HandleTeleport;
     m_holderHandlers["autonomous"] = &PlayerbotHolder::HandleAutonomous;
     m_holderHandlers["ik"] = &PlayerbotHolder::HandleInnkeeper;
+    m_holderHandlers["mailgoods"] = &PlayerbotHolder::HandleMailGoods;
     m_holderHandlers["create"] = &PlayerbotHolder::HandleCreate;
     m_holderHandlers["group"] = &PlayerbotHolder::HandleGroup;
 #ifdef GenerateBotTests
@@ -2671,6 +2672,98 @@ std::list<std::string> PlayerbotHolder::HandleProfession(Player* master, const s
     uint16 skillValue = uint16(value);
     owner->QueueMapTask([prof, skillValue](Player* target) { ApplyProfession(target, *prof, skillValue); });
     return {"Set " + std::string(prof->name) + " to " + std::to_string(value) + " for " + name};
+}
+
+// .rndbot mailgoods <bot> <player>
+// Mails every stack of trade goods in an online bot's bags, the backpack and its four bags, to a player, online or not,
+// one stack per letter since the core allows one item per mail (MAX_MAIL_ITEMS). Each item moves the way
+// WorldSession::HandleSendMail moves one from a player's bags into a mail, so it changes owner and is never copied.
+// Runs on the world thread while the map threads are parked, as HandleTeleport does, so the bot's bags cannot change
+// under it, and the reply counts what was sent. wow-playground: the sidecar calls it for a bot on the `farm` strategy.
+std::list<std::string> PlayerbotHolder::HandleMailGoods(Player* master, const std::string param, AccountTypes security)
+{
+    const std::string usage = "Usage: .rndbot mailgoods <bot> <player>";
+
+    // It moves another character's items, a game master's power.
+    if (security < SEC_GAMEMASTER)
+        return {"You may not mail goods"};
+
+    std::vector<std::string> words;
+    split(words, param, " ");
+    words.erase(std::remove(words.begin(), words.end(), std::string()), words.end());
+
+    if (words.size() != 2)
+        return {usage};
+
+    std::string botName = words[0];
+    std::string playerName = words[1];
+
+    Player* bot = nullptr;
+    if (normalizePlayerName(botName))
+        bot = sObjectAccessor.FindPlayerByName(botName.c_str());
+
+    // Between maps the bags are in no map's hands; the sidecar asks again next time.
+    if (!bot || !bot->IsInWorld() || bot->isRealPlayer() || !bot->GetPlayerbotAI() || bot->IsBeingTeleported())
+        return {"No bot found"};
+
+    ObjectGuid receiverGuid;
+    if (normalizePlayerName(playerName))
+        receiverGuid = sObjectMgr.GetPlayerGuidByName(playerName);
+
+    if (receiverGuid.IsEmpty() || receiverGuid == bot->GetObjectGuid())
+        return {"No player found"};
+
+    // Collected first: moving an item out changes the slots being walked.
+    std::vector<Item*> goods;
+    auto consider = [&goods](Item* item)
+    {
+        if (item && item->GetProto()->Class == ITEM_CLASS_TRADE_GOODS && !item->IsSoulBound())
+            goods.push_back(item);
+    };
+
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        consider(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
+
+    for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+    {
+        Bag* bag = dynamic_cast<Bag*>(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot));
+        if (!bag)
+            continue;
+
+        for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+            consider(bag->GetItemByPos(uint8(slot)));
+    }
+
+    if (goods.empty())
+        return {"Nothing to mail"};
+
+    // Online or not; MailReceiver puts the letter in an online player's mailbox at once.
+    Player* receiver = sObjectMgr.GetPlayer(receiverGuid);
+
+    for (Item* item : goods)
+    {
+        bot->MoveItemFromInventory(item->GetBagSlot(), item->GetSlot(), true);
+        CharacterDatabase.BeginTransaction();
+        item->DeleteFromInventoryDB();
+        item->SaveToDB();
+        // As in HandleSendMail: the owner in the item's data is set when the letter is opened.
+        CharacterDatabase.PExecute("UPDATE item_instance SET owner_guid = '%u' WHERE guid='%u'", receiverGuid.GetCounter(), item->GetGUIDLow());
+        CharacterDatabase.CommitTransaction();
+
+        MailDraft("Gathered goods", "Gathered for you while you were away.")
+            .AddItem(item)
+            .SendMailTo(MailReceiver(receiver, receiverGuid), MailSender(bot), MAIL_CHECK_MASK_HAS_BODY);
+    }
+
+    CharacterDatabase.BeginTransaction();
+    bot->SaveInventoryAndGoldToDB();
+    CharacterDatabase.CommitTransaction();
+
+    // For an offline receiver the mail frees the items, so no cached list of the bot's items may outlive them.
+    bot->GetPlayerbotAI()->GetAiObjectContext()->ClearValues("inventory item");
+
+    std::string count = std::to_string(goods.size());
+    return {"Mailed " + count + " items in " + count + " mails to " + playerName};
 }
 
 // .rndbot teleport <bot> <player>

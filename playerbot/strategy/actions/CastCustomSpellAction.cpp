@@ -625,6 +625,10 @@ bool CastRandomSpellAction::castSpell(uint32 spellId, WorldObject* wo, Player* r
 
 bool CraftRandomItemAction::Execute(Event& event)
 {
+    // wow-playground: a farming bot keeps its materials for `.rndbot mailgoods` instead of crafting with them.
+    if (ai->HasStrategy("farm", BotState::BOT_STATE_NON_COMBAT))
+        return false;
+
     std::vector<uint32> spellIds = AI_VALUE(std::vector<uint32>, "craft spells");
     std::shuffle(spellIds.begin(), spellIds.end(),*GetRandomGenerator());
 

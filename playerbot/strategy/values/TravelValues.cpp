@@ -285,6 +285,10 @@ bool NeedTravelPurposeValue::Calculate()
     case TravelDestinationPurpose::GatherMining:
     case TravelDestinationPurpose::GatherHerbalism:
         skill = gatheringSkills.at(purpose);
+        // wow-playground: a farming bot gathers for the materials, so any skill it has keeps the trips needed.
+        if (AI_VALUE2(bool, "has strategy", "farm") && bot->GetSkillValue(skill) > 0)
+            return true;
+
         if (bot->GetSkillValue(skill) < std::min(bot->GetSkillMax(skill), bot->GetSkillMaxForLevel(bot)))
         {
             return true;

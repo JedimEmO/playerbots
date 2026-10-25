@@ -82,6 +82,7 @@ namespace ai
 			{"can ah sell", false},
 			{"can get mail", false },
 			{"has strategy::rpg quest", false},
+			{"has strategy::farm", false},
 			{"can fight equal", false},
 			{"can fight elite", false},
 			{"can fight boss", false},

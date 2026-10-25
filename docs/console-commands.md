@@ -7,7 +7,7 @@ which SOAP returns as the command's result.
 
 They also work as `.bot <subcommand>` in game.
 There the speaker commands use the spoofed or current character as the sender,
-and `deliver`, `profession`, `teleport` and `autonomous` still need a game master account.
+and `deliver`, `profession`, `teleport`, `autonomous` and `mailgoods` still need a game master account.
 
 One more, `.bot ik`, is for players in the game rather than the console:
 it carries a request to innkeeper and the answer back as addon messages.
@@ -242,6 +242,31 @@ one line each, sorted by name:
 With a name it answers that character's line, and switches it or sets its level cap first.
 `No autonomous bots` means the setting is empty or its accounts have no characters.
 [Autonomous bots](autonomous-bots.md) describes them and every reply.
+
+## mailgoods
+
+```
+.rndbot mailgoods <bot> <player>
+```
+
+Mails every stack of trade goods in an online bot's bags to a player, online or not:
+herbs, ore, bars, leather, cloth and the rest of item class 7, from the backpack and the four bags,
+never the bank or what the bot wears. Soulbound items stay.
+The core allows one item per mail, so each stack goes in a letter of its own,
+from the bot, with the subject `Gathered goods`.
+Each item moves the way a player's own mail moves it: it leaves the bot and changes owner, never copied.
+The command runs on the world thread while the maps are parked, as `teleport` does,
+so the reply counts what was sent.
+The sidecar calls it for a bot on the [`farm` strategy](autonomous-bots.md#farming).
+
+| Reply | When |
+|---|---|
+| `Mailed <n> items in <n> mails to <Player>` | `<n>` stacks went out, one letter each. |
+| `Nothing to mail` | The bot carries no trade goods. |
+| `No bot found` | No online bot has that name, the name is a real player's, or the bot is between maps. |
+| `No player found` | No character has that name, or it is the bot itself. |
+| `Usage: .rndbot mailgoods <bot> <player>` | Anything but two names. |
+| `You may not mail goods` | The account is below game master. SOAP runs as the console, which passes. |
 
 ## cmd
 

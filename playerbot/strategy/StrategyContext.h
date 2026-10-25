@@ -236,6 +236,7 @@ namespace ai
         {
             creators["fish"] = [](PlayerbotAI* ai) { return new FishStrategy(ai); };
             creators["tfish"] = [](PlayerbotAI* ai) { return new TFishStrategy(ai); };
+            creators["farm"] = [](PlayerbotAI* ai) { return new FarmStrategy(ai); };
         }   
     };
 };

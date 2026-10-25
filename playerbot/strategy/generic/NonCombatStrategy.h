@@ -169,4 +169,22 @@ namespace ai
         virtual std::vector<std::string> GetRelatedStrategies() { return {}; }
 #endif
     };
+
+    // wow-playground: farming gathering materials for a player. The strategy has no triggers of its own; the values and
+    // actions that ask for it keep gathering trips needed past the skill cap, keep trade goods out of vendor and
+    // auction sales, and stop crafting from using them up. `.rndbot mailgoods` then mails them to the player.
+    class FarmStrategy : public Strategy
+    {
+    public:
+        FarmStrategy(PlayerbotAI* ai) : Strategy(ai) {}
+
+        virtual std::string getName() override { return "farm"; }
+#ifdef GenerateBotHelp
+        virtual std::string GetHelpName() { return "farm"; } //Must equal iternal name
+        virtual std::string GetHelpDescription() {
+            return "Keeps gathering past the skill cap and keeps trade goods instead of selling or crafting them.";
+        }
+        virtual std::vector<std::string> GetRelatedStrategies() { return {}; }
+#endif
+    };
 }

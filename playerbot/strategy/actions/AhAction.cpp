@@ -59,8 +59,14 @@ bool AhAction::ExecuteCommand(Player* requester, std::string text, Unit* auction
         uint32 resultingUndercut = 0;
         uint32 postedItems = 0;
 
+        // wow-playground: a farming bot keeps the trade goods it gathers for `.rndbot mailgoods`.
+        bool farming = ai->HasStrategy("farm", BotState::BOT_STATE_NON_COMBAT);
+
         for (auto item : items)
         {
+            if (farming && item->GetProto()->Class == ITEM_CLASS_TRADE_GOODS)
+                continue;
+
             RESET_AI_VALUE2(ItemUsage, "item usage", ItemQualifier(item).GetQualifier());
             if(AI_VALUE2(ItemUsage, "item usage", ItemQualifier(item).GetQualifier()) != ItemUsage::ITEM_USAGE_AH)
                 continue;

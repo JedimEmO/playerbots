@@ -778,7 +778,8 @@ bool GatherTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     if (reqSkillValue > skillValue)
         return false;
 
-    if (info.GetSkillMax((SkillType)skillId) <= skillValue) //Not able to increase skill.
+    // wow-playground: a farming bot wants the materials, not the skill, so a node it cannot learn from still counts.
+    if (info.GetSkillMax((SkillType)skillId) <= skillValue && !info.GetBoolValue("has strategy::farm")) //Not able to increase skill.
         return false;
 
     if (GetPurpose() != TravelDestinationPurpose::GatherFishing && reqSkillValue + 100 < skillValue) //Gray level = no skillup

@@ -76,6 +76,10 @@ bool SellAction::Sell(Player* requester, Item* item)
 {
     bool didSell = false;
 
+    // wow-playground: a farming bot keeps the trade goods it gathers for `.rndbot mailgoods`.
+    if (item->GetProto()->Class == ITEM_CLASS_TRADE_GOODS && ai->HasStrategy("farm", BotState::BOT_STATE_NON_COMBAT))
+        return false;
+
     std::ostringstream out;
     std::list<ObjectGuid> vendors = ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid> >("nearest npcs")->Get();
 

@@ -115,6 +115,26 @@ A strategy set saved for it, for instance while it was grouped with a player, is
 A strategy changed by chat, such as `nc +ai chat`, lasts until the next reset;
 for a permanent change, edit the config lists.
 
+## Farming
+
+```
+.rndbot cmd <name> nc +farm
+```
+
+A bot with the non-combat strategy `farm` gathers for the materials rather than the skill.
+Three rules change while it has it:
+
+- Gathering trips stay needed for every gathering skill it has, mining, herbalism and skinning,
+  and fishing under `tfish` as before, even with the skill at its cap for the level.
+  A node it can gather but no longer learn from counts as a destination; one above its skill still does not.
+- It sells no trade goods, item class 7, to a vendor or on the auction house.
+  Everything else it sells as before, and vendor trips for full bags still happen.
+- It crafts nothing with `rpg craft`, so its materials are not used up.
+
+`.rndbot mailgoods` then mails what it gathered to a player.
+Like any strategy set by chat, `farm` lasts until the bot's next reset or login,
+so whoever wants it kept sends it again from time to time; adding it twice changes nothing.
+
 ## Grouping with a player
 
 An autonomous bot accepts group invitations only from its own account,
