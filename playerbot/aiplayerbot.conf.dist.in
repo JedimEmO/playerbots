@@ -1041,15 +1041,12 @@ AiPlayerbot.UseKnockback = 1
 # AiPlayerbot.ToggleAlwaysOnlineAccounts =
 # AiPlayerbot.ToggleAlwaysOnlineChars =
 
-# Autonomous accounts, comma separated account names. Every character on them is an autonomous bot:
-# while switched on, the server logs it in and keeps it online, it gets the random bot strategies and is always
-# active, but it is never randomized, never level synced to a master or to players, and is not a random bot.
-# AutonomousAccounts are players' accounts: a character is off until `.rndbot autonomous <name> on`, and only its
-# own account commands or invites it. SharedAutonomousAccounts are the server's: a character is on until switched
-# off, and any real player may command it. See docs/autonomous-bots.md.
+# Autonomous accounts, comma separated players' account names. Every character on them is an autonomous bot:
+# while switched on with `.rndbot autonomous <name> on`, the server logs it in and keeps it online, it gets the
+# random bot strategies and is always active, but it is never randomized, never level synced to a master or to
+# players, and is not a random bot. Only its own account commands or invites it. See docs/autonomous-bots.md.
 # Default: empty (off)
 # AiPlayerbot.AutonomousAccounts =
-# AiPlayerbot.SharedAutonomousAccounts =
 
 
 # Allowed log files. See SPP_MAP for more information

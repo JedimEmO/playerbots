@@ -109,8 +109,6 @@ public:
     bool IsFreeAltBot(uint32 guid);
     bool IsFreeAltBot(Player* player) {return IsFreeAltBot(player->GetGUIDLow());}
     bool IsInAutonomousAccountList(uint32 accountId);
-    // A shared autonomous account belongs to the server, not to a player: see AiPlayerbot.SharedAutonomousAccounts.
-    bool IsSharedAutonomousAccount(uint32 accountId);
     void LoadAutonomousAccounts();
     bool IsInRandomQuestItemList(uint32 id);
 	bool IsInPvpProhibitedZone(uint32 id);
@@ -140,12 +138,9 @@ public:
     std::list<std::pair<uint32, uint32>> freeAltBots;
     std::list<std::string> toggleAlwaysOnlineAccounts;
     std::list<std::string> toggleAlwaysOnlineChars;
-    // AiPlayerbot.AutonomousAccounts and AiPlayerbot.SharedAutonomousAccounts: account names as configured (upper
-    // case), and the ids they resolve to. autonomousAccounts holds both lists' ids, sharedAutonomousAccounts the second's.
+    // AiPlayerbot.AutonomousAccounts: players' account names as configured (upper case) and the ids they resolve to.
     std::list<std::string> autonomousAccountNames;
-    std::list<std::string> sharedAutonomousAccountNames;
     std::list<uint32> autonomousAccounts;
-    std::list<uint32> sharedAutonomousAccounts;
     bool enableRandomTeleports;
     bool enableMinimalMove;
     uint32 randomBotTeleportDistance;

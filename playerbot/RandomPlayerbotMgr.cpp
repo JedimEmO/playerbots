@@ -1127,7 +1127,6 @@ void RandomPlayerbotMgr::RefreshAutonomousBots()
                 AutonomousBot bot;
                 bot.account = fields[1].GetUInt32();
                 bot.name = fields[2].GetCppString();
-                bot.shared = sPlayerbotAIConfig.IsSharedAutonomousAccount(bot.account);
                 bot.autonomy = fields[3].GetUInt32();
                 bot.xpCap = fields[4].GetUInt32();
                 bots[fields[0].GetUInt32()] = bot;
@@ -1145,8 +1144,7 @@ void RandomPlayerbotMgr::RefreshAutonomousBots()
 // the maps update.
 void RandomPlayerbotMgr::UpdateAutonomousBots()
 {
-    if ((sPlayerbotAIConfig.autonomousAccountNames.empty() && sPlayerbotAIConfig.sharedAutonomousAccountNames.empty()) ||
-        sWorld.IsShutdowning())
+    if (sPlayerbotAIConfig.autonomousAccountNames.empty() || sWorld.IsShutdowning())
         return;
 
     time_t now = time(nullptr);
@@ -1260,9 +1258,9 @@ void RandomPlayerbotMgr::StoreAutonomousValue(uint32 guid, const char* event, ui
             guid, (uint32)time(nullptr), event, value);
 }
 
-void RandomPlayerbotMgr::SetAutonomy(uint32 guid, bool on, bool clear)
+void RandomPlayerbotMgr::SetAutonomy(uint32 guid, bool on)
 {
-    uint32 value = clear ? 0 : (on ? AUTONOMY_ON : AUTONOMY_OFF);
+    uint32 value = on ? AUTONOMY_ON : AUTONOMY_OFF;
     StoreAutonomousValue(guid, "autonomy", value);
 
     std::lock_guard<std::mutex> guard(autonomousBotsMutex);

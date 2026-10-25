@@ -825,10 +825,6 @@ bool PlayerbotAIConfig::Initialize()
     LoadListString<std::list<std::string>>(config.GetStringDefault("AiPlayerbot.AutonomousAccounts", ""), autonomousAccountNames);
     for (std::string& nm : autonomousAccountNames)
         std::transform(nm.begin(), nm.end(), nm.begin(), toupper);
-    sharedAutonomousAccountNames.clear();
-    LoadListString<std::list<std::string>>(config.GetStringDefault("AiPlayerbot.SharedAutonomousAccounts", ""), sharedAutonomousAccountNames);
-    for (std::string& nm : sharedAutonomousAccountNames)
-        std::transform(nm.begin(), nm.end(), nm.begin(), toupper);
     LoadAutonomousAccounts();
 
     loadFreeAltBotAccounts();
@@ -891,24 +887,24 @@ bool PlayerbotAIConfig::IsInAutonomousAccountList(uint32 accountId)
     return accountId && std::find(autonomousAccounts.begin(), autonomousAccounts.end(), accountId) != autonomousAccounts.end();
 }
 
-bool PlayerbotAIConfig::IsSharedAutonomousAccount(uint32 accountId)
-{
-    return accountId && std::find(sharedAutonomousAccounts.begin(), sharedAutonomousAccounts.end(), accountId) != sharedAutonomousAccounts.end();
-}
-
-// Resolves account names from setting to ids, leaving out random bot accounts: their characters belong to the random
-// bot manager, which randomizes them.
-static std::list<uint32> ResolveAutonomousAccounts(const char* setting, std::list<std::string> names, std::string prefix)
+// Resolves AiPlayerbot.AutonomousAccounts to account ids. Called at startup and again by RandomPlayerbotMgr while it
+// refreshes the autonomous characters, so an account created after startup is picked up. A random bot account is
+// never autonomous: its characters belong to the random bot manager, which randomizes them.
+void PlayerbotAIConfig::LoadAutonomousAccounts()
 {
     std::list<uint32> ids;
-    for (std::string name : names)
+
+    std::string prefix = randomBotAccountPrefix;
+    std::transform(prefix.begin(), prefix.end(), prefix.begin(), toupper);
+
+    for (std::string name : autonomousAccountNames)
     {
         if (name.empty())
             continue;
 
         if (!prefix.empty() && name.rfind(prefix, 0) == 0)
         {
-            sLog.outError("%s: %s is a random bot account, ignoring it", setting, name.c_str());
+            sLog.outError("AiPlayerbot.AutonomousAccounts: %s is a random bot account, ignoring it", name.c_str());
             continue;
         }
 
@@ -918,32 +914,15 @@ static std::list<uint32> ResolveAutonomousAccounts(const char* setting, std::lis
             continue;
 
         uint32 id = result->Fetch()[0].GetUInt32();
-        if (sPlayerbotAIConfig.IsInRandomAccountList(id))
+        if (IsInRandomAccountList(id))
         {
-            sLog.outError("%s: %s is a random bot account, ignoring it", setting, name.c_str());
+            sLog.outError("AiPlayerbot.AutonomousAccounts: %s is a random bot account, ignoring it", name.c_str());
             continue;
         }
 
         ids.push_back(id);
     }
-    return ids;
-}
 
-// Resolves AiPlayerbot.AutonomousAccounts and AiPlayerbot.SharedAutonomousAccounts to account ids. Called at startup
-// and again by RandomPlayerbotMgr while it refreshes the autonomous characters, so an account created after startup is
-// picked up. An account on both lists is shared.
-void PlayerbotAIConfig::LoadAutonomousAccounts()
-{
-    std::string prefix = randomBotAccountPrefix;
-    std::transform(prefix.begin(), prefix.end(), prefix.begin(), toupper);
-
-    std::list<uint32> shared = ResolveAutonomousAccounts("AiPlayerbot.SharedAutonomousAccounts", sharedAutonomousAccountNames, prefix);
-    std::list<uint32> ids = ResolveAutonomousAccounts("AiPlayerbot.AutonomousAccounts", autonomousAccountNames, prefix);
-    for (uint32 id : shared)
-        if (std::find(ids.begin(), ids.end(), id) == ids.end())
-            ids.push_back(id);
-
-    sharedAutonomousAccounts = shared;
     autonomousAccounts = ids;
 }
 

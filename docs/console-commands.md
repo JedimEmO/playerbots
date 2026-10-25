@@ -229,14 +229,14 @@ The bot is checked before the player.
 
 ```
 .rndbot autonomous
-.rndbot autonomous <name> [on|off|default|cap <level>|cap off]
+.rndbot autonomous <name> [on|off|cap <level>|cap off]
 ```
 
-Lists the autonomous bots, the characters on the `AiPlayerbot.AutonomousAccounts` and
-`AiPlayerbot.SharedAutonomousAccounts` accounts, one line each, sorted by name:
+Lists the autonomous bots, the characters on the `AiPlayerbot.AutonomousAccounts` accounts,
+one line each, sorted by name:
 `<name> online|offline on|off`, then ` cap <level>` when it has one.
 With a name it answers that character's line, and switches it or sets its level cap first.
-`No autonomous bots` means the settings are empty or their accounts have no characters.
+`No autonomous bots` means the setting is empty or its accounts have no characters.
 [Autonomous bots](autonomous-bots.md) describes them and every reply.
 
 ## cmd

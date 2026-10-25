@@ -2775,11 +2775,11 @@ static std::string AutonomousLine(const RandomPlayerbotMgr::AutonomousStatus& s)
 
 // .rndbot autonomous                             every autonomous character
 // .rndbot autonomous <Name>                      one of them
-// .rndbot autonomous <Name> on|off|default       switches it, or back to its account's default
+// .rndbot autonomous <Name> on|off               switches it
 // .rndbot autonomous <Name> cap <level>|off      the level it stops gaining experience at while a bot plays it
 std::list<std::string> PlayerbotHolder::HandleAutonomous(Player* master, const std::string param, AccountTypes security)
 {
-    const std::string usage = "Usage: .rndbot autonomous [<name> [on|off|default|cap <level>|cap off]]";
+    const std::string usage = "Usage: .rndbot autonomous [<name> [on|off|cap <level>|cap off]]";
 
     if (security < SEC_GAMEMASTER)
         return {"You may not list autonomous bots"};
@@ -2810,8 +2810,8 @@ std::list<std::string> PlayerbotHolder::HandleAutonomous(Player* master, const s
         return {AutonomousLine(status)};
 
     const std::string& what = words[1];
-    if (words.size() == 2 && (what == "on" || what == "off" || what == "default"))
-        sRandomPlayerbotMgr.SetAutonomy(guid, what == "on", what == "default");
+    if (words.size() == 2 && (what == "on" || what == "off"))
+        sRandomPlayerbotMgr.SetAutonomy(guid, what == "on");
     else if (words.size() == 3 && what == "cap")
     {
         if (words[2] == "off")
