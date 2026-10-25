@@ -376,8 +376,12 @@ Known gaps:
 
 ## Training
 
-A bot goes to its class trainer as soon as it can pay for one spell it is missing,
+An autonomous character goes to its class trainer once it can pay for every spell it is missing,
+or for one that has waited two levels,
 and the trainer teaches what the money covers, a spell at a time.
+Going for any single spell it could just afford sent a druid from Westfall to Stormwind and back
+three times in an hour.
+A random bot still goes as soon as it can pay for one.
 Upstream waited until the bot could pay for every missing spell at once,
 plus its repairs and ammunition.
 A random bot gets money from the random bot manager, so it got there;

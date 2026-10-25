@@ -507,19 +507,30 @@ bool ShouldTravelNamedValue::Calculate()
         if (AI_VALUE2(uint32, "train cost", trainerType) == 0) //Has nothing to train
             return false;
 
-        // wow-playground: spells and profession ranks are worth a trip as soon as the bot can pay for one of them; the
-        // trainer then teaches what the money covers. Waiting until it can pay for all of them kept bots that earn
-        // their own money on their first spells for good, since a full training costs more than they ever carry.
+        // wow-playground: spells and profession ranks are worth a trip once the bot can pay for all of them, or for one
+        // that has waited two levels; the trainer then teaches what the money covers. Waiting for all of them alone kept
+        // bots that earn their own money on their first spells for good. Going for any single spell sent a druid from
+        // Westfall to Stormwind and back three times in an hour, each time for the next spell it could just afford.
         if (budgetType == NeedMoneyFor::spells || budgetType == NeedMoneyFor::skilltraining)
         {
-            uint32 cheapest = 0;
+            uint32 cheapest = 0, total = 0, waitedCheapest = 0;
             for (auto& spell : AI_VALUE2(std::vector<TrainerSpell const*>, "trainable spells", (uint32)trainerType))
             {
-                if (spell && (!cheapest || spell->spellCost < cheapest))
+                if (!spell)
+                    continue;
+
+                total += spell->spellCost;
+                if (!cheapest || spell->spellCost < cheapest)
                     cheapest = spell->spellCost;
+                if (spell->reqLevel + 2 <= bot->GetLevel() && (!waitedCheapest || spell->spellCost < waitedCheapest))
+                    waitedCheapest = spell->spellCost;
             }
 
-            return AI_VALUE2(uint32, "free money for", (uint32)budgetType) >= cheapest;
+            uint32 money = AI_VALUE2(uint32, "free money for", (uint32)budgetType);
+            if (!sRandomPlayerbotMgr.IsAutonomousBot(bot))
+                return money >= cheapest;
+
+            return money >= total || (waitedCheapest && money >= waitedCheapest);
         }
 
         if (!AI_VALUE2(bool, "has all money for", (uint32)budgetType))
