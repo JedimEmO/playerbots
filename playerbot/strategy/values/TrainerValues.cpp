@@ -128,6 +128,16 @@ std::vector<TrainerSpell const*> TrainableSpellsValue::Calculate()
             if (trainerType == TRAINER_TYPE_MOUNTS && requirement != bot->getRace())
                 continue;
 
+            // wow-playground: a trade trainer's list is keyed by skill, and some skills belong to other races or
+            // classes. Lockpicking's quest NPCs teach it for a copper to anyone, so every level 3 mage had a spell
+            // that had "waited two levels" and walked to Stormwind's weapon master for it.
+            if (trainerType == TRAINER_TYPE_TRADESKILLS && requirement)
+            {
+                auto bounds = sSpellMgr.GetSkillRaceClassInfoMapBounds(requirement);
+                if (bounds.first != bounds.second && !bot->GetSkillInfo(requirement))
+                    continue;
+            }
+
             for (auto& [trainerSpell, trainers] : trainerSpellList)
             {
                 uint32 reqLevel = 0;
