@@ -1,5 +1,6 @@
 #include "PlayerbotMgr.h"
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include <stdarg.h>
 #include <iomanip>
 
@@ -2840,7 +2841,8 @@ void PlayerbotAI::ResetStrategies(bool autoLoad)
             stanceValue->Load("near");
     }
 
-    if (autoLoad && HasPlayerRelation()) sPlayerbotDbStore.Load(this);
+    // A guild character's strategies come from its job alone, not from strategies saved earlier.
+    if (autoLoad && HasPlayerRelation() && !sGuildBotMgr.IsGuildBot(bot)) sPlayerbotDbStore.Load(this);
 
 #ifdef GenerateBotTests
     for (auto& [state, strats] : testStrategies)
@@ -6347,7 +6349,7 @@ ActivePiorityType PlayerbotAI::GetPriorityType()
     if (HasPlayerNearby(WorldPosition(bot).getVisibilityDistance() + sPlayerbotAIConfig.reactDistance))
         return ActivePiorityType::NEARBY_PLAYER;
 
-    if (sPlayerbotAIConfig.IsFreeAltBot(bot) || HasStrategy("travel once", BotState::BOT_STATE_NON_COMBAT))
+    if (sPlayerbotAIConfig.IsFreeAltBot(bot) || sGuildBotMgr.IsGuildBot(bot) || HasStrategy("travel once", BotState::BOT_STATE_NON_COMBAT))
         return ActivePiorityType::IS_ALWAYS_ACTIVE;
 
     if (bot->InBattleGroundQueue())
@@ -8193,6 +8195,9 @@ void PlayerbotAI::ReceiveDelayedPacket(futurePackets futPackets)
 
 PlayerbotHolder* PlayerbotAI::GetHolder() const
 {
+    if (sGuildBotMgr.GetPlayerBot(bot->GetGUIDLow()))
+        return &sGuildBotMgr;
+
     if (sRandomPlayerbotMgr.IsRandomBot(bot))
         return &sRandomPlayerbotMgr;
 

@@ -1,4 +1,5 @@
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "TravelValues.h"
 #include "QuestValues.h"
 #include "SharedValueContext.h"
@@ -299,6 +300,10 @@ bool NeedTravelPurposeValue::Calculate()
         return ai->HasStrategy("explore", BotState::BOT_STATE_NON_COMBAT);    
     case TravelDestinationPurpose::GenericRpg:
     {
+        // A guild character on a job does the job; it never wanders.
+        if (sGuildBotMgr.IsGuildBot(bot))
+            return false;
+
         uint32 rpgPhase = ai->GetFixedBotNumber(BotTypeNumber::RPG_PHASE_NUMBER, 60, 1);
 
         if (rpgPhase < 15) //Only last 45 minutes of the hour allow generic rpg.
@@ -308,6 +313,10 @@ bool NeedTravelPurposeValue::Calculate()
     }
     case TravelDestinationPurpose::Grind:
     {
+        // Levelling guild characters grind the whole hour, not only the random bots' grinding part of it.
+        if (sGuildBotMgr.IsGuildBot(bot))
+            return sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) == "level" && !AI_VALUE2(bool, "manual bool", "is travel refresh");
+
         uint32 rpgPhase = ai->GetFixedBotNumber(BotTypeNumber::RPG_PHASE_NUMBER, 60, 1);
 
         if (rpgPhase > 45) //Only first 45 minutes of the hour allow generic grind.

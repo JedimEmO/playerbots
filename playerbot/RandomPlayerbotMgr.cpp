@@ -1,6 +1,7 @@
 #include "Config/Config.h"
 
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/PlayerbotFactory.h"
 #include "strategy/values/LastMovementValue.h"
@@ -3486,6 +3487,7 @@ bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* handler, cha
     handlers["login debug"] = &RandomPlayerbotMgr::HandleConsoleLoginDebug;
     handlers["taxtest"] = &RandomPlayerbotMgr::HandleConsoleTaxTest;
     handlers["zoneupd"] = &RandomPlayerbotMgr::HandleConsoleZoneUpd;
+    handlers["guildbot"] = &RandomPlayerbotMgr::HandleConsoleGuildBot;
 
     for (auto& [prefix, consoleHandler] : handlers)
     {
@@ -3635,8 +3637,27 @@ void RandomPlayerbotMgr::HandleCommand(uint32 type, const std::string& text, Pla
     });
 }
 
+void RandomPlayerbotMgr::UpdateSessions(uint32 elapsed)
+{
+    PlayerbotHolder::UpdateSessions(elapsed);
+    sGuildBotMgr.Tick(elapsed);
+}
+
+void RandomPlayerbotMgr::LogoutAllBots()
+{
+    PlayerbotHolder::LogoutAllBots();
+    sGuildBotMgr.LogoutAll();
+}
+
+std::list<std::string> RandomPlayerbotMgr::HandleConsoleGuildBot(std::string param)
+{
+    return sGuildBotMgr.HandleCommand(param);
+}
+
 void RandomPlayerbotMgr::OnPlayerLogout(Player* player)
 {
+    sGuildBotMgr.OnPlayerLogout(player);
+
     bool hadPlayerBot = GetPlayerBot(player->GetGUIDLow());
 
     DisablePlayerBot(player->GetGUIDLow());
@@ -3709,8 +3730,9 @@ void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
         if (!sPlayerbotAIConfig.IsFreeAltBot(player))
            SetEventValue(guid, "login", 0, 0);
     }
-    else
+    else if (!(sGuildBotMgr.IsGuildCharacter(player->GetGUIDLow()) && player->GetSession()->GetRemoteAddress() == "disconnected/bot"))
     {
+        // A guild character the engine plays is not a player: it must not drive level sync, bot logins or groups.
         players[player->GetGUIDLow()] = player;
         sLog.outDebug("Including non-random bot player %s into random bot update", player->GetName());
     }

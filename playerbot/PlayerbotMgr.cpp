@@ -1,4 +1,5 @@
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "PlayerbotDbStore.h"
 #include "playerbot/PlayerbotFactory.h"
@@ -417,6 +418,14 @@ void PlayerbotHolder::OnBotLogin(Player * const bot)
 {
     if (!sPlayerbotAIConfig.enabled)
         return;
+
+    // A player took over a guild character: it is theirs, with no AI, until they log out.
+    if (this != &sGuildBotMgr && sGuildBotMgr.IsGuildCharacter(bot->GetGUIDLow()) && sGuildBotMgr.IsPlayerControlled(bot))
+    {
+        if (bot->GetPlayerbotAI())
+            bot->RemovePlayerbotAI();
+        return;
+    }
 
     PlayerbotAI* ai = bot->GetPlayerbotAI();
     if (!ai)
@@ -1079,6 +1088,8 @@ void PlayerbotMgr::OnPlayerLogin(Player* player)
 
     if (!sPlayerbotAIConfig.enabled)
         return;
+
+    sGuildBotMgr.OnPlayerTakeover(player);
 
     // set locale priority for bot texts
     sPlayerbotTextMgr.AddLocalePriority(player->GetSession()->GetSessionDbLocaleIndex());

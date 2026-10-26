@@ -1,5 +1,6 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/AiFactory.h"
+#include "playerbot/GuildBotMgr.h"
 #include "strategy/AiObjectContext.h"
 #include "strategy/ReactionEngine.h"
 
@@ -527,7 +528,7 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
 #endif
     }
 
-    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player))
+    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player) || sGuildBotMgr.IsGuildBot(player))
 	{
         combatEngine->addStrategy("roll");
 
@@ -592,7 +593,8 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
         // remove threat for now
         //engine->removeStrategy("threat");
 
-        combatEngine->ChangeStrategy(sPlayerbotAIConfig.randomBotCombatStrategies);
+        // Guild characters take the plain bots' combat config; the random bots' one adds chat.
+        combatEngine->ChangeStrategy(sGuildBotMgr.IsGuildBot(player) ? sPlayerbotAIConfig.combatStrategies : sPlayerbotAIConfig.randomBotCombatStrategies);
     }
     else
     {
@@ -934,7 +936,12 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
     if (!player->InBattleGround() && sPlayerbotAIConfig.jumpFollow)
         nonCombatEngine->addStrategy("follow jump");
 
-    if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !player->InBattleGround())
+    if (sGuildBotMgr.IsGuildBot(player) && !facade->IsRealPlayer() && !player->InBattleGround())
+    {
+        // Guild characters: their job decides, with none of the free bots' random extras.
+        sGuildBotMgr.AddNonCombatStrategies(player, nonCombatEngine);
+    }
+    else if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !player->InBattleGround())
     {   
         Player* master = facade->GetMaster();
 
@@ -1119,7 +1126,7 @@ Engine* AiFactory::createNonCombatEngine(Player* player, PlayerbotAI* const faca
 void AiFactory::AddDefaultDeadStrategies(Player* player, PlayerbotAI* const facade, Engine* deadEngine)
 {
     deadEngine->addStrategies("dead", "stay", "default", "follow", "group", "dungeon", NULL);
-    if (sRandomPlayerbotMgr.IsFreeBot(player) && !player->GetGroup())
+    if ((sRandomPlayerbotMgr.IsFreeBot(player) || sGuildBotMgr.IsGuildBot(player)) && !player->GetGroup())
     {
         deadEngine->removeStrategy("follow");
     }
@@ -1297,7 +1304,7 @@ void AiFactory::AddDefaultDeadStrategies(Player* player, PlayerbotAI* const faca
         }
     }
 
-    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player))
+    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player) || sGuildBotMgr.IsGuildBot(player))
     {
         deadEngine->ChangeStrategy(sPlayerbotAIConfig.randomBotDeadStrategies);
     }
@@ -1491,7 +1498,7 @@ void AiFactory::AddDefaultReactionStrategies(Player* player, PlayerbotAI* const 
         }
     }
 
-    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player))
+    if (facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player) || sGuildBotMgr.IsGuildBot(player))
     {
         reactionEngine->ChangeStrategy(sPlayerbotAIConfig.randomBotReactStrategies);
     }

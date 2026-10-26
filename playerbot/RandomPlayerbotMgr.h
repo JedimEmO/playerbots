@@ -82,6 +82,9 @@ public:
         bool GetNamedLocation(std::string const& name, WorldLocation& location);
 
         static bool HandlePlayerbotConsoleCommand(ChatHandler* handler, char const* args);
+        // The core ticks and shuts down only this holder; these also drive the guild characters' one.
+        void UpdateSessions(uint32 elapsed);
+        void LogoutAllBots();
         bool IsRandomBot(Player* bot);
         bool IsRandomBot(uint32 bot);
         bool IsFreeBot(Player* bot) { return IsRandomBot(bot) || sPlayerbotAIConfig.IsFreeAltBot(bot); }
@@ -194,6 +197,7 @@ public:
         uint32 GetZoneLevel(uint16 mapId, float teleX, float teleY, float teleZ);
         void PrepareTeleportCache();
         typedef std::list<std::string> (RandomPlayerbotMgr::*ConsoleCommandHandler) (std::string param);
+        std::list<std::string> HandleConsoleGuildBot(std::string param);
         typedef std::list<std::string> (RandomPlayerbotMgr::*ConsolePlayerCommandHandler) (Player*);
 
         std::string consoleCmdParams;

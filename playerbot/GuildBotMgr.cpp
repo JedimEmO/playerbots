@@ -1,0 +1,652 @@
+#include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
+#include "playerbot/PlayerbotAIConfig.h"
+#include "playerbot/ServerFacade.h"
+#include "playerbot/strategy/Engine.h"
+#include "Accounts/AccountMgr.h"
+#include "Chat/Chat.h"
+
+#include <set>
+#include <sstream>
+
+namespace
+{
+    // How often the orders are read and acted on, and how often the state is written.
+    constexpr uint32 ORDERS_MS = 5 * IN_MILLISECONDS;
+    constexpr uint32 STATE_MS = 10 * IN_MILLISECONDS;
+    // A character a player logged out of waits this long before the engine takes it back,
+    // so a quick relog by the player does not race the engine's login.
+    constexpr time_t RELOGIN_SECONDS = 30;
+    // A login that has not completed is retried after this long.
+    constexpr time_t LOGIN_RETRY_SECONDS = 60;
+
+    std::string Trim(const std::string& s)
+    {
+        size_t b = s.find_first_not_of(' ');
+        if (b == std::string::npos)
+            return "";
+        size_t e = s.find_last_not_of(' ');
+        return s.substr(b, e - b + 1);
+    }
+
+    std::pair<std::string, std::string> SplitWord(const std::string& s)
+    {
+        std::string t = Trim(s);
+        size_t sp = t.find(' ');
+        if (sp == std::string::npos)
+            return { t, "" };
+        return { t.substr(0, sp), Trim(t.substr(sp + 1)) };
+    }
+
+    bool IsRealSession(Player* player)
+    {
+        return player->GetSession() && player->GetSession()->GetRemoteAddress() != "disconnected/bot";
+    }
+
+    uint32 FreeBagSlots(Player* bot)
+    {
+        uint32 free = 0;
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; slot++)
+            if (!bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                free++;
+
+        for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+        {
+            const Bag* const pBag = (Bag*)bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bag);
+            if (pBag && pBag->GetProto()->Class == ITEM_CLASS_CONTAINER && pBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER)
+                free += pBag->GetFreeSlots();
+        }
+        return free;
+    }
+
+    // The jobs the engine knows. Anything else fails with "unknown job".
+    bool IsKnownJob(const std::string& job)
+    {
+        return job == "idle" || job == "level";
+    }
+}
+
+bool GuildBotMgr::IsGuildBot(uint32 guid) const
+{
+    auto it = characters.find(guid);
+    return it != characters.end() && it->second.enabled && !it->second.playerControlled;
+}
+
+bool GuildBotMgr::IsGuildBot(Player* player) const
+{
+    return player && IsGuildBot(player->GetGUIDLow());
+}
+
+bool GuildBotMgr::IsPlayerControlled(Player* player) const
+{
+    auto it = characters.find(player->GetGUIDLow());
+    return it != characters.end() && (it->second.playerControlled || IsRealSession(player));
+}
+
+std::string GuildBotMgr::GetActiveJob(uint32 guid) const
+{
+    auto it = characters.find(guid);
+    if (it == characters.end())
+        return "idle";
+
+    const Character& c = it->second;
+    if (c.status != "working" || !IsKnownJob(c.job))
+        return "idle";
+
+    return c.job;
+}
+
+std::string GuildBotMgr::ArgValue(const Character& c, const std::string& key) const
+{
+    std::istringstream in(c.jobArgs);
+    std::string word;
+    while (in >> word)
+    {
+        size_t eq = word.find('=');
+        if (eq != std::string::npos && word.substr(0, eq) == key)
+            return word.substr(eq + 1);
+    }
+    return "";
+}
+
+void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) const
+{
+    // None of the random bots' habits, and nothing that needs a master to make sense.
+    engine->removeStrategy("quest");
+    engine->removeStrategy("duel");
+    engine->removeStrategy("emote");
+    engine->removeStrategy("follow");
+    engine->removeStrategy("wander");
+    engine->removeStrategy("rpg jump");
+    engine->removeStrategy("follow jump");
+    engine->addStrategy("roll");
+
+    const std::string job = GetActiveJob(player->GetGUIDLow());
+
+    if (job == "level")
+    {
+        // Grind creatures of the character's level, travelling between grind spots,
+        // and sell, repair, train and bank at the places travel picks.
+        engine->addStrategies("collision", "grind", "travel", "rpg", "free", NULL);
+        // rpg adds all its parts; a levelling character only uses the town services.
+        engine->removeStrategy("rpg quest");
+        engine->removeStrategy("rpg explore");
+        engine->removeStrategy("rpg player");
+        engine->removeStrategy("rpg bg");
+        engine->removeStrategy("rpg guild");
+        return;
+    }
+
+    // idle: stand where it is.
+    engine->addStrategy("stay");
+}
+
+void GuildBotMgr::Tick(uint32 elapsed)
+{
+    if (!sPlayerbotAIConfig.enabled)
+        return;
+
+    UpdateSessions(elapsed);
+
+    sinceOrders += elapsed;
+    sinceState += elapsed;
+
+    if (sinceOrders >= ORDERS_MS)
+    {
+        sinceOrders = 0;
+        if (!tablesReady)
+            EnsureTables();
+        LoadOrders();
+        LoginLogout();
+        ApplyOrders();
+        CheckJobs();
+    }
+
+    if (sinceState >= STATE_MS)
+    {
+        sinceState = 0;
+        WriteState();
+    }
+}
+
+void GuildBotMgr::EnsureTables()
+{
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guild_character ("
+        " guid INT UNSIGNED NOT NULL PRIMARY KEY,"
+        " enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+        " job VARCHAR(32) NOT NULL DEFAULT 'idle',"
+        " job_args VARCHAR(255) NOT NULL DEFAULT '',"
+        " job_seq INT UNSIGNED NOT NULL DEFAULT 1,"
+        " updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guild_character_state ("
+        " guid INT UNSIGNED NOT NULL PRIMARY KEY,"
+        " name VARCHAR(12) NOT NULL,"
+        " controller VARCHAR(8) NOT NULL,"
+        " level TINYINT UNSIGNED NOT NULL,"
+        " xp INT UNSIGNED NOT NULL,"
+        " xp_next INT UNSIGNED NOT NULL,"
+        " money INT UNSIGNED NOT NULL,"
+        " map SMALLINT UNSIGNED NOT NULL,"
+        " zone INT UNSIGNED NOT NULL,"
+        " x FLOAT NOT NULL, y FLOAT NOT NULL, z FLOAT NOT NULL,"
+        " health_pct TINYINT UNSIGNED NOT NULL,"
+        " dead TINYINT UNSIGNED NOT NULL,"
+        " in_combat TINYINT UNSIGNED NOT NULL,"
+        " free_bag_slots SMALLINT UNSIGNED NOT NULL,"
+        " job VARCHAR(32) NOT NULL,"
+        " job_seq INT UNSIGNED NOT NULL,"
+        " job_status VARCHAR(16) NOT NULL,"
+        " job_reason VARCHAR(255) NOT NULL,"
+        " updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guild_event ("
+        " id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+        " guid INT UNSIGNED NOT NULL,"
+        " at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        " kind VARCHAR(32) NOT NULL,"
+        " detail VARCHAR(255) NOT NULL DEFAULT '',"
+        " KEY guid (guid), KEY at (at)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    tablesReady = true;
+}
+
+void GuildBotMgr::LoadOrders()
+{
+    auto result = CharacterDatabase.PQuery(
+        "SELECT g.guid, c.account, c.name, g.enabled, g.job, g.job_args, g.job_seq "
+        "FROM guild_character g JOIN characters c ON c.guid = g.guid");
+
+    std::set<uint32> seen;
+    if (result)
+    {
+        do
+        {
+            Field* f = result->Fetch();
+            uint32 guid = f[0].GetUInt32();
+            seen.insert(guid);
+
+            Character& c = characters[guid];
+            bool isNew = c.guid == 0;
+            c.guid = guid;
+            c.account = f[1].GetUInt32();
+            c.name = f[2].GetCppString();
+            c.enabled = f[3].GetUInt32() != 0;
+            c.job = f[4].GetCppString();
+            c.jobArgs = f[5].GetCppString();
+            c.jobSeq = f[6].GetUInt32();
+            if (isNew)
+                c.offlineSince = 0;
+        } while (result->NextRow());
+    }
+
+    for (auto it = characters.begin(); it != characters.end();)
+    {
+        if (seen.count(it->first))
+        {
+            ++it;
+            continue;
+        }
+
+        if (GetPlayerBot(it->first))
+            LogoutPlayerBot(it->first);
+        it = characters.erase(it);
+    }
+}
+
+void GuildBotMgr::LoginLogout()
+{
+    const time_t now = time(nullptr);
+
+    for (auto& [guid, c] : characters)
+    {
+        Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false);
+        Player* held = GetPlayerBot(guid);
+
+        if (held)
+        {
+            if (!c.enabled)
+            {
+                Event(guid, "logout", "switched off");
+                LogoutPlayerBot(guid);
+                c.offlineSince = now;
+            }
+            continue;
+        }
+
+        if (player)
+        {
+            // Online, and not ours: a player is on it, by a normal login or a takeover.
+            if (IsRealSession(player) && !c.playerControlled)
+            {
+                c.playerControlled = true;
+                Event(guid, "player", "a player logged in");
+            }
+            continue;
+        }
+
+        // Offline.
+        if (c.playerControlled)
+        {
+            c.playerControlled = false;
+            c.offlineSince = now;
+        }
+
+        if (!c.enabled)
+            continue;
+
+        if (c.offlineSince && now - c.offlineSince < RELOGIN_SECONDS)
+            continue;
+
+        if (c.loginRequested && now - c.loginRequested < LOGIN_RETRY_SECONDS)
+            continue;
+
+        c.loginRequested = now;
+        // The bot's own account as the master account: the login check allows a bot on its master's account,
+        // whether or not that account is online. No master is set; guild characters have none.
+        AddPlayerBot(guid, c.account);
+    }
+}
+
+void GuildBotMgr::OnBotLoginInternal(Player* const bot)
+{
+    auto it = characters.find(bot->GetGUIDLow());
+    if (it == characters.end())
+        return;
+
+    Character& c = it->second;
+    c.loginRequested = 0;
+    c.lastLevel = bot->GetLevel();
+    // OnBotLogin resets the strategies after this, from the current order.
+    c.appliedSeq = c.jobSeq;
+    if (!IsKnownJob(c.job))
+    {
+        c.status = "failed";
+        c.reason = "unknown job " + c.job;
+    }
+    Event(c.guid, "login", c.job);
+}
+
+void GuildBotMgr::ApplyOrders()
+{
+    for (auto& [guid, c] : characters)
+    {
+        Player* bot = GetPlayerBot(guid);
+        if (!bot || !bot->GetPlayerbotAI() || c.appliedSeq == c.jobSeq)
+            continue;
+
+        c.appliedSeq = c.jobSeq;
+        c.reason.clear();
+        if (IsKnownJob(c.job))
+        {
+            c.status = "working";
+            Event(guid, "job", c.job + (c.jobArgs.empty() ? "" : " " + c.jobArgs));
+        }
+        else
+        {
+            c.status = "failed";
+            c.reason = "unknown job " + c.job;
+            Event(guid, "job_failed", c.reason);
+        }
+
+        bot->GetPlayerbotAI()->ResetStrategies(false);
+    }
+}
+
+void GuildBotMgr::CheckJobs()
+{
+    for (auto& [guid, c] : characters)
+    {
+        Player* bot = GetPlayerBot(guid);
+        if (!bot)
+            continue;
+
+        if (c.lastLevel && bot->GetLevel() > c.lastLevel)
+            Event(guid, "level", std::to_string(bot->GetLevel()));
+        c.lastLevel = bot->GetLevel();
+
+        if (c.status != "working")
+            continue;
+
+        if (c.job == "level")
+        {
+            std::string until = ArgValue(c, "until");
+            uint32 target = until.empty() ? 0 : uint32(atoi(until.c_str()));
+            if (target && bot->GetLevel() >= target)
+            {
+                c.status = "done";
+                c.reason = "reached level " + std::to_string(bot->GetLevel());
+                Event(guid, "job_done", c.job + " " + c.reason);
+                if (bot->GetPlayerbotAI())
+                    bot->GetPlayerbotAI()->ResetStrategies(false);
+            }
+        }
+    }
+}
+
+void GuildBotMgr::WriteState()
+{
+    for (auto& [guid, c] : characters)
+    {
+        Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false);
+        WriteState(c, player);
+    }
+}
+
+void GuildBotMgr::WriteState(const Character& c, Player* bot)
+{
+    std::string controller = !bot ? "offline" : (GetPlayerBot(c.guid) ? "bot" : "player");
+
+    if (!bot)
+    {
+        CharacterDatabase.PExecute(
+            "INSERT INTO guild_character_state (guid, name, controller, level, xp, xp_next, money, map, zone, x, y, z, "
+            "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason) "
+            "SELECT c.guid, c.name, 'offline', c.level, c.xp, 0, c.money, c.map, c.zone, c.position_x, c.position_y, c.position_z, "
+            "0, 0, 0, 0, '%s', %u, '%s', '%s' FROM characters c WHERE c.guid = %u "
+            "ON DUPLICATE KEY UPDATE controller = 'offline', level = VALUES(level), xp = VALUES(xp), money = VALUES(money), "
+            "map = VALUES(map), zone = VALUES(zone), x = VALUES(x), y = VALUES(y), z = VALUES(z), in_combat = 0, "
+            "job = VALUES(job), job_seq = VALUES(job_seq), job_status = VALUES(job_status), job_reason = VALUES(job_reason)",
+            Escape(c.job).c_str(), c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str(), c.guid);
+        return;
+    }
+
+    CharacterDatabase.PExecute(
+        "REPLACE INTO guild_character_state (guid, name, controller, level, xp, xp_next, money, map, zone, x, y, z, "
+        "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason) "
+        "VALUES (%u, '%s', '%s', %u, %u, %u, %u, %u, %u, %f, %f, %f, %u, %u, %u, %u, '%s', %u, '%s', '%s')",
+        c.guid, Escape(c.name).c_str(), controller.c_str(), bot->GetLevel(), bot->GetUInt32Value(PLAYER_XP),
+        bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP), bot->GetMoney(), bot->GetMapId(), bot->GetZoneId(),
+        bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), uint32(bot->GetHealthPercent()),
+        sServerFacade.UnitIsDead(bot) ? 1 : 0, sServerFacade.IsInCombat(bot) ? 1 : 0, FreeBagSlots(bot),
+        Escape(c.job).c_str(), c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str());
+}
+
+void GuildBotMgr::Event(uint32 guid, const std::string& kind, const std::string& detail)
+{
+    CharacterDatabase.PExecute("INSERT INTO guild_event (guid, kind, detail) VALUES (%u, '%s', '%s')",
+        guid, Escape(kind).c_str(), Escape(detail.substr(0, 255)).c_str());
+}
+
+std::string GuildBotMgr::Escape(std::string text)
+{
+    CharacterDatabase.escape_string(text);
+    return text;
+}
+
+void GuildBotMgr::OnPlayerTakeover(Player* player)
+{
+    auto it = characters.find(player->GetGUIDLow());
+    if (it == characters.end() || !GetPlayerBot(player->GetGUIDLow()))
+        return;
+
+    // The core has moved the character onto the player's session. Let go of it without logging it out;
+    // the bot session it had is left behind, as the core does for random bots.
+    GetAllBots().erase(player->GetGUIDLow());
+    it->second.playerControlled = true;
+    Event(it->first, "player", "a player took over");
+}
+
+void GuildBotMgr::OnPlayerLogout(Player* player)
+{
+    auto it = characters.find(player->GetGUIDLow());
+    if (it == characters.end() || GetPlayerBot(player->GetGUIDLow()))
+        return;
+
+    if (it->second.playerControlled)
+    {
+        it->second.playerControlled = false;
+        it->second.offlineSince = time(nullptr);
+        Event(it->first, "player_left", "a player logged out");
+    }
+}
+
+void GuildBotMgr::LogoutAll()
+{
+    LogoutAllBots();
+}
+
+GuildBotMgr::Character* GuildBotMgr::Find(const std::string& name)
+{
+    std::string wanted = name;
+    normalizePlayerName(wanted);
+    for (auto& [guid, c] : characters)
+        if (c.name == wanted)
+            return &c;
+    return nullptr;
+}
+
+uint32 GuildBotMgr::GetOrCreateAccount(Player* master, std::string& error)
+{
+    if (!createAccount)
+        error = "no account";
+    return createAccount;
+}
+
+std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
+{
+    auto [sub, rest] = SplitWord(args);
+
+    if (!tablesReady)
+        EnsureTables();
+
+    if (sub == "add")
+        return HandleAdd(rest);
+    if (sub == "create")
+        return HandleCreate(rest);
+    if (sub == "list")
+        return HandleList();
+    if (sub == "state")
+        return HandleState(rest);
+    if (sub == "on" || sub == "off" || sub == "job" || sub == "remove")
+        return HandleOrder(sub, rest);
+
+    return {
+        "guildbot add <name> [job [args]]       make a character a guild character",
+        "guildbot create <account> <name> <race> <class> [male|female]   create a level 1 character on an account",
+        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>]",
+        "guildbot on|off <name>                 switch the engine's play on or off",
+        "guildbot remove <name>                 stop treating it as a guild character",
+        "guildbot list                          every guild character, one line each",
+        "guildbot state <name>                  what it is doing, as the state table holds it",
+    };
+}
+
+std::list<std::string> GuildBotMgr::HandleAdd(const std::string& args)
+{
+    auto [name, jobArgs] = SplitWord(args);
+    auto [job, rest] = SplitWord(jobArgs);
+    if (job.empty())
+        job = "idle";
+
+    std::string normalized = name;
+    if (!normalizePlayerName(normalized))
+        return { "usage: guildbot add <name> [job [args]]" };
+
+    ObjectGuid guid = sObjectMgr.GetPlayerGuidByName(normalized);
+    if (!guid)
+        return { "no character named " + normalized };
+
+    if (sRandomPlayerbotMgr.IsRandomBot(guid.GetCounter()))
+        return { normalized + " is a random bot" };
+
+    CharacterDatabase.DirectPExecute(
+        "INSERT INTO guild_character (guid, enabled, job, job_args, job_seq) VALUES (%u, 1, '%s', '%s', 1) "
+        "ON DUPLICATE KEY UPDATE enabled = 1, job = VALUES(job), job_args = VALUES(job_args), job_seq = job_seq + 1",
+        guid.GetCounter(), Escape(job).c_str(), Escape(rest).c_str());
+    sinceOrders = ORDERS_MS;
+    return { normalized + " is a guild character, job " + job };
+}
+
+std::list<std::string> GuildBotMgr::HandleOrder(const std::string& sub, const std::string& args)
+{
+    auto [name, rest] = SplitWord(args);
+    std::string normalized = name;
+    if (!normalizePlayerName(normalized))
+        return { "usage: guildbot " + sub + " <name> ..." };
+
+    ObjectGuid guid = sObjectMgr.GetPlayerGuidByName(normalized);
+    if (!guid || !IsGuildCharacter(guid.GetCounter()))
+        return { normalized + " is not a guild character" };
+
+    uint32 low = guid.GetCounter();
+    if (sub == "on" || sub == "off")
+        CharacterDatabase.DirectPExecute("UPDATE guild_character SET enabled = %u WHERE guid = %u", sub == "on" ? 1 : 0, low);
+    else if (sub == "remove")
+        CharacterDatabase.DirectPExecute("DELETE FROM guild_character WHERE guid = %u", low);
+    else
+    {
+        auto [job, jobArgs] = SplitWord(rest);
+        if (job.empty())
+            return { "usage: guildbot job <name> <job> [args]" };
+        CharacterDatabase.DirectPExecute(
+            "UPDATE guild_character SET job = '%s', job_args = '%s', job_seq = job_seq + 1 WHERE guid = %u",
+            Escape(job).c_str(), Escape(jobArgs).c_str(), low);
+    }
+
+    sinceOrders = ORDERS_MS;
+    return { normalized + ": " + sub + (rest.empty() ? "" : " " + rest) };
+}
+
+std::list<std::string> GuildBotMgr::HandleList()
+{
+    std::list<std::string> out;
+    for (auto& [guid, c] : characters)
+    {
+        Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false);
+        std::ostringstream line;
+        line << c.name << " " << (!player ? "offline" : GetPlayerBot(guid) ? "bot" : "player")
+             << (c.enabled ? "" : " (off)") << " L" << (player ? player->GetLevel() : 0)
+             << " job=" << c.job << (c.jobArgs.empty() ? "" : " " + c.jobArgs)
+             << " #" << c.jobSeq << " " << c.status << (c.reason.empty() ? "" : " (" + c.reason + ")");
+        out.push_back(line.str());
+    }
+    if (out.empty())
+        out.push_back("no guild characters");
+    return out;
+}
+
+std::list<std::string> GuildBotMgr::HandleState(const std::string& args)
+{
+    Character* c = Find(Trim(args));
+    if (!c)
+        return { "not a guild character" };
+
+    Player* bot = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, c->guid), false);
+    if (!bot)
+        return { c->name + " offline, job " + c->job + " " + c->status };
+
+    std::ostringstream out;
+    out << "{\"name\":\"" << c->name << "\",\"controller\":\"" << (GetPlayerBot(c->guid) ? "bot" : "player")
+        << "\",\"level\":" << bot->GetLevel() << ",\"xp\":" << bot->GetUInt32Value(PLAYER_XP)
+        << ",\"xp_next\":" << bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP) << ",\"money\":" << bot->GetMoney()
+        << ",\"map\":" << bot->GetMapId() << ",\"zone\":" << bot->GetZoneId()
+        << ",\"health_pct\":" << uint32(bot->GetHealthPercent()) << ",\"dead\":" << (sServerFacade.UnitIsDead(bot) ? "true" : "false")
+        << ",\"in_combat\":" << (sServerFacade.IsInCombat(bot) ? "true" : "false") << ",\"free_bag_slots\":" << FreeBagSlots(bot)
+        << ",\"job\":\"" << c->job << "\",\"job_seq\":" << c->jobSeq << ",\"job_status\":\"" << c->status
+        << "\",\"job_reason\":\"" << c->reason << "\",\"active_job\":\"" << GetActiveJob(c->guid) << "\"}";
+    return { out.str() };
+}
+
+std::list<std::string> GuildBotMgr::HandleCreate(const std::string& args)
+{
+    std::istringstream in(args);
+    std::string accountName, name, raceName, className, genderName;
+    in >> accountName >> name >> raceName >> className >> genderName;
+    if (className.empty())
+        return { "usage: guildbot create <account> <name> <race> <class> [male|female]" };
+
+    uint32 account = sAccountMgr.GetId(accountName);
+    if (!account)
+        return { "no account " + accountName };
+
+    uint8 race = ChatHelper::parseRace(raceName);
+    uint8 cls = ChatHelper::parseClass(className);
+    if (!race || !cls)
+        return { "unknown race or class" };
+
+    std::string param = "name=" + name + " race=" + raceName + " class=" + className + " login=0";
+    if (!genderName.empty())
+        param += " gender=" + genderName;
+
+    std::list<std::string> messages;
+    ObjectGuid guid;
+    createAccount = account;
+    CreateBot(nullptr, param, messages, guid);
+    createAccount = 0;
+
+    if (guid)
+    {
+        // CreateBot leaves notes for the random bot manager's first login of a new bot (group, gear);
+        // a guild character has neither.
+        for (const char* note : { "create group", "create gear", "create levelup" })
+            sRandomPlayerbotMgr.SetValue(guid.GetCounter(), note, 0);
+    }
+    return messages;
+}
