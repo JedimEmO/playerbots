@@ -3031,6 +3031,12 @@ bool PlayerbotAI::PlayEmote(uint32 emote)
     return false;
 }
 
+bool PlayerbotAI::HealsInCombat()
+{
+    Engine* combatEngine = engines[(uint8)BotState::BOT_STATE_COMBAT];
+    return combatEngine && combatEngine->ContainsStrategy(STRATEGY_TYPE_HEAL);
+}
+
 bool PlayerbotAI::ContainsStrategy(StrategyType type)
 {
     for (uint8 i = 0 ; i < (uint8)BotState::BOT_STATE_ALL; i++)

@@ -513,6 +513,13 @@ They chase as fast as it runs and hit its back, and running drops a fight half w
 Each of its deaths is in the server log, `Playerbot <name> died, level <n>, to <creature> with <n> attackers.`,
 to weigh against its give-ups.
 
+A healer does not start fights; it heals the group that does.
+The bot's combat strategies decide whether it is one (`PlayerbotAI::HealsInCombat`).
+Any strategy of the healer type in any engine did before,
+and a balance druid whose non-combat engine had picked the restoration tab never pulled,
+3% of a level in an hour among ten living troggs.
+A grind spot whose creatures are all dead, where the bot's map has it loaded, is not picked either.
+
 ### Trips across the sea
 
 The travel system ranks a destination on another map by the way to the dock, the crossing and the way from the dock.

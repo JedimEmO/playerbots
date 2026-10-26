@@ -66,14 +66,15 @@ bool AttackRTITargetAction::Execute(Event& event)
     return false;
 }
 
+// wow-playground: the combat engine says whether the bot fights as a healer (PlayerbotAI::HealsInCombat).
 bool AttackMyTargetAction::isUseful()
 {
-    return !ai->ContainsStrategy(STRATEGY_TYPE_HEAL) || ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT);
+    return !ai->HealsInCombat() || ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT);
 }
 
 bool AttackRTITargetAction::isUseful()
 {
-    return !ai->ContainsStrategy(STRATEGY_TYPE_HEAL) || ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT);
+    return !ai->HealsInCombat() || ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT);
 }
 
 bool AttackAction::Attack(Player* requester, Unit* target)

@@ -452,6 +452,9 @@ public:
     void ClearStrategies(BotState type);
     std::list<std::string_view> GetStrategies(BotState type);
     bool ContainsStrategy(StrategyType type);
+    // wow-playground: whether the combat engine fights as a healer. The non-combat engine can carry another talent
+    // tab's strategy: a balance druid with restoration out of combat counted as a healer and never pulled.
+    bool HealsInCombat();
     bool HasStrategy(const std::string& name, BotState type);
     template<class T>
     T* GetStrategy(const std::string& name, BotState type);

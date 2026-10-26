@@ -32,7 +32,8 @@ bool AttackAnythingAction::isUseful()
     if (pinnedByOrder && target->GetDistance(bot) >= ai->GetRange("spell"))
         return false;
 
-    if (ai->ContainsStrategy(STRATEGY_TYPE_HEAL) && !ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT))
+    // wow-playground: the combat engine says whether the bot fights as a healer (PlayerbotAI::HealsInCombat).
+    if (ai->HealsInCombat() && !ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT))
         return false;
 
     if(!target->IsPlayer() && bot->isInFront(target,target->GetAttackDistance(bot)*1.5f, M_PI_F*0.5f) && target->CanAttackOnSight(bot) && target->GetLevel() < bot->GetLevel() + 3.0) //Attack before being attacked.

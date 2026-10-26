@@ -790,7 +790,17 @@ bool GrindSpotTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& i
     // wow-playground: random bots crowd the starter zones, and a spot of three to five spawns feeds one character. A
     // spot with other players in it is not picked; the partitions then offer the next nearest, a little farther.
     if (target->GetDestination() != this)
-        return !CountOtherPlayers(bot);
+    {
+        if (CountOtherPlayers(bot))
+            return false;
+
+        // wow-playground: a spot whose creatures are all dead, as far as the bot's map has them loaded, waits.
+        Map* map = bot->GetMapId() == point.getMapId() ? bot->GetMap() : nullptr;
+        if (map && map->IsLoaded(point.getX(), point.getY()) && !CountAlive(bot))
+            return false;
+
+        return true;
+    }
 
     if (target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
         return true;
