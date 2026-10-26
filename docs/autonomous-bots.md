@@ -614,6 +614,9 @@ After 75 seconds without work, 25 minutes in all,
 or two minutes on end with half its creatures or more dead while another player is there,
 the bot leaves the spot,
 and does not pick it again for 15 minutes.
+On the way there, a bot that gets no 10 yards nearer in three minutes leaves the spot the same way.
+Fights, rest, death, taxis and boats do not count against it, nor does a spot more than 2500 yards off.
+A level 11 gnome mage had stood for 36 minutes at the mouth of Frostmane Hold, moving to a spot inside.
 Full bags or worn gear, with a vendor or repairer known, end the work at once.
 A trainer trip waits until the spot ends, which takes at most 25 minutes.
 The next trip starts a second later: a vendor or repairer when the bags or the gear need one, otherwise another spot.

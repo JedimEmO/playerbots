@@ -809,6 +809,32 @@ bool GrindSpotTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& i
         return true;
     }
 
+    // wow-playground: a spot the bot gets no nearer to is one it has no way to. A level 11 gnome mage stood for 36
+    // minutes at the mouth of Frostmane Hold, moving to a spot inside. Fighting, resting, the dead and the taxis and
+    // boats aside, and only within MAX_DISTANCE, where no dock waits.
+    if (target->GetStatus() == TravelStatus::TRAVEL_STATUS_TRAVEL && bot->GetMapId() == point.getMapId())
+    {
+        float distance = point.distance(WorldPosition(bot));
+        std::string key = std::to_string(id);
+        time_t since = AI_VALUE2(time_t, "manual time", "grind spot approach " + key);
+        int nearest = AI_VALUE2(int, "manual int", "grind spot nearest " + key);
+        bool stale = !since || now - since > 2 * STALLED_SECONDS; // from an earlier trip here
+        bool exempt = distance > MAX_DISTANCE || IsBusy(bot) || !bot->IsAlive() || bot->IsTaxiFlying() || bot->GetTransport();
+
+        if (stale || exempt || distance + STALLED_YARDS < nearest)
+        {
+            SET_AI_VALUE2(time_t, "manual time", "grind spot approach " + key, now);
+            if (stale || distance + STALLED_YARDS < nearest)
+                SET_AI_VALUE2(int, "manual int", "grind spot nearest " + key, int(distance));
+        }
+        else if (now - since >= STALLED_SECONDS)
+        {
+            SET_AI_VALUE2(time_t, "manual time", "grind spot approach " + key, 0);
+            Leave(bot, "no nearer in " + std::to_string(now - since) + "s, " + std::to_string(int(distance)) + " yards away");
+            return false;
+        }
+    }
+
     if (target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
         return true;
 

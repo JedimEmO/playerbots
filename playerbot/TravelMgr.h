@@ -331,6 +331,9 @@ namespace ai
 		static constexpr uint32 IDLE_SECONDS = 75;
 		static constexpr uint32 MAX_SECONDS = 25 * MINUTE;
 		static constexpr uint32 LEFT_SECONDS = 15 * MINUTE;
+		// Travelling there, no STALLED_YARDS nearer in STALLED_SECONDS leaves it (IsActive).
+		static constexpr uint32 STALLED_SECONDS = 3 * MINUTE;
+		static constexpr float STALLED_YARDS = 10.0f;
 		static constexpr float CROWD_MARGIN = 20.0f;
 		static constexpr uint32 CROWDED_SECONDS = 2 * MINUTE;
 
