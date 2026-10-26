@@ -108,6 +108,26 @@ trainableSpellMap* TrainableSpellMapValue::Calculate()
     return spellMap;
 }
 
+// The skill lines a spell belongs to, as SkillLineAbility.dbc lists them, allow the bot's race and class, and the bot's
+// race and class can have each of those skills.
+bool TrainableSpellsValue::CanHaveSkillOf(uint32 spellId) const
+{
+    auto abilities = sSpellMgr.GetSkillLineAbilityMapBoundsBySpellId(spellId);
+    for (auto itr = abilities.first; itr != abilities.second; ++itr)
+    {
+        SkillLineAbilityEntry const* ability = itr->second;
+        if (ability->racemask && !(ability->racemask & bot->getRaceMask()))
+            return false;
+        if (ability->classmask && !(ability->classmask & bot->getClassMask()))
+            return false;
+
+        auto skillInfo = sSpellMgr.GetSkillRaceClassInfoMapBounds(ability->skillId);
+        if (skillInfo.first != skillInfo.second && !bot->GetSkillInfo(ability->skillId))
+            return false;
+    }
+    return true;
+}
+
 std::vector<TrainerSpell const*> TrainableSpellsValue::Calculate()
 {
     std::vector<TrainerSpell const*> trainableSpells;
@@ -128,16 +148,6 @@ std::vector<TrainerSpell const*> TrainableSpellsValue::Calculate()
             if (trainerType == TRAINER_TYPE_MOUNTS && requirement != bot->getRace())
                 continue;
 
-            // wow-playground: a trade trainer's list is keyed by skill, and some skills belong to other races or
-            // classes. Lockpicking's quest NPCs teach it for a copper to anyone, so every level 3 mage had a spell
-            // that had "waited two levels" and walked to Stormwind's weapon master for it.
-            if (trainerType == TRAINER_TYPE_TRADESKILLS && requirement)
-            {
-                auto bounds = sSpellMgr.GetSkillRaceClassInfoMapBounds(requirement);
-                if (bounds.first != bounds.second && !bot->GetSkillInfo(requirement))
-                    continue;
-            }
-
             for (auto& [trainerSpell, trainers] : trainerSpellList)
             {
                 uint32 reqLevel = 0;
@@ -145,6 +155,16 @@ std::vector<TrainerSpell const*> TrainableSpellsValue::Calculate()
                 reqLevel = trainerSpell->isProvidedReqLevel ? trainerSpell->reqLevel : std::max(reqLevel, trainerSpell->reqLevel);
                 TrainerSpellState state = bot->GetTrainerSpellState(trainerSpell, reqLevel);
                 if (state != TRAINER_SPELL_GREEN)
+                    continue;
+
+                // wow-playground: some trade trainer spells teach a skill of another race or class, and the trainer
+                // state does not check that. Lockpicking's quest NPCs teach it for a copper to anyone, so every level 3
+                // mage had a spell that had "waited two levels" and walked to Stormwind's weapon master for it.
+#ifdef MANGOSBOT_TWO
+                if (trainerType == TRAINER_TYPE_TRADESKILLS && !CanHaveSkillOf(trainerSpell->learnedSpell[0]))
+#else
+                if (trainerType == TRAINER_TYPE_TRADESKILLS && !CanHaveSkillOf(trainerSpell->learnedSpell))
+#endif
                     continue;
 
                 //Skip initial profession training.
