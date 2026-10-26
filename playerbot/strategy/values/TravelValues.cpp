@@ -293,6 +293,9 @@ bool NeedTravelPurposeValue::Calculate()
 
         return false;
     case TravelDestinationPurpose::Boss:
+        // Not for a guild character: a boss is an order, not something it seeks out alone.
+        if (sGuildBotMgr.IsGuildBot(bot))
+            return false;
         return AI_VALUE(bool, "can fight boss");
     case TravelDestinationPurpose::Mail:
         return AI_VALUE(bool, "can get mail") && AI_VALUE(bool, "should get mail");
@@ -334,6 +337,10 @@ bool NeedTravelPurposeValue::Calculate()
 bool ShouldTravelNamedValue::Calculate()
 {
     std::string name = getQualifier();
+
+    // A guild character goes to a city or to world pvp when its job takes it there, not on the random bots' schedule.
+    if ((name == "city" || name == "pvp") && sGuildBotMgr.IsGuildBot(bot))
+        return false;
 
     WorldPosition botPos(bot);
 
