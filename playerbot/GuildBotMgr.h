@@ -38,6 +38,10 @@ public:
     std::string GetActiveJob(uint32 guid) const;
     // The role the player gave the character, which its talents follow; none if not a guild character.
     BotRoles GetRole(uint32 guid) const;
+    // The farm job's item and amount (0 for no limit), for the guild order value. False when not farming.
+    bool GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const;
+    // True for the item the character's job is collecting, which it must keep.
+    bool IsJobItem(uint32 guid, uint32 itemId) const;
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;

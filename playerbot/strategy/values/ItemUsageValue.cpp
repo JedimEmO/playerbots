@@ -1,5 +1,6 @@
 
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "ItemUsageValue.h"
 #include "CraftValues.h"
 #include "MountValues.h"
@@ -84,6 +85,10 @@ ItemUsage ItemUsageValue::Calculate()
     const ItemPrototype* proto = sObjectMgr.GetItemPrototype(itemId);
     if (!proto)
         return ItemUsage::ITEM_USAGE_NONE;
+
+    // What a guild character's job collects stays in its bags.
+    if (sGuildBotMgr.IsJobItem(bot->GetGUIDLow(), itemId))
+        return ItemUsage::ITEM_USAGE_KEEP;
 
     //FORCE
     ForceItemUsage forceUsage = AI_VALUE2_EXISTS(ForceItemUsage, "force item usage", proto->ItemId, ForceItemUsage::FORCE_USAGE_NONE);

@@ -75,7 +75,7 @@ namespace
     // The jobs the engine knows. Anything else fails with "unknown job".
     bool IsKnownJob(const std::string& job)
     {
-        return job == "idle" || job == "level" || job == "party";
+        return job == "idle" || job == "level" || job == "party" || job == "farm";
     }
 }
 
@@ -115,6 +115,23 @@ BotRoles GuildBotMgr::GetRole(uint32 guid) const
     return it == characters.end() ? BotRoles::BOT_ROLE_NONE : ChatHelper::parseRole(it->second.role);
 }
 
+bool GuildBotMgr::GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const
+{
+    auto it = characters.find(guid);
+    if (it == characters.end() || GetActiveJob(guid) != "farm")
+        return false;
+
+    itemId = uint32(atoi(ArgValue(it->second, "item").c_str()));
+    amount = uint32(atoi(ArgValue(it->second, "amount").c_str()));
+    return itemId && sObjectMgr.GetItemPrototype(itemId);
+}
+
+bool GuildBotMgr::IsJobItem(uint32 guid, uint32 itemId) const
+{
+    uint32 farmItem, amount;
+    return GetFarmOrder(guid, farmItem, amount) && farmItem == itemId;
+}
+
 std::string GuildBotMgr::ArgValue(const Character& c, const std::string& key) const
 {
     std::istringstream in(c.jobArgs);
@@ -150,6 +167,19 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     }
 
     const std::string job = GetActiveJob(player->GetGUIDLow());
+
+    if (job == "farm")
+    {
+        // Travel to where the item drops or grows, through the guild order travel target, and fight what is there.
+        // It sells, repairs and trains like a levelling character, but does not travel to grind.
+        engine->addStrategies("collision", "grind", "travel", "rpg", "free", "guild level", NULL);
+        engine->removeStrategy("rpg quest");
+        engine->removeStrategy("rpg explore");
+        engine->removeStrategy("rpg player");
+        engine->removeStrategy("rpg bg");
+        engine->removeStrategy("rpg guild");
+        return;
+    }
 
     if (job == "level")
     {
@@ -388,7 +418,14 @@ void GuildBotMgr::ApplyOrders()
         c.reason.clear();
         c.progressAt = 0;
         c.stalled = false;
-        if (IsKnownJob(c.job))
+        uint32 farmItem = uint32(atoi(ArgValue(c, "item").c_str()));
+        if (c.job == "farm" && (!farmItem || !sObjectMgr.GetItemPrototype(farmItem)))
+        {
+            c.status = "failed";
+            c.reason = "farm needs item=<item id> of an item that exists";
+            Event(guid, "job_failed", c.reason);
+        }
+        else if (IsKnownJob(c.job))
         {
             c.status = "working";
             Event(guid, "job", c.job + (c.jobArgs.empty() ? "" : " " + c.jobArgs));
@@ -452,6 +489,33 @@ void GuildBotMgr::CheckJobs()
                 c.reason = why;
                 if (why.empty())
                     Event(guid, "party", "joined " + c.partyLeader);
+            }
+            continue;
+        }
+
+        if (c.job == "farm")
+        {
+            uint32 itemId, amount;
+            if (GetFarmOrder(guid, itemId, amount) && bot->GetPlayerbotAI())
+            {
+                uint32 have = bot->GetPlayerbotAI()->GetInventoryItemsCountWithId(itemId);
+                std::string what = std::to_string(have) + " of " + sObjectMgr.GetItemPrototype(itemId)->Name1;
+                if (amount && have >= amount)
+                {
+                    c.status = "done";
+                    c.reason = "has " + what;
+                    Event(guid, "job_done", "farm " + c.reason);
+                    bot->GetPlayerbotAI()->ResetStrategies(false);
+                }
+                else if (!FreeBagSlots(bot))
+                {
+                    c.status = "failed";
+                    c.reason = "bags full, with " + what;
+                    Event(guid, "job_failed", "farm " + c.reason);
+                    bot->GetPlayerbotAI()->ResetStrategies(false);
+                }
+                else
+                    c.reason = "has " + what;
             }
             continue;
         }
@@ -734,7 +798,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
     return {
         "guildbot add <name> [job [args]]       make a character a guild character",
         "guildbot create <account> <name> <race> <class> [male|female]   create a level 1 character on an account",
-        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>",
+        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>, farm item=<id> [amount=<n>]",
         "guildbot role <name> tank|healer|dps|none   the role its talents follow",
         "guildbot on|off <name>                 switch the engine's play on or off",
         "guildbot remove <name>                 stop treating it as a guild character",

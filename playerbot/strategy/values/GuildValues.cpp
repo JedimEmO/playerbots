@@ -1,5 +1,6 @@
 
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "GuildValues.h"
 #include "playerbot/strategy/values/BudgetValues.h"
 #include "playerbot/strategy/values/ItemUsageValue.h"
@@ -318,6 +319,19 @@ static bool HasSkipOrderNote(Player* bot)
 GuildOrder GuildOrderValue::Calculate()
 {
     GuildOrder order;
+
+    // A guild character's orders are its jobs, not its officer note.
+    if (sGuildBotMgr.IsGuildCharacter(bot->GetGUIDLow()))
+    {
+        uint32 itemId, amount;
+        if (sGuildBotMgr.IsGuildBot(bot) && sGuildBotMgr.GetFarmOrder(bot->GetGUIDLow(), itemId, amount))
+        {
+            order.type = GuildOrderType::Farm;
+            order.target = sObjectMgr.GetItemPrototype(itemId)->Name1;
+            order.amount = amount;
+        }
+        return order;
+    }
 
     if (!bot->GetGuildId())
         return order;
