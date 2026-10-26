@@ -530,7 +530,16 @@ bool ShouldTravelNamedValue::Calculate()
             if (!sRandomPlayerbotMgr.IsAutonomousBot(bot))
                 return money >= cheapest;
 
-            return money >= total || (waitedCheapest && money >= waitedCheapest);
+            if (money >= total)
+                return true;
+
+            // wow-playground: one trip a level for less than everything. A mage twenty spells behind could always pay for
+            // one that had waited two levels, so it walked from its grind spot to Ironforge and back for one spell at a
+            // time, twice in an hour at the same level. The trainer teaches what the money covers on that one trip.
+            if (AI_VALUE2(int, "manual int", "trained at level " + std::to_string((uint32)trainerType)) == (int)bot->GetLevel())
+                return false;
+
+            return waitedCheapest && money >= waitedCheapest;
         }
 
         if (!AI_VALUE2(bool, "has all money for", (uint32)budgetType))

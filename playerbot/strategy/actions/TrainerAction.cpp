@@ -245,6 +245,11 @@ bool TrainerAction::Execute(Event& event)
     {
         if(Iterate(requester, creature, &TrainerAction::Learn, spells))
             context->ClearValues("item usage"); //Bot might be able to use new items.
+
+        // wow-playground: the level of the last visit to this kind of trainer, which limits an autonomous bot's trainer
+        // trips to one a level (ShouldTravelNamedValue).
+        SET_AI_VALUE2(int, "manual int", "trained at level " + std::to_string((uint32)creature->GetCreatureInfo()->TrainerType),
+            (int)bot->GetLevel());
     }
     else
         Iterate(requester, creature, NULL, spells);

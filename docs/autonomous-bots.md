@@ -405,6 +405,10 @@ or for one that has waited two levels,
 and the trainer teaches what the money covers, a spell at a time.
 Going for any single spell it could just afford sent a druid from Westfall to Stormwind and back
 three times in an hour.
+For less than every spell it goes once a level: a visit to a trainer records the level for that kind of trainer,
+and no trip to the same kind follows at that level unless the money covers everything.
+A mage twenty spells behind could always pay for one that had waited two levels,
+and walked from its grind spot to Ironforge and back twice in an hour at the same level.
 A random bot still goes as soon as it can pay for one.
 Upstream waited until the bot could pay for every missing spell at once,
 plus its repairs and ammunition.
