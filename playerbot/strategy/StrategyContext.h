@@ -39,6 +39,7 @@
 #include "generic/BattlegroundStrategy.h"
 #include "generic/LfgStrategy.h"
 #include "generic/MaintenanceStrategy.h"
+#include "generic/GuildLevelStrategy.h"
 #include "generic/GroupStrategy.h"
 #include "generic/GuildStrategy.h"
 #include "generic/FocusTargetStrategy.h"
@@ -149,6 +150,7 @@ namespace ai
             creators["rtsc"] = [](PlayerbotAI* ai) { return new RTSCStrategy(ai); };
             creators["rtsc jump"] = [](PlayerbotAI* ai) { return new RTSCSJumptrategy(ai); };
             creators["maintenance"] = [](PlayerbotAI* ai) { return new MaintenanceStrategy(ai); };
+            creators["guild level"] = [](PlayerbotAI* ai) { return new GuildLevelStrategy(ai); };
             creators["group"] = [](PlayerbotAI* ai) { return new GroupStrategy(ai); };
             creators["guild"] = [](PlayerbotAI* ai) { return new GuildStrategy(ai); };
             creators["grind"] = [](PlayerbotAI* ai) { return new GrindingStrategy(ai); };

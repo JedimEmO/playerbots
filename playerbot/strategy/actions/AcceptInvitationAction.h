@@ -1,6 +1,7 @@
 #pragma once
 
 #include "playerbot/strategy/Action.h"
+#include "playerbot/GuildBotMgr.h"
 
 namespace ai
 {
@@ -19,7 +20,11 @@ namespace ai
             if (!inviter)
                 return false;
 
-			if (!ai->GetSecurity()->CheckLevelFor(PlayerbotSecurityLevel::PLAYERBOT_SECURITY_INVITE, false, inviter))
+            // A guild character joins only its owner's groups: characters on its own account.
+            bool strangerToGuildBot = sGuildBotMgr.IsGuildBot(bot) &&
+                inviter->GetSession()->GetAccountId() != bot->GetSession()->GetAccountId();
+
+			if (strangerToGuildBot || !ai->GetSecurity()->CheckLevelFor(PlayerbotSecurityLevel::PLAYERBOT_SECURITY_INVITE, false, inviter))
             {
                 WorldPacket data(SMSG_GROUP_DECLINE, 10);
                 data << bot->GetName();
@@ -39,7 +44,7 @@ namespace ai
             if (!bot->GetGroup() || !bot->GetGroup()->IsMember(inviter->GetObjectGuid()))
                 return false;
 
-            if (sRandomPlayerbotMgr.IsFreeBot(bot))
+            if (sRandomPlayerbotMgr.IsFreeBot(bot) || sGuildBotMgr.IsGuildBot(bot))
             {
                 ai->SetMaster(inviter);
 

@@ -121,13 +121,22 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     engine->removeStrategy("follow jump");
     engine->addStrategy("roll");
 
+    // In a group, following someone: the party comes first, and the job waits until the group is over.
+    PlayerbotAI* ai = player->GetPlayerbotAI();
+    Player* master = ai ? ai->GetMaster() : nullptr;
+    if (player->GetGroup() && master && master != player)
+    {
+        engine->addStrategies("follow", "group", NULL);
+        return;
+    }
+
     const std::string job = GetActiveJob(player->GetGUIDLow());
 
     if (job == "level")
     {
         // Grind creatures of the character's level, travelling between grind spots,
         // and sell, repair, train and bank at the places travel picks.
-        engine->addStrategies("collision", "grind", "travel", "rpg", "free", NULL);
+        engine->addStrategies("collision", "grind", "travel", "rpg", "free", "guild level", NULL);
         // rpg adds all its parts; a levelling character only uses the town services.
         engine->removeStrategy("rpg quest");
         engine->removeStrategy("rpg explore");
@@ -455,6 +464,17 @@ void GuildBotMgr::OnPlayerTakeover(Player* player)
 
 void GuildBotMgr::OnPlayerLogout(Player* player)
 {
+    // Characters following the one who left go back to their jobs.
+    ForEachPlayerbot([&](Player* bot)
+    {
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (bot != player && ai && ai->GetMaster() == player)
+        {
+            ai->SetMaster(nullptr);
+            ai->ResetStrategies(false);
+        }
+    });
+
     auto it = characters.find(player->GetGUIDLow());
     if (it == characters.end() || GetPlayerBot(player->GetGUIDLow()))
         return;
