@@ -24,7 +24,9 @@ float MapWpSquare::sqOutDistance(const WorldPosition& point) const
         //distance = point -> portal (on map of square)
         for (auto& [portal, distance] : sTravelMgr.sqMapTransDistances(point, mapId))
         {
-            float sqDist = distance + sqDistance(portal); //Add sqDistance = portal -> square.
+            // wow-playground: the square of the whole way, see MapTransfer::sqDist.
+            float dist = sqrt(distance) + sqrt(sqDistance(portal)); //Add distance = portal -> square.
+            float sqDist = dist * dist;
             if (sqDist < minSqDist)
                 minSqDist = sqDist;
         }

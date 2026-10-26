@@ -3146,19 +3146,25 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
     DestinationList retDests;
 
     // wow-playground: a levelling character grinds at grind spots, the nearest first by the partitions, within
-    // GrindSpotTravelDestination::MAX_DISTANCE. A character that outgrew the zone finds none there; then any spot it
-    // can reach counts, on the continent first, since the partitions rank by the travel system's distance, which
-    // adds the crossing to another map. GrindSpotTravelDestination::IsActive keeps those it has no route to out. The
+    // GrindSpotTravelDestination::MAX_DISTANCE. A character that outgrew the zone finds none there; then any spot on
+    // its map counts, and only then the other maps. GrindSpotTravelDestination::IsActive keeps those it has no route to out. The
     // single entry destinations are left out, unless no spot is possible anywhere.
     bool useGrindSpots = purposeFlag != (uint32)TravelDestinationPurpose::None && (purposeFlag & (uint32)TravelDestinationPurpose::Grind) &&
         entries.empty() && info.GetBoolValue2("has strategy", "levelling");
 
     if (useGrindSpots)
     {
-        for (float spotDistance : { std::min(maxDistance > 0 ? maxDistance : FLT_MAX, GrindSpotTravelDestination::MAX_DISTANCE), FLT_MAX })
+        // Near, then anywhere on this map, then other maps: the partitions skip to a farther range now and then, which
+        // must not take the bot across the sea while its own continent has a spot.
+        const std::vector<std::pair<float, bool>> passes = { { std::min(maxDistance > 0 ? maxDistance : FLT_MAX, GrindSpotTravelDestination::MAX_DISTANCE), true },
+            { FLT_MAX, true }, { FLT_MAX, false } };
+        for (auto& [spotDistance, sameMap] : passes)
         {
             for (auto& spot : grindSpots)
             {
+                if (sameMap && spot->GetPoint().getMapId() != center.getMapId())
+                    continue;
+
                 if (onlyPossible && !spot->IsPossible(info))
                     continue;
 
@@ -3287,9 +3293,17 @@ PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, cons
         // area level, an average of the zone, kept a character that outgrew its zone out of the next one.
         bool isGrindSpot = dynamic_cast<GrindSpotTravelDestination*>(dest);
 
+        // wow-playground: a player's character sells, repairs, trains and gets mail where it is, even in a zone above
+        // its level: a level 22 mage in Dustwallow Marsh found Theramore's vendors too high and sailed to Loch Modan.
+        TravelDestinationPurpose destPurpose = dest->GetPurpose();
+        bool isBusiness = info.IsAutonomous() && (destPurpose == TravelDestinationPurpose::Vendor || destPurpose == TravelDestinationPurpose::Repair ||
+            destPurpose == TravelDestinationPurpose::Mail || destPurpose == TravelDestinationPurpose::Bank || destPurpose == TravelDestinationPurpose::Trainer);
+
         for (auto& position : points)
         {
-            if (!isGrindSpot && !IsLocationLevelValid(*position, info))
+            bool nearBusiness = isBusiness && position->getMapId() == center.getMapId() && position->sqDistance2d(center) < 1000.0f * 1000.0f;
+
+            if (!isGrindSpot && !nearBusiness && !IsLocationLevelValid(*position, info))
                 continue;
 
             float distance = position->distance(center);
@@ -3404,7 +3418,13 @@ void TravelMgr::LoadMapTransfers()
     {
         for (auto& [endNode, path] : *startNode->getLinks())
         {
-            AddMapTransfer(*startNode->getPosition(), *endNode->getPosition(), path->getDistance());
+            // wow-playground: a boat or zeppelin path has a length of 0.1 yards and its ride time as extra cost, so a
+            // crossing cost nothing and the other continent was next door. The ride now costs its time at running
+            // speed, and a transport adds the average wait at the dock, a boat every five minutes or so.
+            float cost = path->getDistance();
+            if (path->getPathType() == TravelNodePathType::transport)
+                cost += path->getExtraCost() * 7.0f + 1000.0f;
+            AddMapTransfer(*startNode->getPosition(), *endNode->getPosition(), cost);
         }
     }
 }
@@ -3446,7 +3466,9 @@ float TravelMgr::MapTransDistance(const WorldPosition& start, const WorldPositio
 
     for (auto& [portal, sqDistanceFromStartToPortal] : portals)
     {
-        float sqDist = sqDistanceFromStartToPortal + portal.sqDistance2d(end);
+        // wow-playground: the square of the whole way, see MapTransfer::sqDist.
+        float dist = sqrt(sqDistanceFromStartToPortal) + sqrt(portal.sqDistance2d(end));
+        float sqDist = dist * dist;
         if (sqDist < minsqDist)
             minsqDist = sqDist;
     }

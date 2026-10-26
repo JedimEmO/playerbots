@@ -486,6 +486,19 @@ the third to every free bot without a real player master.
   The server log says `Playerbot <name> gives up on <creature> (<guid>) at <distance> yards: <reason>.`,
   and `debug why` counts the creatures given up on, `gave-up=N` on the combat line.
 
+### Trips across the sea
+
+The travel system ranks a destination on another map by the way to the dock, the crossing and the way from the dock.
+It added the legs' squares instead of the legs, and a boat or zeppelin cost 0.1 yards,
+so the other continent was next door: a mage in the Wetlands went to Darnassus to train instead of Ironforge,
+and later sailed from Desolace to Loch Modan to sell.
+The legs now add up, and a crossing costs its ride time at running speed and a thousand yards for the wait at the dock.
+That holds for every bot.
+
+A player's character also sells, repairs, trains, uses the bank and gets mail within 1000 yards of where it is,
+even in a zone whose area level is above its own.
+The area level check had kept a level 22 mage in Dustwallow Marsh from Theramore's vendors.
+
 ### Grind spots
 
 A grind trip without `levelling` goes to one creature entry, a few spawns here and a few there across a zone.
@@ -526,8 +539,8 @@ The zone's area level does not count for a spot; the creatures' own levels decid
 The bot looks within 2500 yards first.
 A character outgrows its starting zone; Teldrassil tops out near level 11,
 and a level 15 warrior found nothing there that fit.
-So when no spot within 2500 yards fits, any spot counts, the nearest first by the travel system's distance,
-which is the straight line on the same map and adds the crossing to another one.
+So when no spot within 2500 yards fits, any spot on the same map counts, the nearest first,
+and only when none does, a spot on another map.
 A spot that far needs a route in the travel nodes, from the node nearest the bot to the node nearest the spot,
 and the nodes link walks, flights, boats, zeppelins and portals.
 Teldrassil to Darkshore goes by the Darnassus portal and the Rut'theran flight master,

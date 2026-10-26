@@ -20,7 +20,9 @@ namespace ai
 
 		float FDist(const WorldPosition& start, const WorldPosition& end) const { return start.fDist(pointFrom) + portalLength + pointTo.fDist(end); }
 
-		float sqDist(const WorldPosition& start, const WorldPosition& end) const { return start.sqDistance2d(pointFrom) + (portalLength * portalLength) + pointTo.sqDistance2d(end); }
+		// wow-playground: the square of the whole way, not the sum of the legs' squares, which made a trip with a boat
+		// in it look far shorter than one on foot: two legs of 3000 yards came to 4243.
+		float sqDist(const WorldPosition& start, const WorldPosition& end) const { float dist = sqrt(start.sqDistance2d(pointFrom)) + portalLength + sqrt(pointTo.sqDistance2d(end)); return dist * dist; }
 
 		WorldPosition GetPointFrom() const { return pointFrom; }
 		WorldPosition GetPointTo() const { return pointTo; }
