@@ -3427,9 +3427,18 @@ PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, cons
         bool isBusiness = info.IsAutonomous() && (destPurpose == TravelDestinationPurpose::Vendor || destPurpose == TravelDestinationPurpose::Repair ||
             destPurpose == TravelDestinationPurpose::Mail || destPurpose == TravelDestinationPurpose::Bank || destPurpose == TravelDestinationPurpose::Trainer);
 
+        // wow-playground: a player's character gathers on the way, not on a journey: a level 11 gnome mage with 7
+        // herbalism set off from Dun Morogh for the Gloom Weed of Tirisfal Glades, a 36 minute walk. A farm order
+        // goes as far as its resource.
+        bool nearOnly = info.IsAutonomous() && !info.GetBoolValue("has farm order") && (destPurpose == TravelDestinationPurpose::GatherHerbalism ||
+            destPurpose == TravelDestinationPurpose::GatherMining || destPurpose == TravelDestinationPurpose::GatherSkinning || destPurpose == TravelDestinationPurpose::GatherFishing);
+
         for (auto& position : points)
         {
             bool nearBusiness = isBusiness && position->getMapId() == center.getMapId() && position->sqDistance2d(center) < 1000.0f * 1000.0f;
+
+            if (nearOnly && (position->getMapId() != center.getMapId() || position->sqDistance2d(center) > 1000.0f * 1000.0f))
+                continue;
 
             if (!isGrindSpot && !nearBusiness && !IsLocationLevelValid(*position, info))
                 continue;

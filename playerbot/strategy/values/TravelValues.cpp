@@ -513,24 +513,50 @@ bool ShouldTravelNamedValue::Calculate()
         // Westfall to Stormwind and back three times in an hour, each time for the next spell it could just afford.
         if (budgetType == NeedMoneyFor::spells || budgetType == NeedMoneyFor::skilltraining)
         {
-            uint32 cheapest = 0, total = 0, waitedCheapest = 0;
-            for (auto& spell : AI_VALUE2(std::vector<TrainerSpell const*>, "trainable spells", (uint32)trainerType))
+            std::vector<TrainerSpell const*> spells = AI_VALUE2(std::vector<TrainerSpell const*>, "trainable spells", (uint32)trainerType);
+
+            uint32 money = AI_VALUE2(uint32, "free money for", (uint32)budgetType);
+            if (!sRandomPlayerbotMgr.IsAutonomousBot(bot))
+            {
+                uint32 cheapest = 0;
+                for (auto& spell : spells)
+                    if (spell && (!cheapest || spell->spellCost < cheapest))
+                        cheapest = spell->spellCost;
+                return money >= cheapest;
+            }
+
+            // wow-playground: a trip to a far trainer, beyond the grind spots' MAX_DISTANCE, waits for a spell four
+            // levels old, not two. A level 24 night elf warrior in Ashenvale walked half an hour to Teldrassil and half
+            // an hour back every second level, about a level's worth of time each trip.
+            uint32 wait = 2;
+            {
+                std::vector<int32> entries = AI_VALUE2(std::vector<int32>, "available trainers", (uint32)trainerType);
+                WorldPosition here(bot);
+                float nearest = FLT_MAX;
+                if (!entries.empty())
+                    for (auto& dest : sTravelMgr.GetDestinations(PlayerTravelInfo(bot), (uint32)TravelDestinationPurpose::Trainer, entries, false, 0))
+                        nearest = std::min(nearest, dest->DistanceTo(here));
+                if (nearest > GrindSpotTravelDestination::MAX_DISTANCE)
+                    wait = 4;
+            }
+
+            uint32 total = 0, waitedCheapest = 0;
+            bool waited = false;
+            for (auto& spell : spells)
             {
                 if (!spell)
                     continue;
 
                 total += spell->spellCost;
-                if (!cheapest || spell->spellCost < cheapest)
-                    cheapest = spell->spellCost;
-                if (spell->reqLevel + 2 <= bot->GetLevel() && (!waitedCheapest || spell->spellCost < waitedCheapest))
-                    waitedCheapest = spell->spellCost;
+                if (spell->reqLevel + wait <= bot->GetLevel())
+                {
+                    waited = true;
+                    if (!waitedCheapest || spell->spellCost < waitedCheapest)
+                        waitedCheapest = spell->spellCost;
+                }
             }
 
-            uint32 money = AI_VALUE2(uint32, "free money for", (uint32)budgetType);
-            if (!sRandomPlayerbotMgr.IsAutonomousBot(bot))
-                return money >= cheapest;
-
-            if (money >= total)
+            if (money >= total && (wait == 2 || waited))
                 return true;
 
             // wow-playground: one trip a level for less than everything. A mage twenty spells behind could always pay for

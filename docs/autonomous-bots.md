@@ -409,6 +409,10 @@ For less than every spell it goes once a level: a visit to a trainer records the
 and no trip to the same kind follows at that level unless the money covers everything.
 A mage twenty spells behind could always pay for one that had waited two levels,
 and walked from its grind spot to Ironforge and back twice in an hour at the same level.
+When no trainer of that kind stands within 2500 yards, the trip waits for a spell four levels old instead,
+and the money covering everything is no longer enough on its own.
+A level 24 night elf warrior in Ashenvale walked half an hour to Teldrassil and half an hour back every second level,
+about a level's worth of time each trip.
 A random bot still goes as soon as it can pay for one.
 Upstream waited until the bot could pay for every missing spell at once,
 plus its repairs and ammunition.
@@ -457,6 +461,8 @@ Grind spots are open at any time of the hour;
 without it a bot grinds only in the first 45 minutes of its hour, and wanders to random NPCs in the last 45.
 Auction house, boss, explore, generic rpg, city, world pvp and gathering trips are off;
 a vendor nearby buys the loot.
+Without `levelling` too, a player's character gathers within 1000 yards on its map, unless it has a farm order.
+A level 11 mage whose strategies had just been reset set off from Dun Morogh for the Gloom Weed of Tirisfal Glades.
 And near a grind spot the bot picks an npc to walk to only for business, a weight of 25 and up
 in `ChooseRpgTargetAction`: healing, buying, selling, repairing, training, mail, the bank.
 Chat, emotes, gossip and duels, 1 to 10, kept a druid walking around Kharanos instead of fighting.
