@@ -240,14 +240,21 @@ std::string FarmOrders::SkillName(SkillType skill)
 
 namespace
 {
-    // The spawn points each bot saw, by bot guid, with when. Bots on different maps ask from their own threads.
+    // The spawn points each bot saw, by bot guid, with when, and the point it walks to. Bots on different maps ask
+    // from their own threads.
+    struct Roaming
+    {
+        std::unordered_map<const WorldPosition*, time_t> seen;
+        const WorldPosition* current = nullptr;
+        time_t since = 0;
+    };
     std::mutex visitedMutex;
-    std::unordered_map<uint32, std::unordered_map<const WorldPosition*, time_t>> visitedPoints;
+    std::unordered_map<uint32, Roaming> roaming;
 
-    // With visitedMutex held: the bot's points, those older than VISIT_SECONDS dropped.
+    // With visitedMutex held: the bot's seen points, those older than VISIT_SECONDS dropped.
     std::unordered_map<const WorldPosition*, time_t>& VisitedOf(uint32 guid, time_t now)
     {
-        auto& points = visitedPoints[guid];
+        auto& points = roaming[guid].seen;
         for (auto it = points.begin(); it != points.end();)
             it = it->second + FarmOrders::VISIT_SECONDS < now ? points.erase(it) : std::next(it);
         return points;
@@ -313,6 +320,10 @@ const WorldPosition* FarmOrders::RoamPoint(Player* bot, const TravelDestination*
 
     std::lock_guard<std::mutex> guard(visitedMutex);
     auto& visited = VisitedOf(bot->GetGUIDLow(), now);
+    Roaming& state = roaming[bot->GetGUIDLow()];
+
+    if (state.current && now - state.since >= ROAM_SECONDS)
+        visited[state.current] = now;
 
     const WorldPosition* nearest = nullptr;
     float nearestDistance = ROAM_DISTANCE;
@@ -335,18 +346,20 @@ const WorldPosition* FarmOrders::RoamPoint(Player* bot, const TravelDestination*
         }
     }
 
-    return nearest;
-}
+    // Still on the way to the point it chose, and it is in range and not seen: keep going there.
+    if (state.current && visited.find(state.current) == visited.end() && state.current->getMapId() == botPos.getMapId() &&
+        state.current->distance(botPos) < ROAM_DISTANCE)
+        return state.current;
 
-void FarmOrders::Trace(Player* bot, const std::string& text)
-{
-    sLog.outString("FarmOrder: %s %s", bot->GetName(), text.c_str());
+    state.current = nearest;
+    state.since = now;
+    return nearest;
 }
 
 void FarmOrders::MarkVisited(Player* bot, const WorldPosition* point)
 {
     std::lock_guard<std::mutex> guard(visitedMutex);
-    visitedPoints[bot->GetGUIDLow()][point] = time(nullptr);
+    roaming[bot->GetGUIDLow()].seen[point] = time(nullptr);
 }
 
 std::set<const WorldPosition*> FarmOrders::Visited(Player* bot)

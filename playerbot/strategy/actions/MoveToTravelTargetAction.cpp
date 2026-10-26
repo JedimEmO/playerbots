@@ -24,31 +24,28 @@ bool MoveToTravelTargetAction::Execute(Event& event)
 
     target->CheckStatus();
 
-    // wow-playground: working a grind spot with nothing to fight, walk to one of its spawns, a living creature's if
-    // the bot knows of one, so it finds the next pull. Like mod-playerbots' MoveRandomNear, a few points are tried
-    // until one has a path.
-    // wow-playground: see FarmOrders. Working a farm order's gather trip with no node to gather, walk to the nearest
-    // spawn point not seen lately; most are empty, since nodes are pooled. With none left in range the trip ends, and
-    // the next farm order trip goes to the nearest point not seen. Forced trips never end on their own.
-    // A node of the item in sight comes first, working the trip or on the way: walk up to it, and the loot actions
-    // gather it; they take loot within AiPlayerbot.LootDistance only, and the loot scan skips one more than 5 yards
-    // above or below. Too long on the way, as for a node behind a wall, and the loot stack gives up on it.
+    // wow-playground: see FarmOrders. A node of the item in sight comes first, working the trip or on the way: walk
+    // up to it, and the loot actions gather it; they take loot within AiPlayerbot.LootDistance only, and the loot scan
+    // skips one more than 5 yards above or below. Too long on the way, as for a node behind a wall, and the loot stack
+    // gives up on it.
     if (FarmOrders::WorkedGather(ai, true))
     {
         if (GameObject* node = FarmOrders::NodeInSight(bot))
         {
             LootObjectStack* stack = AI_VALUE(LootObjectStack*, "available loot");
-            float distance = bot->GetDistance(node);
-            bool approach = distance > INTERACTION_DISTANCE && stack->NoteApproach(node->GetObjectGuid());
-            bool moved = approach && MoveTo(node->GetMapId(), node->GetPositionX(), node->GetPositionY(), node->GetPositionZ(), false, false);
-            FarmOrders::Trace(bot, std::string("sees ") + node->GetName() + " " + std::to_string(node->GetGUIDLow()) + " at " +
-                std::to_string(uint32(distance)) + "y z" + std::to_string(int32(node->GetPositionZ() - bot->GetPositionZ())) +
-                (moved ? ", walking to it" : approach ? ", no path" : distance > INTERACTION_DISTANCE ? ", given up" : ", at it"));
-            if (moved)
+            if (bot->GetDistance(node) > INTERACTION_DISTANCE && stack->NoteApproach(node->GetObjectGuid()) &&
+                MoveTo(node->GetMapId(), node->GetPositionX(), node->GetPositionY(), node->GetPositionZ(), false, false))
+            {
+                if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
+                    ai->TellPlayerNoFacing(GetMaster(), "Walking " + std::to_string(uint32(bot->GetDistance(node))) + "y to " + chat->formatWorldobject(node));
                 return true;
+            }
         }
     }
 
+    // wow-playground: see FarmOrders. Working a farm order's gather trip with no node to gather, walk to the nearest
+    // spawn point not seen lately; most are empty, since nodes are pooled. With none left in range the trip ends, and
+    // the next farm order trip goes to the nearest point not seen. Forced trips never end on their own.
     if (GatherTravelDestination* gather = FarmOrders::WorkedGather(ai))
     {
         for (uint32 attempt = 0; attempt < 5; attempt++)
@@ -58,27 +55,30 @@ bool MoveToTravelTargetAction::Execute(Event& event)
             {
                 ai->TellDebug(ai->GetMaster(), "Every spawn point of " + gather->GetTitle() + " within " +
                     std::to_string(uint32(FarmOrders::ROAM_DISTANCE)) + "y seen, leaving it.", "debug travel");
-                FarmOrders::Trace(bot, "has seen every spawn point in range, ending the trip");
                 target->SetForced(false);
                 target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
                 context->ClearValues("no active travel destinations");
                 return false;
             }
 
-            // Seen once walked to, or skipped for a while when there is no path.
-            FarmOrders::MarkVisited(bot, roamPoint);
-            if (MoveTo(roamPoint->getMapId(), roamPoint->getX(), roamPoint->getY(), roamPoint->getZ(), false, false))
+            // Seen once the bot gets near it; skipped for a while when there is no path.
+            if (!MoveTo(roamPoint->getMapId(), roamPoint->getX(), roamPoint->getY(), roamPoint->getZ(), false, false))
             {
-                FarmOrders::Trace(bot, "roams " + std::to_string(uint32(roamPoint->distance(bot))) + "y to a spawn point");
-                if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
-                    ai->TellPlayerNoFacing(GetMaster(), "Roaming " + std::to_string(uint32(roamPoint->distance(bot))) + "y to a spawn point of " + gather->GetTitle());
-                return true;
+                FarmOrders::MarkVisited(bot, roamPoint);
+                continue;
             }
+
+            if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
+                ai->TellPlayerNoFacing(GetMaster(), "Roaming " + std::to_string(uint32(roamPoint->distance(bot))) + "y to a spawn point of " + gather->GetTitle());
+            return true;
         }
 
         return false;
     }
 
+    // wow-playground: working a grind spot with nothing to fight, walk to one of its spawns, a living creature's if
+    // the bot knows of one, so it finds the next pull. Like mod-playerbots' MoveRandomNear, a few points are tried
+    // until one has a path.
     if (target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK)
     {
         GrindSpotTravelDestination* spot = dynamic_cast<GrindSpotTravelDestination*>(target->GetDestination());

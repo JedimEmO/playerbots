@@ -158,10 +158,16 @@ A trip the order forces never ends on its own, so a bot that found its point emp
 Instead, once it arrives and has nothing to gather, it walks to the nearest spawn point of the same node within 400 yards,
 skipping points it saw in the last five minutes; a point within 30 yards counts as seen,
 and so does one with no path to it.
+It keeps walking to the point it chose until it gets there, or for 90 seconds,
+since a long walk runs in pieces.
 A node of the item in sight, working the trip or on the way to it, comes first: the bot walks up to it and gathers it.
 It has to, since the loot actions take loot within `AiPlayerbot.LootDistance`, 25 yards, only,
 and the loot scan skips a node more than 5 yards above or below the bot;
 one it cannot reach in time is given up on, as for any loot.
+Any bot also gives up on a loot object for ten minutes when it is about to open it a fourth time within two minutes,
+since the object still being there means its loot was never taken,
+and the server log says so in a line starting `Loot:` with what the bot did with its last loot window.
+A priest cast Herb Gathering on one Peacebloom node every five seconds for ten minutes before this rule.
 While a bag slot is free, it also loots the item into a new stack,
 where other bots with bags more than 80% full only top up stacks they have.
 With no point left in range the trip ends,

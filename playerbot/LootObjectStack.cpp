@@ -12,6 +12,8 @@ using namespace ai;
 #define LOOT_APPROACH_SECS 60
 #define LOOT_APPROACH_GAP_SECS 10
 #define LOOT_GIVE_UP_SECS 600
+#define LOOT_MAX_OPENS 3
+#define LOOT_OPEN_WINDOW_SECS 120
 
 LootTarget::LootTarget(ObjectGuid guid) : guid(guid), asOfTime(time(0))
 {
@@ -392,6 +394,26 @@ bool LootObjectStack::NoteApproach(ObjectGuid guid)
 
     givenUpUntil[guid] = now + LOOT_GIVE_UP_SECS;
     approachGuid = ObjectGuid();
+    Remove(guid);
+    return false;
+}
+
+bool LootObjectStack::NoteOpen(ObjectGuid guid)
+{
+    time_t now = time(0);
+
+    if (guid != openGuid || now - openSince > LOOT_OPEN_WINDOW_SECS)
+    {
+        openGuid = guid;
+        openSince = now;
+        openCount = 0;
+    }
+
+    if (++openCount <= LOOT_MAX_OPENS)
+        return true;
+
+    givenUpUntil[guid] = now + LOOT_GIVE_UP_SECS;
+    openGuid = ObjectGuid();
     Remove(guid);
     return false;
 }

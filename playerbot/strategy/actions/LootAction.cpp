@@ -1,6 +1,5 @@
 
 #include "playerbot/playerbot.h"
-#include "playerbot/strategy/values/FarmOrderValues.h"
 #include "LootAction.h"
 
 #include "playerbot/LootObjectStack.h"
@@ -54,11 +53,20 @@ enum ProfessionSpells
 bool OpenLootAction::Execute(Event& event)
 {
     LootObject lootObject = AI_VALUE(LootObject, "loot target");
+
+    // wow-playground: never open the same object for good; see LootObjectStack::NoteOpen. Said in the server log, with
+    // what the bot last did with a loot window, since it is a bug when it happens.
+    if (!lootObject.IsEmpty() && !AI_VALUE(LootObjectStack*, "available loot")->NoteOpen(lootObject.guid))
+    {
+        WorldObject* wo = ai->GetWorldObject(lootObject.guid);
+        sLog.outString("Loot: %s gives up on %s %u after opening it again and again; last loot window: %s", bot->GetName(),
+            wo ? wo->GetName() : "an object", lootObject.guid.GetCounter(),
+            AI_VALUE2(std::string, "manual string", "last store loot").c_str());
+        context->GetValue<LootObject>("loot target")->Set(LootObject());
+        return false;
+    }
+
     bool result = DoLoot(lootObject);
-    // wow-playground: see FarmOrders::Trace.
-    RandomPlayerbotMgr::FarmOrder order;
-    if (lootObject.guid.IsGameObject() && sRandomPlayerbotMgr.GetFarmOrder(bot, order) && FarmOrders::IsSource(order.item, -int32(lootObject.guid.GetEntry())))
-        FarmOrders::Trace(bot, "opens node " + std::to_string(lootObject.guid.GetCounter()) + (result ? ": cast" : ": failed"));
     if (result)
     {
         AI_VALUE(LootObjectStack*, "available loot")->Remove(lootObject.guid);
@@ -277,10 +285,25 @@ bool StoreLootAction::Execute(Event& event)
 
     bot->SetLootGuid(guid);
 
+    // wow-playground: what this loot window came to, item by item, for OpenLootAction's give-up line.
+    std::ostringstream stored;
+    stored << guid.GetCounter() << ", " << uint32(items) << " items at " << time(nullptr) << ":";
+    auto note = [&](uint32 itemId, uint32 count, const char* what)
+    {
+        ItemPrototype const* p = sItemStorage.LookupEntry<ItemPrototype>(itemId);
+        stored << " " << (p ? p->Name1 : std::to_string(itemId).c_str()) << " x" << count << " " << what << ";";
+        SET_AI_VALUE2(std::string, "manual string", "last store loot", stored.str());
+    };
+    SET_AI_VALUE2(std::string, "manual string", "last store loot", stored.str());
+
     Loot* loot = sLootMgr.GetLoot(bot);
 
     if (!loot)
+    {
+        stored << " no loot";
+        SET_AI_VALUE2(std::string, "manual string", "last store loot", stored.str());
         return false;
+    }
 
     if (gold > 0)
     {
@@ -312,13 +335,22 @@ bool StoreLootAction::Execute(Event& event)
 		        && lootslot_type != LOOT_SLOT_OWNER
 #endif
             )
+        {
+            note(itemid, itemcount, "slot type");
 			continue;
+        }
 
         if (loot_type != LOOT_SKINNING && !IsLootAllowed(itemQualifier, ai))
+        {
+            note(itemid, itemcount, "not allowed");
             continue;
+        }
 
         if (AI_VALUE2(uint32, "stack space for item", itemid) < itemcount)
+        {
+            note(itemid, itemcount, "no stack space");
             continue;
+        }
 
         ItemPrototype const *proto = sItemStorage.LookupEntry<ItemPrototype>(itemid);
         if (!proto)
@@ -327,11 +359,17 @@ bool StoreLootAction::Execute(Event& event)
         LootItem* lootItem = loot->GetLootItemInSlot(itemindex);
 
         if (!lootItem)
+        {
+            note(itemid, itemcount, "no loot item");
             continue;
+        }
 
         //have no right to loot
         if (lootItem->isBlocked || lootItem->GetSlotTypeForSharedLoot(bot, loot) == MAX_LOOT_SLOT_TYPE)
+        {
+            note(itemid, itemcount, "no right");
             continue;
+        }
 
         Player* master = ai->GetMaster();
         if (sRandomPlayerbotMgr.IsRandomBot(bot) && master)
@@ -341,9 +379,11 @@ bool StoreLootAction::Execute(Event& event)
                 sRandomPlayerbotMgr.AddTradeDiscount(bot, master, price);
         }
 
+        uint32 had = bot->GetItemCount(itemid);
         WorldPacket packet(CMSG_AUTOSTORE_LOOT_ITEM, 1);
         packet << itemindex;
         bot->GetSession()->HandleAutostoreLootItemOpcode(packet);
+        note(itemid, itemcount, bot->GetItemCount(itemid) > had ? "stored" : "store refused");
 
         if (proto->Quality > ITEM_QUALITY_NORMAL && !urand(0, 50) && ai->HasStrategy("emote", BotState::BOT_STATE_NON_COMBAT)) ai->PlayEmote(TEXTEMOTE_CHEER);
         if (proto->Quality >= ITEM_QUALITY_RARE && !urand(0, 1) && ai->HasStrategy("emote", BotState::BOT_STATE_NON_COMBAT)) ai->PlayEmote(TEXTEMOTE_CHEER);

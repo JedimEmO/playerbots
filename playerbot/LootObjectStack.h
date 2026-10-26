@@ -62,6 +62,11 @@ namespace ai
         // finds again every few seconds because it ignores line of sight).
         bool NoteApproach(ObjectGuid guid);
         bool GaveUpOn(ObjectGuid guid);
+        // wow-playground: call before each attempt to open a loot object. Returns false, and leaves that object alone
+        // like NoteApproach, on the next attempt after LOOT_MAX_OPENS within LOOT_OPEN_WINDOW_SECS: the object is still
+        // there, so its loot was never taken. A herb node whose loot the bot never stored kept a priest casting on it
+        // every five seconds for ten minutes.
+        bool NoteOpen(ObjectGuid guid);
 
     private:
         std::vector<LootObject> OrderByDistance(float maxDistance = 0);
@@ -72,6 +77,9 @@ namespace ai
         ObjectGuid approachGuid;
         time_t approachSince = 0;
         time_t approachLast = 0;
+        ObjectGuid openGuid;
+        time_t openSince = 0;
+        uint32 openCount = 0;
         std::map<ObjectGuid, time_t> givenUpUntil;
     };
 

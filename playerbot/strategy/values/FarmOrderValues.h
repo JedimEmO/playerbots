@@ -44,6 +44,9 @@ namespace ai
         static constexpr float ROAM_DISTANCE = 400.0f;
         // A point this close to the bot counts as seen: a node there would be in sight.
         static constexpr float SEEN_DISTANCE = 30.0f;
+        // How long the bot keeps walking to one point before it counts as seen anyway. A long walk runs in pieces, and
+        // the next piece goes to the same point.
+        static constexpr time_t ROAM_SECONDS = 90;
 
         // The nearest spawned node of the order's item the bot can gather, in sight, line of sight or not, that the
         // loot stack has not given up on; or nullptr. The loot actions take loot within AiPlayerbot.LootDistance only,
@@ -52,12 +55,10 @@ namespace ai
         // The gather destination of the farm order trip the bot works, or with travelling also the one it travels to;
         // or none.
         static GatherTravelDestination* WorkedGather(PlayerbotAI* ai, bool travelling = false);
-        // The next spawn point to walk to, after marking those in sight as seen; nullptr when none is left in range.
+        // The spawn point to walk to, after marking those in sight as seen: the one the bot walks to already, until it
+        // is seen or ROAM_SECONDS pass, else the nearest not seen; nullptr when none is left in range.
         static const WorldPosition* RoamPoint(Player* bot, const TravelDestination* destination);
         static void MarkVisited(Player* bot, const WorldPosition* point);
-        // wow-playground: a temporary trace in the server log, `FarmOrder: <bot> <text>`, while farm orders are tried
-        // on the live server.
-        static void Trace(Player* bot, const std::string& text);
         // The points the bot saw in the last VISIT_SECONDS.
         static std::set<const WorldPosition*> Visited(Player* bot);
     };
