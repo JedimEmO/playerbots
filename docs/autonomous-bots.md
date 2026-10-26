@@ -464,10 +464,14 @@ no npc, guard or member of a player faction, attackable, worth experience,
 on Kalimdor or the Eastern Kingdoms, outside the capitals, and not spawned by an event.
 An elite in the cell does not count, but it marks the spot, which then needs `can fight elite`;
 a rare elite marks it too, since it is just as dangerous to pull by accident.
+A spawn's own faction, unit flags and npc flags count over its creature's,
+since a captive or an escort is often a hostile creature's entry made friendly or unattackable for that spawn.
 A spot within 150 yards of a creature of the other team's factions, a town, a camp or a guard post, is left out:
-the guards attack, and the creatures there are no grind for the other team either.
+the guards attack.
+So is a spot within 80 yards of the character's own team's creatures,
+where guards take the kills, errands draw the bot into town, and prisoners and quest creatures stand.
 The server log says how many:
-`Loaded N grind spots, A for the alliance and H for the horde, from S creature spawns; T left out near the other team's towns.`
+`Loaded N grind spots, A for the alliance and H for the horde, from S creature spawns; T left out near the other team's towns, O near their own.`
 
 A spot's point is the spawn nearest the spawns' mean, so the bot travels to ground it can stand on.
 Its radius reaches the farthest spawn, 20 yards at least, and arriving inside it starts the work.
@@ -496,6 +500,7 @@ With nothing to fight it walks to one of the spot's spawns at least 15 yards awa
 one with a living creature when there is one, trying five until one has a path.
 That walk is the one trigger of `levelling`, at 1.5, below eating, drinking, looting and attacking.
 Fighting, looting and resting count as work; a fight counts when it ends, since the spot is checked out of combat.
+The spot is checked whenever the bot stands, or has been moving for ten seconds without getting anywhere.
 After 75 seconds without work, or 25 minutes in all, the bot leaves the spot,
 and does not pick it again for 15 minutes.
 Full bags or worn gear, with a vendor or repairer known, end the work at once.

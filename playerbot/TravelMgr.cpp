@@ -2585,7 +2585,9 @@ void TravelMgr::LoadQuestTravelTable()
 
 // wow-playground: see GrindSpotTravelDestination. Creature spawns are bucketed into cells of CELL_SIZE yards, height
 // included so a cave is apart from the hill above it, for each team the creatures are hostile to. A cell with
-// MIN_SPAWNS non-elite spawns becomes a spot; elites in the cell only mark it.
+// MIN_SPAWNS non-elite spawns becomes a spot; elites in the cell only mark it. A spawn's own faction, unit flags and npc
+// flags (its spawn template) count over its creature's, since a captive or an escort is often the hostile creature's
+// entry with a friendly faction or a flag that keeps it from being attacked.
 void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
 {
     // A race of each team stands for it; IsActive checks the bot's own faction.
@@ -2612,65 +2614,67 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
         if (!cInfo)
             continue;
 
-        if (cInfo->CreatureType == CREATURE_TYPE_CRITTER || cInfo->CreatureType == CREATURE_TYPE_TOTEM || cInfo->CreatureType == CREATURE_TYPE_NOT_SPECIFIED)
-            continue;
-
-        if (cInfo->NpcFlags)
-            continue;
-
-        if (cInfo->ExtraFlags & (CREATURE_EXTRA_FLAG_INVISIBLE | CREATURE_EXTRA_FLAG_CIVILIAN | CREATURE_EXTRA_FLAG_GUARD))
-            continue;
-
-        if (cInfo->UnitFlags & (UNIT_FLAG_SPAWNING | UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_UNTARGETABLE | UNIT_FLAG_UNINTERACTIBLE))
-            continue;
-
-        if (cInfo->StaticFlags & (uint32(CreatureStaticFlags::NO_XP) | uint32(CreatureStaticFlags::UNKILLABLE) | uint32(CreatureStaticFlags::IMMUNE_TO_PC) | uint32(CreatureStaticFlags::UNINTERACTIBLE)))
-            continue;
-
-        if (cInfo->ExperienceMultiplier <= 0.0f)
-            continue;
-
-        FactionTemplateEntry const* creatureTemplate = sFactionTemplateStore.LookupEntry(cInfo->Faction);
-        if (!creatureTemplate)
-            continue;
-
-        // A faction of a player team: guards, villagers, the other team's people. They are no grind, but they mark
-        // the team's towns and camps, where the other team's characters keep away.
-        if (creatureTemplate->factionGroupMask & (FACTION_GROUP_MASK_ALLIANCE | FACTION_GROUP_MASK_HORDE))
-        {
-            for (auto& guidP : guidps)
-            {
-                if (!guidP.isOverworld())
-                    continue;
-
-                for (uint32 t = 0; t < 2; t++)
-                    if (creatureTemplate->factionGroupMask & (t ? FACTION_GROUP_MASK_HORDE : FACTION_GROUP_MASK_ALLIANCE))
-                        towns[std::make_tuple(t, guidP.getMapId(), (int32)floor(guidP.getX() / GrindSpotTravelDestination::TOWN_DISTANCE),
-                            (int32)floor(guidP.getY() / GrindSpotTravelDestination::TOWN_DISTANCE))].push_back(guidP);
-            }
-            continue;
-        }
-
-        // Rares and rare elites never count: one spawn, a long respawn, often more than a solo character can take. An
-        // elite, rare elites included, only marks the cell.
-        if (cInfo->Rank == CREATURE_ELITE_RARE)
-            continue;
-        bool elite = cInfo->Rank != CREATURE_ELITE_NORMAL;
-
-        bool hostile[2];
-        for (uint32 t = 0; t < 2; t++)
-            hostile[t] = teamTemplates[t] && PlayerbotAI::GetFactionReaction(teamTemplates[t], creatureTemplate) < REP_NEUTRAL;
-
-        if (!hostile[0] && !hostile[1])
-            continue;
-
         for (auto guidP : guidps)
         {
             if (!guidP.isOverworld())
                 continue;
 
             CreatureData const* data = guidP.GetCreatureData();
-            if (!data || (int32)data->spawntimesecsmin < 0)
+            if (!data)
+                continue;
+
+            CreatureSpawnTemplate const* spawnTemplate = data->spawnTemplate;
+            uint32 faction = spawnTemplate && spawnTemplate->faction ? spawnTemplate->faction : cInfo->Faction;
+            uint32 unitFlags = spawnTemplate && spawnTemplate->unitFlags != -1 ? uint32(spawnTemplate->unitFlags) : cInfo->UnitFlags;
+            uint32 npcFlags = spawnTemplate && spawnTemplate->npcFlags != -1 ? uint32(spawnTemplate->npcFlags) : cInfo->NpcFlags;
+
+            FactionTemplateEntry const* creatureTemplate = sFactionTemplateStore.LookupEntry(faction);
+            if (!creatureTemplate)
+                continue;
+
+            // A faction of a player team: guards, villagers, the other team's people. They are no grind, but they
+            // mark the team's towns and camps, where neither team grinds.
+            if (creatureTemplate->factionGroupMask & (FACTION_GROUP_MASK_ALLIANCE | FACTION_GROUP_MASK_HORDE))
+            {
+                for (uint32 t = 0; t < 2; t++)
+                    if (creatureTemplate->factionGroupMask & (t ? FACTION_GROUP_MASK_HORDE : FACTION_GROUP_MASK_ALLIANCE))
+                        towns[std::make_tuple(t, guidP.getMapId(), (int32)floor(guidP.getX() / GrindSpotTravelDestination::TOWN_DISTANCE),
+                            (int32)floor(guidP.getY() / GrindSpotTravelDestination::TOWN_DISTANCE))].push_back(guidP);
+                continue;
+            }
+
+            if (cInfo->CreatureType == CREATURE_TYPE_CRITTER || cInfo->CreatureType == CREATURE_TYPE_TOTEM || cInfo->CreatureType == CREATURE_TYPE_NOT_SPECIFIED)
+                continue;
+
+            if (npcFlags)
+                continue;
+
+            if (cInfo->ExtraFlags & (CREATURE_EXTRA_FLAG_INVISIBLE | CREATURE_EXTRA_FLAG_CIVILIAN | CREATURE_EXTRA_FLAG_GUARD))
+                continue;
+
+            if (unitFlags & (UNIT_FLAG_SPAWNING | UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_UNTARGETABLE | UNIT_FLAG_UNINTERACTIBLE))
+                continue;
+
+            if (cInfo->StaticFlags & (uint32(CreatureStaticFlags::NO_XP) | uint32(CreatureStaticFlags::UNKILLABLE) | uint32(CreatureStaticFlags::IMMUNE_TO_PC) | uint32(CreatureStaticFlags::UNINTERACTIBLE)))
+                continue;
+
+            if (cInfo->ExperienceMultiplier <= 0.0f)
+                continue;
+
+            // Rares and rare elites never count: one spawn, a long respawn, often more than a solo character can take.
+            // An elite, rare elites included, only marks the cell.
+            if (cInfo->Rank == CREATURE_ELITE_RARE)
+                continue;
+            bool elite = cInfo->Rank != CREATURE_ELITE_NORMAL;
+
+            bool hostile[2];
+            for (uint32 t = 0; t < 2; t++)
+                hostile[t] = teamTemplates[t] && PlayerbotAI::GetFactionReaction(teamTemplates[t], creatureTemplate) < REP_NEUTRAL;
+
+            if (!hostile[0] && !hostile[1])
+                continue;
+
+            if ((int32)data->spawntimesecsmin < 0)
                 continue;
 
             // Event spawns come and go.
@@ -2706,27 +2710,27 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
         }
     }
 
-    // A spot near the other team's town or camp, by TOWN_DISTANCE, has its guards and people around.
-    auto nearEnemyTown = [&towns](uint32 team, const WorldPosition& point)
+    // A spot near a team's town or camp has its guards and people around: the other team's attack the bot, and its
+    // own take its kills, draw it into town on errands and stand among prisoners and quest creatures.
+    auto nearTown = [&towns](uint32 townTeam, const WorldPosition& point, float range)
     {
-        uint32 enemy = team == 0 ? 1 : 0;
         int32 cx = (int32)floor(point.getX() / GrindSpotTravelDestination::TOWN_DISTANCE);
         int32 cy = (int32)floor(point.getY() / GrindSpotTravelDestination::TOWN_DISTANCE);
         for (int32 x = cx - 1; x <= cx + 1; x++)
             for (int32 y = cy - 1; y <= cy + 1; y++)
             {
-                auto it = towns.find(std::make_tuple(enemy, point.getMapId(), x, y));
+                auto it = towns.find(std::make_tuple(townTeam, point.getMapId(), x, y));
                 if (it == towns.end())
                     continue;
 
                 for (auto& npc : it->second)
-                    if (npc.distance(point) <= GrindSpotTravelDestination::TOWN_DISTANCE)
+                    if (npc.distance(point) <= range)
                         return true;
             }
         return false;
     };
 
-    uint32 teamCount[2] = { 0, 0 }, nearTowns = 0;
+    uint32 teamCount[2] = { 0, 0 }, nearEnemyTowns = 0, nearOwnTowns = 0;
     for (auto& [key, cell] : cells)
     {
         if (cell.spawns.size() < GrindSpotTravelDestination::MIN_SPAWNS)
@@ -2736,10 +2740,17 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
         uint32 t = team == ALLIANCE ? 0 : 1;
         GrindSpotTravelDestination* spot = new GrindSpotTravelDestination(grindSpots.size(), team, cell.spawns, cell.hasElite);
 
-        if (nearEnemyTown(t, spot->GetPoint()))
+        if (nearTown(t ? 0 : 1, spot->GetPoint(), GrindSpotTravelDestination::TOWN_DISTANCE))
         {
             delete spot;
-            nearTowns++;
+            nearEnemyTowns++;
+            continue;
+        }
+
+        if (nearTown(t, spot->GetPoint(), GrindSpotTravelDestination::OWN_TOWN_DISTANCE))
+        {
+            delete spot;
+            nearOwnTowns++;
             continue;
         }
 
@@ -2747,8 +2758,8 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
         teamCount[t]++;
     }
 
-    sLog.outString("Loaded %u grind spots, %u for the alliance and %u for the horde, from %u creature spawns; %u left out near the other team's towns.",
-        (uint32)grindSpots.size(), teamCount[0], teamCount[1], spawnCount, nearTowns);
+    sLog.outString("Loaded %u grind spots, %u for the alliance and %u for the horde, from %u creature spawns; %u left out near the other team's towns, %u near their own.",
+        (uint32)grindSpots.size(), teamCount[0], teamCount[1], spawnCount, nearEnemyTowns, nearOwnTowns);
 }
 
 void TravelMgr::GetPopulatedGrids()

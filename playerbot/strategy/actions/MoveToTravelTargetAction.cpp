@@ -279,7 +279,10 @@ bool MoveToTravelTargetAction::isUseful()
     bool roaming = currentTarget->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK && dynamic_cast<GrindSpotTravelDestination*>(currentTarget->GetDestination());
     // wow-playground: and between the spawn points of a farm order's gather trip (see Execute).
     roaming = roaming || FarmOrders::WorkedGather(ai);
-    if (roaming && (bot->IsMoving() || bot->IsSitState() || bot->IsInCombat()))
+    // wow-playground: a bot "moving" without getting anywhere for ten seconds may go on, as the travel check below
+    // allows. The travel action skips a moving bot, so one stuck that way at a vendor in town never checked its grind
+    // spot, and worked it for half an hour with no kill; Execute checks the spot first.
+    if (roaming && ((bot->IsMoving() && MEM_AI_VALUE(WorldPosition, "current position")->LastChangeDelay() < 10) || bot->IsSitState() || bot->IsInCombat()))
         return false;
 
     if (!roaming && !AI_VALUE(bool, "travel target traveling") && AI_VALUE(TravelTarget*, "travel target")->GetStatus() != TravelStatus::TRAVEL_STATUS_READY)
