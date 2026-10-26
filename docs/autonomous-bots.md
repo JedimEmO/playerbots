@@ -461,6 +461,10 @@ Grind spots are open at any time of the hour;
 without it a bot grinds only in the first 45 minutes of its hour, and wanders to random NPCs in the last 45.
 Auction house, boss, explore, generic rpg, city, world pvp and gathering trips are off;
 a vendor nearby buys the loot.
+So loot that would fetch more at the auction house counts as vendor goods,
+and the wish to sell there no longer holds back a grind trip.
+A level 26 paladin kept its cloth, eggs and murloc parts for the auction house,
+filled its bags, and found no destination for half an hour.
 Without `levelling` too, a player's character gathers within 1000 yards on its map, unless it has a farm order.
 A level 11 mage whose strategies had just been reset set off from Dun Morogh for the Gloom Weed of Tirisfal Glades.
 And near a grind spot the bot picks an npc to walk to only for business, a weight of 25 and up

@@ -603,7 +603,10 @@ bool ExploreTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& inf
 
 bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
 {
-    if (info.GetBoolValue("should sell") && (info.GetBoolValue("can sell") || info.GetBoolValue("can ah sell")))
+    // wow-playground: under `levelling` the auction house is no trip (ShouldTravelPurposeValue), so it is no reason to
+    // stop grinding either: a level 26 paladin with bags full of what no vendor buys found no destination at all.
+    bool ahSell = info.GetBoolValue("can ah sell") && !info.GetBoolValue2("has strategy", "levelling");
+    if (info.GetBoolValue("should sell") && (info.GetBoolValue("can sell") || ahSell))
         return false;
 
     CreatureInfo const* cInfo = GetCreatureInfo();
@@ -721,8 +724,10 @@ bool GrindSpotTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     if (info.GetTeam() != team)
         return false;
 
-    // As for the single entry grind destinations: the bot sells first. A spot also waits for a repair.
-    if (info.GetBoolValue("should sell") && (info.GetBoolValue("can sell") || info.GetBoolValue("can ah sell")))
+    // As for the single entry grind destinations: the bot sells first, to a vendor (GrindTravelDestination::IsPossible).
+    // A spot also waits for a repair.
+    bool ahSell = info.GetBoolValue("can ah sell") && !info.GetBoolValue2("has strategy", "levelling");
+    if (info.GetBoolValue("should sell") && (info.GetBoolValue("can sell") || ahSell))
         return false;
 
     if (info.GetBoolValue("should repair") && info.GetBoolValue("can repair"))

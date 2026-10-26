@@ -484,6 +484,12 @@ if ((proto->Class == ITEM_CLASS_PROJECTILE ||
             return sellUsage;
 #endif
 
+        // wow-playground: `levelling` makes no auction house trips (ShouldTravelPurposeValue), so its loot goes to the
+        // vendor. Kept for the auction house, a level 26 paladin's cloth, eggs and murloc parts filled its bags, and
+        // nothing it carried counted as something to sell.
+        if (ai->HasStrategy("levelling", BotState::BOT_STATE_NON_COMBAT))
+            return sellUsage;
+
         //if item value is significantly higher than its vendor sell price and we actually have money to place the item on ah.
         uint32 ahMoney = AI_VALUE2(uint32, "free money for", (uint32)NeedMoneyFor::ah);
 
