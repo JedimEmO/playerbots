@@ -108,22 +108,43 @@ trainableSpellMap* TrainableSpellMapValue::Calculate()
     return spellMap;
 }
 
-// The skill lines a spell belongs to, as SkillLineAbility.dbc lists them, allow the bot's race and class, and the bot's
-// race and class can have each of those skills.
-bool TrainableSpellsValue::CanHaveSkillOf(uint32 spellId) const
+// The bot's race and class can have every skill the trainer spell gives: the skill lines of the spell it casts and
+// of the spell it teaches, as SkillLineAbility.dbc lists them with their own race and class masks, and the skills
+// their skill step effects raise. Lockpicking's teaching spell is only in the second kind: its skill step raises a
+// rogue-only skill, and the Pick Lock it teaches is in no skill line.
+bool TrainableSpellsValue::CanHaveSkillsOf(TrainerSpell const* trainerSpell) const
 {
-    auto abilities = sSpellMgr.GetSkillLineAbilityMapBoundsBySpellId(spellId);
-    for (auto itr = abilities.first; itr != abilities.second; ++itr)
+    auto canHaveSkill = [&](uint32 skillId)
     {
-        SkillLineAbilityEntry const* ability = itr->second;
-        if (ability->racemask && !(ability->racemask & bot->getRaceMask()))
-            return false;
-        if (ability->classmask && !(ability->classmask & bot->getClassMask()))
-            return false;
+        auto skillInfo = sSpellMgr.GetSkillRaceClassInfoMapBounds(skillId);
+        return skillInfo.first == skillInfo.second || bot->GetSkillInfo(skillId);
+    };
 
-        auto skillInfo = sSpellMgr.GetSkillRaceClassInfoMapBounds(ability->skillId);
-        if (skillInfo.first != skillInfo.second && !bot->GetSkillInfo(ability->skillId))
-            return false;
+#ifdef MANGOSBOT_TWO
+    uint32 spells[] = { trainerSpell->spell, trainerSpell->learnedSpell[0] };
+#else
+    uint32 spells[] = { trainerSpell->spell, trainerSpell->learnedSpell };
+#endif
+    for (uint32 spellId : spells)
+    {
+        auto abilities = sSpellMgr.GetSkillLineAbilityMapBoundsBySpellId(spellId);
+        for (auto itr = abilities.first; itr != abilities.second; ++itr)
+        {
+            SkillLineAbilityEntry const* ability = itr->second;
+            if (ability->racemask && !(ability->racemask & bot->getRaceMask()))
+                return false;
+            if (ability->classmask && !(ability->classmask & bot->getClassMask()))
+                return false;
+            if (!canHaveSkill(ability->skillId))
+                return false;
+        }
+
+        SpellEntry const* spell = sServerFacade.LookupSpellInfo(spellId);
+        if (!spell)
+            continue;
+        for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
+            if (spell->Effect[i] == SPELL_EFFECT_SKILL_STEP && !canHaveSkill(spell->EffectMiscValue[i]))
+                return false;
     }
     return true;
 }
@@ -160,11 +181,7 @@ std::vector<TrainerSpell const*> TrainableSpellsValue::Calculate()
                 // wow-playground: some trade trainer spells teach a skill of another race or class, and the trainer
                 // state does not check that. Lockpicking's quest NPCs teach it for a copper to anyone, so every level 3
                 // mage had a spell that had "waited two levels" and walked to Stormwind's weapon master for it.
-#ifdef MANGOSBOT_TWO
-                if (trainerType == TRAINER_TYPE_TRADESKILLS && !CanHaveSkillOf(trainerSpell->learnedSpell[0]))
-#else
-                if (trainerType == TRAINER_TYPE_TRADESKILLS && !CanHaveSkillOf(trainerSpell->learnedSpell))
-#endif
+                if (trainerType == TRAINER_TYPE_TRADESKILLS && !CanHaveSkillsOf(trainerSpell))
                     continue;
 
                 //Skip initial profession training.

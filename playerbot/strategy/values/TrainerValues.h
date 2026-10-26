@@ -27,7 +27,7 @@ namespace ai
         virtual std::string Format() override;
 
     private:
-        bool CanHaveSkillOf(uint32 spellId) const;
+        bool CanHaveSkillsOf(TrainerSpell const* trainerSpell) const;
     };
 
     class AvailableTrainersValue : public CalculatedValue<std::vector<int32>>, public Qualified
