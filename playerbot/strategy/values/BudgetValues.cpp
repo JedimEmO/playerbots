@@ -1,4 +1,5 @@
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "BudgetValues.h"
 #include "ItemUsageValue.h"
 #include "MountValues.h"
@@ -324,7 +325,11 @@ bool HasAllMoneyForValue::Calculate()
 
     uint32 needMoney;
 
-    if (ai->HasActivePlayerMaster())
+    // A guild character ordered to learn a profession pays for it first, before what the budget ranks higher.
+    bool orderedTraining = getQualifier() == std::to_string((uint32)NeedMoneyFor::skilltraining) &&
+        sGuildBotMgr.IsGuildBot(bot) && sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) == "learn";
+
+    if (ai->HasActivePlayerMaster() || orderedTraining)
         needMoney = AI_VALUE2(uint32, "money needed for", getQualifier());
     else
         needMoney = AI_VALUE2(uint32, "total money needed for", getQualifier());
