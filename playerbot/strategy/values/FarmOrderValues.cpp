@@ -3,6 +3,8 @@
 #include "LootValues.h"
 #include "SharedValueContext.h"
 #include "playerbot/RandomPlayerbotMgr.h"
+#include "playerbot/LootObjectStack.h"
+#include "playerbot/ServerFacade.h"
 
 using namespace ai;
 
@@ -252,10 +254,45 @@ namespace
     }
 }
 
-GatherTravelDestination* FarmOrders::WorkedGather(PlayerbotAI* ai)
+GameObject* FarmOrders::NodeInSight(Player* bot)
+{
+    RandomPlayerbotMgr::FarmOrder order;
+    if (!sRandomPlayerbotMgr.GetFarmOrder(bot, order))
+        return nullptr;
+
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    AiObjectContext* context = ai->GetAiObjectContext();
+    LootObjectStack* stack = AI_VALUE(LootObjectStack*, "available loot");
+
+    GameObject* nearest = nullptr;
+    for (ObjectGuid guid : AI_VALUE(std::list<ObjectGuid>, "nearest game objects no los"))
+    {
+        if (!guid.IsGameObject() || !IsSource(order.item, -int32(guid.GetEntry())) || stack->GaveUpOn(guid))
+            continue;
+
+        GameObject* go = ai->GetGameObject(guid);
+        if (!go || !sServerFacade.isSpawned(go))
+            continue;
+
+        LootObject loot(bot, guid);
+        if (!loot.IsLootPossible(bot))
+            continue;
+
+        if (!nearest || bot->GetDistance(go) < bot->GetDistance(nearest))
+            nearest = go;
+    }
+
+    return nearest;
+}
+
+GatherTravelDestination* FarmOrders::WorkedGather(PlayerbotAI* ai, bool travelling)
 {
     TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-    if (!target || target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
+    if (!target)
+        return nullptr;
+
+    TravelStatus status = target->GetStatus();
+    if (status != TravelStatus::TRAVEL_STATUS_WORK && !(travelling && status == TravelStatus::TRAVEL_STATUS_TRAVEL))
         return nullptr;
 
     GatherTravelDestination* gather = dynamic_cast<GatherTravelDestination*>(target->GetDestination());

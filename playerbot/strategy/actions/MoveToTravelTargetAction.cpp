@@ -30,6 +30,24 @@ bool MoveToTravelTargetAction::Execute(Event& event)
     // wow-playground: see FarmOrders. Working a farm order's gather trip with no node to gather, walk to the nearest
     // spawn point not seen lately; most are empty, since nodes are pooled. With none left in range the trip ends, and
     // the next farm order trip goes to the nearest point not seen. Forced trips never end on their own.
+    // A node of the item in sight comes first, working the trip or on the way: walk up to it, and the loot actions
+    // gather it; they take loot within AiPlayerbot.LootDistance only, and the loot scan skips one more than 5 yards
+    // above or below. Too long on the way, as for a node behind a wall, and the loot stack gives up on it.
+    if (FarmOrders::WorkedGather(ai, true))
+    {
+        if (GameObject* node = FarmOrders::NodeInSight(bot))
+        {
+            LootObjectStack* stack = AI_VALUE(LootObjectStack*, "available loot");
+            if (bot->GetDistance(node) > INTERACTION_DISTANCE && stack->NoteApproach(node->GetObjectGuid()) &&
+                MoveTo(node->GetMapId(), node->GetPositionX(), node->GetPositionY(), node->GetPositionZ(), false, false))
+            {
+                if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
+                    ai->TellPlayerNoFacing(GetMaster(), "Walking " + std::to_string(uint32(bot->GetDistance(node))) + "y to " + chat->formatWorldobject(node));
+                return true;
+            }
+        }
+    }
+
     if (GatherTravelDestination* gather = FarmOrders::WorkedGather(ai))
     {
         for (uint32 attempt = 0; attempt < 5; attempt++)

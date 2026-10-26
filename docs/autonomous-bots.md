@@ -158,7 +158,12 @@ A trip the order forces never ends on its own, so a bot that found its point emp
 Instead, once it arrives and has nothing to gather, it walks to the nearest spawn point of the same node within 400 yards,
 skipping points it saw in the last five minutes; a point within 30 yards counts as seen,
 and so does one with no path to it.
-Any node of the item it sees on the way, it gathers.
+A node of the item in sight, working the trip or on the way to it, comes first: the bot walks up to it and gathers it.
+It has to, since the loot actions take loot within `AiPlayerbot.LootDistance`, 25 yards, only,
+and the loot scan skips a node more than 5 yards above or below the bot;
+one it cannot reach in time is given up on, as for any loot.
+While a bag slot is free, it also loots the item into a new stack,
+where other bots with bags more than 80% full only top up stacks they have.
 With no point left in range the trip ends,
 and the next one goes to the nearest point of each source it has not seen.
 Near Goldshire, 11 of the 242 Peacebloom spawn points lie within 300 yards of the inn.

@@ -341,6 +341,12 @@ uint32 StackSpaceForItem::Calculate()
 	if (AI_VALUE(uint8, "bag space") <= 80)
 		return maxValue;
 
+	// wow-playground: a bot on a farm order (FarmOrders) takes its item while any bag slot is free, not only into
+	// stacks it already has; a priest with 14 of 16 slots used gathered no Peacebloom at all.
+	RandomPlayerbotMgr::FarmOrder order;
+	if (AI_VALUE(uint8, "bag space") < 100 && sRandomPlayerbotMgr.GetFarmOrder(bot, order) && order.item == itemId)
+		return maxValue;
+
 	uint32 maxStack = proto->GetMaxStackSize();
 	if (maxStack == 1)
 		return 0;

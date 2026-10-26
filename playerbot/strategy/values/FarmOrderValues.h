@@ -45,8 +45,13 @@ namespace ai
         // A point this close to the bot counts as seen: a node there would be in sight.
         static constexpr float SEEN_DISTANCE = 30.0f;
 
-        // The gather destination of the farm order trip the bot works, or none.
-        static GatherTravelDestination* WorkedGather(PlayerbotAI* ai);
+        // The nearest spawned node of the order's item the bot can gather, in sight, line of sight or not, that the
+        // loot stack has not given up on; or nullptr. The loot actions take loot within AiPlayerbot.LootDistance only,
+        // and the loot scan skips a node more than 5 yards above or below the bot, so the bot walks to it first.
+        static GameObject* NodeInSight(Player* bot);
+        // The gather destination of the farm order trip the bot works, or with travelling also the one it travels to;
+        // or none.
+        static GatherTravelDestination* WorkedGather(PlayerbotAI* ai, bool travelling = false);
         // The next spawn point to walk to, after marking those in sight as seen; nullptr when none is left in range.
         static const WorldPosition* RoamPoint(Player* bot, const TravelDestination* destination);
         static void MarkVisited(Player* bot, const WorldPosition* point);
