@@ -418,6 +418,15 @@ bool LootObjectStack::NoteOpen(ObjectGuid guid)
     return false;
 }
 
+void LootObjectStack::NoteStored(ObjectGuid guid)
+{
+    if (guid != openGuid)
+        return;
+
+    openSince = time(0);
+    openCount = 0;
+}
+
 bool LootObjectStack::GaveUpOn(ObjectGuid guid)
 {
     auto i = givenUpUntil.find(guid);

@@ -383,7 +383,10 @@ bool StoreLootAction::Execute(Event& event)
         WorldPacket packet(CMSG_AUTOSTORE_LOOT_ITEM, 1);
         packet << itemindex;
         bot->GetSession()->HandleAutostoreLootItemOpcode(packet);
-        note(itemid, itemcount, bot->GetItemCount(itemid) > had ? "stored" : "store refused");
+        bool storedItem = bot->GetItemCount(itemid) > had;
+        note(itemid, itemcount, storedItem ? "stored" : "store refused");
+        if (storedItem)
+            AI_VALUE(LootObjectStack*, "available loot")->NoteStored(guid);
 
         if (proto->Quality > ITEM_QUALITY_NORMAL && !urand(0, 50) && ai->HasStrategy("emote", BotState::BOT_STATE_NON_COMBAT)) ai->PlayEmote(TEXTEMOTE_CHEER);
         if (proto->Quality >= ITEM_QUALITY_RARE && !urand(0, 1) && ai->HasStrategy("emote", BotState::BOT_STATE_NON_COMBAT)) ai->PlayEmote(TEXTEMOTE_CHEER);

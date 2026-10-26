@@ -164,8 +164,9 @@ A node of the item in sight, working the trip or on the way to it, comes first: 
 It has to, since the loot actions take loot within `AiPlayerbot.LootDistance`, 25 yards, only,
 and the loot scan skips a node more than 5 yards above or below the bot;
 one it cannot reach in time is given up on, as for any loot.
-Any bot also gives up on a loot object for ten minutes when it is about to open it a fourth time within two minutes,
-since the object still being there means its loot was never taken,
+Any bot also gives up on a loot object for ten minutes when it is about to open it a fourth time within two minutes
+with nothing taken since, as the object still being there means its loot was never taken;
+a mining vein that gives loot several times over is opened as often as it gives,
 and the server log says so in a line starting `Loot:` with what the bot did with its last loot window.
 A priest cast Herb Gathering on one Peacebloom node every five seconds for ten minutes before this rule.
 While a bag slot is free, it also loots the item into a new stack,
