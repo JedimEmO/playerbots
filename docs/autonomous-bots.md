@@ -575,10 +575,14 @@ The bot looks within 2500 yards first.
 A character outgrows its starting zone; Teldrassil tops out near level 11,
 and a level 15 warrior found nothing there that fit.
 So when no spot within 2500 yards fits, any spot on the same map counts, the nearest first,
-and only when none does, a spot on another map, from level 10.
+and only when none does, a spot on another map.
+Below level 10 a character keeps to 2500 yards, at spots and single entry destinations both;
+its start zone and the next one have spots for it,
+and a level 2 dwarf had walked from Coldridge Valley through the Burning Steppes for Elwynn's kobolds.
 Neutral creatures count because a start zone can have nothing else:
 below level 3 the night elves' Shadowglen has only neutral boars, nightsabers and grells,
-and a level 2 priest set sail for the kobolds of Elwynn Forest.
+and the dwarves' Coldridge Valley only neutral troggs and wolves.
+A level 2 priest set sail from Teldrassil for the kobolds of Elwynn Forest.
 A spot that far needs a route in the travel nodes, from the node nearest the bot to the node nearest the spot,
 and the nodes link walks, flights, boats, zeppelins and portals.
 Teldrassil to Darkshore goes by the Darnassus portal and the Rut'theran flight master,

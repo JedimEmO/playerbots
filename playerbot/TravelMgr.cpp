@@ -3176,6 +3176,12 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
     bool useGrindSpots = purposeFlag != (uint32)TravelDestinationPurpose::None && (purposeFlag & (uint32)TravelDestinationPurpose::Grind) &&
         entries.empty() && info.GetBoolValue2("has strategy", "levelling");
 
+    // wow-playground: a player's character below LOW_LEVEL grinds within MAX_DISTANCE, at spots and at single entry
+    // destinations both. Its start zone and the next have spots for it; a level 2 dwarf walked from Coldridge Valley
+    // through the Burning Steppes for Elwynn's kobolds, and a level 3 gnome to Northshire.
+    bool lowLevel = info.IsAutonomous() && info.GetLevel() < GrindSpotTravelDestination::LOW_LEVEL;
+    float grindDistance = std::min(maxDistance > 0 ? maxDistance : FLT_MAX, GrindSpotTravelDestination::MAX_DISTANCE);
+
     if (useGrindSpots)
     {
         // Near, then anywhere on this map, then other maps: the partitions skip to a farther range now and then, which
@@ -3184,9 +3190,8 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
             { FLT_MAX, true }, { FLT_MAX, false } };
         for (auto& [spotDistance, sameMap] : passes)
         {
-            // wow-playground: every start zone has its spots; a character below level 10 does not sail for another.
-            if (!sameMap && info.GetLevel() < 10)
-                continue;
+            if (lowLevel && spotDistance > grindDistance)
+                break;
 
             for (auto& spot : grindSpots)
             {
@@ -3219,6 +3224,8 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
         if (useGrindSpots && purpose == TravelDestinationPurpose::Grind)
             continue;
 
+        float destDistance = lowLevel && purpose == TravelDestinationPurpose::Grind ? grindDistance : maxDistance;
+
         for (auto& [destEntry, dests] : entryDests)
         {
             if (entries.size() && std::find(entries.begin(), entries.end(), destEntry) == entries.end())
@@ -3229,7 +3236,7 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
                 if (onlyPossible && !dest->IsPossible(info))
                     continue;
 
-                if (maxDistance > 0 && dest->DistanceTo(center) > maxDistance)
+                if (destDistance > 0 && dest->DistanceTo(center) > destDistance)
                     continue;
 
                 if (dest->DistanceTo(center) == FLT_MAX) //Do not return destinations on maps you can't path to.
