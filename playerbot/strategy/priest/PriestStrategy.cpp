@@ -86,6 +86,14 @@ PriestStrategy::PriestStrategy(PlayerbotAI* ai) : ClassStrategy(ai)
     actionNodeFactories.Add(std::make_unique<PriestStrategyActionNodeFactory>());
 }
 
+// Smite as the filler, like the dps specs' fireball or shadow bolt. Its trigger only fires
+// within range, and before Shadow Word: Pain is trained nothing else is queued, so a priest
+// with a target out of range would stand still. The default action's "reach spell" moves it in.
+NextAction** PriestOffdpsStrategy::GetDefaultCombatActions()
+{
+    return NextAction::array(0, new NextAction("smite", ACTION_IDLE), NULL);
+}
+
 #ifdef MANGOSBOT_ZERO // Vanilla
 
 void PriestStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
