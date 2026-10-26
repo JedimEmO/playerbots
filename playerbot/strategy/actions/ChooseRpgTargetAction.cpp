@@ -1,5 +1,6 @@
 
 #include "playerbot/playerbot.h"
+#include "playerbot/strategy/values/FarmOrderValues.h"
 #include "ChooseRpgTargetAction.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/strategy/values/PossibleRpgTargetsValue.h"
@@ -552,6 +553,11 @@ bool ChooseRpgTargetAction::isUseful()
     // wow-playground: a player's character with a trip ready to start sets off. The trip starts only once the bot has
     // stood still for ten seconds, and walking from npc to npc kept a farming priest in "ready" for an hour.
     if (sRandomPlayerbotMgr.IsAutonomousBot(bot) && AI_VALUE(TravelTarget*, "travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_READY)
+        return false;
+
+    // wow-playground: on a farm order trip (FarmOrders) the bot walks to nodes and spawn points, and only while it
+    // stands still; walking from npc to npc around a farm left it no moment for that.
+    if (FarmOrders::WorkedGather(ai, true))
         return false;
 
     GuidPosition guidP = AI_VALUE(GuidPosition, "rpg target");

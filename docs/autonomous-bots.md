@@ -177,6 +177,10 @@ Four other rules change while it holds:
   so a skinning trip stood still at its destination. That fix holds for every bot.
 - It walks to an npc only for business, as a levelling bot does; the same holds for every bot with `farm`.
   Small talk kept a priest on a Peacebloom order in the Goldshire inn, 250 yards from its trip.
+  On a farm order trip, travelling or working, it walks to no npc at all:
+  the walks to nodes and spawn points start only while the bot stands still,
+  and quest givers around a farm kept it moving for fifteen minutes without one.
+  Vendor trips still come first when a trip is chosen.
 
 The order is finished when the count is gathered:
 what `.rndbot mailgoods` sent of the item since the order was set, plus what the bot holds of its own.

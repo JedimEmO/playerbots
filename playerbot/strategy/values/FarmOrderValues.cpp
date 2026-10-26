@@ -338,6 +338,11 @@ const WorldPosition* FarmOrders::RoamPoint(Player* bot, const TravelDestination*
     return nearest;
 }
 
+void FarmOrders::Trace(Player* bot, const std::string& text)
+{
+    sLog.outString("FarmOrder: %s %s", bot->GetName(), text.c_str());
+}
+
 void FarmOrders::MarkVisited(Player* bot, const WorldPosition* point)
 {
     std::lock_guard<std::mutex> guard(visitedMutex);

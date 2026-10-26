@@ -55,6 +55,9 @@ namespace ai
         // The next spawn point to walk to, after marking those in sight as seen; nullptr when none is left in range.
         static const WorldPosition* RoamPoint(Player* bot, const TravelDestination* destination);
         static void MarkVisited(Player* bot, const WorldPosition* point);
+        // wow-playground: a temporary trace in the server log, `FarmOrder: <bot> <text>`, while farm orders are tried
+        // on the live server.
+        static void Trace(Player* bot, const std::string& text);
         // The points the bot saw in the last VISIT_SECONDS.
         static std::set<const WorldPosition*> Visited(Player* bot);
     };

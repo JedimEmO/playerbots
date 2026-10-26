@@ -1,5 +1,6 @@
 
 #include "playerbot/playerbot.h"
+#include "playerbot/strategy/values/FarmOrderValues.h"
 #include "LootAction.h"
 
 #include "playerbot/LootObjectStack.h"
@@ -54,6 +55,10 @@ bool OpenLootAction::Execute(Event& event)
 {
     LootObject lootObject = AI_VALUE(LootObject, "loot target");
     bool result = DoLoot(lootObject);
+    // wow-playground: see FarmOrders::Trace.
+    RandomPlayerbotMgr::FarmOrder order;
+    if (lootObject.guid.IsGameObject() && sRandomPlayerbotMgr.GetFarmOrder(bot, order) && FarmOrders::IsSource(order.item, -int32(lootObject.guid.GetEntry())))
+        FarmOrders::Trace(bot, "opens node " + std::to_string(lootObject.guid.GetCounter()) + (result ? ": cast" : ": failed"));
     if (result)
     {
         AI_VALUE(LootObjectStack*, "available loot")->Remove(lootObject.guid);

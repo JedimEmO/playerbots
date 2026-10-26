@@ -38,13 +38,14 @@ bool MoveToTravelTargetAction::Execute(Event& event)
         if (GameObject* node = FarmOrders::NodeInSight(bot))
         {
             LootObjectStack* stack = AI_VALUE(LootObjectStack*, "available loot");
-            if (bot->GetDistance(node) > INTERACTION_DISTANCE && stack->NoteApproach(node->GetObjectGuid()) &&
-                MoveTo(node->GetMapId(), node->GetPositionX(), node->GetPositionY(), node->GetPositionZ(), false, false))
-            {
-                if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
-                    ai->TellPlayerNoFacing(GetMaster(), "Walking " + std::to_string(uint32(bot->GetDistance(node))) + "y to " + chat->formatWorldobject(node));
+            float distance = bot->GetDistance(node);
+            bool approach = distance > INTERACTION_DISTANCE && stack->NoteApproach(node->GetObjectGuid());
+            bool moved = approach && MoveTo(node->GetMapId(), node->GetPositionX(), node->GetPositionY(), node->GetPositionZ(), false, false);
+            FarmOrders::Trace(bot, std::string("sees ") + node->GetName() + " " + std::to_string(node->GetGUIDLow()) + " at " +
+                std::to_string(uint32(distance)) + "y z" + std::to_string(int32(node->GetPositionZ() - bot->GetPositionZ())) +
+                (moved ? ", walking to it" : approach ? ", no path" : distance > INTERACTION_DISTANCE ? ", given up" : ", at it"));
+            if (moved)
                 return true;
-            }
         }
     }
 
@@ -57,6 +58,7 @@ bool MoveToTravelTargetAction::Execute(Event& event)
             {
                 ai->TellDebug(ai->GetMaster(), "Every spawn point of " + gather->GetTitle() + " within " +
                     std::to_string(uint32(FarmOrders::ROAM_DISTANCE)) + "y seen, leaving it.", "debug travel");
+                FarmOrders::Trace(bot, "has seen every spawn point in range, ending the trip");
                 target->SetForced(false);
                 target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
                 context->ClearValues("no active travel destinations");
@@ -67,6 +69,7 @@ bool MoveToTravelTargetAction::Execute(Event& event)
             FarmOrders::MarkVisited(bot, roamPoint);
             if (MoveTo(roamPoint->getMapId(), roamPoint->getX(), roamPoint->getY(), roamPoint->getZ(), false, false))
             {
+                FarmOrders::Trace(bot, "roams " + std::to_string(uint32(roamPoint->distance(bot))) + "y to a spawn point");
                 if (ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
                     ai->TellPlayerNoFacing(GetMaster(), "Roaming " + std::to_string(uint32(roamPoint->distance(bot))) + "y to a spawn point of " + gather->GetTitle());
                 return true;
