@@ -609,8 +609,7 @@ A spot the bot left in the last 15 minutes is passed over in that search,
 so a bot that left the one spot near it for its level looks farther away.
 A level 26 paladin left the Addled Lepers by Gnomeregan, out of reach behind the elevator,
 and stood without a destination for an hour while the search kept finding only them.
-Only when no spot fits anywhere does the bot fall back to the single entry destinations;
-a spot it left recently still counts as fitting there, so the fallback waits for a spot to come back.
+Only when no spot fits anywhere, the ones left lately aside, does the bot fall back to the single entry destinations.
 
 While the bot works a spot, it attacks any creature in sight, quest or not.
 With nothing to fight it walks to one of the spot's spawns at least 15 yards away,
