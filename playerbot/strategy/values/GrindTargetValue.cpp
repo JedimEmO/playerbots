@@ -1,5 +1,6 @@
 
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "GrindTargetValue.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/RandomPlayerbotMgr.h"
@@ -70,6 +71,12 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     bool travelTargetTraveling = AI_VALUE(bool, "travel target traveling");
     TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
     bool isGrindTravelDest = travelTarget && typeid(travelTarget->GetDestination()) == typeid(GrindTravelDestination);
+
+    // A guild character on its way somewhere other than a grind spot, such as a vendor or a trainer,
+    // fights what attacks it (above) but starts no new fights, or a valley full of creatures keeps it there.
+    if (sGuildBotMgr.IsGuildBot(bot) && !isGrindTravelDest &&
+        (travelTargetTraveling || AI_VALUE(bool, "travel target ready")))
+        return NULL;
 
     struct MemberInfo {
         Player* player;
