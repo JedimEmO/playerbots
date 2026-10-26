@@ -77,6 +77,10 @@ private:
         time_t offlineSince = 0;    // when it went offline, for the relogin delay
         time_t loginRequested = 0;
         uint32 lastLevel = 0;
+        uint64 lastProgress = 0;     // level and experience, as one number
+        time_t progressAt = 0;       // when it last changed
+        bool stalled = false;
+        bool dead = false;
     };
 
     void EnsureTables();

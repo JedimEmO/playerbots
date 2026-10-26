@@ -19,6 +19,8 @@ namespace
     constexpr time_t RELOGIN_SECONDS = 30;
     // A login that has not completed is retried after this long.
     constexpr time_t LOGIN_RETRY_SECONDS = 60;
+    // A levelling character that earns no experience for this long is reported as stalled.
+    constexpr time_t STALL_SECONDS = 15 * MINUTE;
 
     std::string Trim(const std::string& s)
     {
@@ -332,6 +334,8 @@ void GuildBotMgr::OnBotLoginInternal(Player* const bot)
     Character& c = it->second;
     c.loginRequested = 0;
     c.lastLevel = bot->GetLevel();
+    c.progressAt = 0;
+    c.stalled = false;
     // OnBotLogin resets the strategies after this, from the current order.
     c.appliedSeq = c.jobSeq;
     if (!IsKnownJob(c.job))
@@ -352,6 +356,8 @@ void GuildBotMgr::ApplyOrders()
 
         c.appliedSeq = c.jobSeq;
         c.reason.clear();
+        c.progressAt = 0;
+        c.stalled = false;
         if (IsKnownJob(c.job))
         {
             c.status = "working";
@@ -380,8 +386,35 @@ void GuildBotMgr::CheckJobs()
             Event(guid, "level", std::to_string(bot->GetLevel()));
         c.lastLevel = bot->GetLevel();
 
+        bool dead = sServerFacade.UnitIsDead(bot);
+        if (dead && !c.dead)
+            Event(guid, "died", std::to_string(bot->GetZoneId()));
+        c.dead = dead;
+
+        const time_t now = time(nullptr);
+        uint64 progress = uint64(bot->GetLevel()) * 10000000 + bot->GetUInt32Value(PLAYER_XP);
+        if (progress != c.lastProgress || !c.progressAt)
+        {
+            c.lastProgress = progress;
+            c.progressAt = now;
+            if (c.stalled)
+            {
+                c.stalled = false;
+                if (c.reason.rfind("no experience", 0) == 0)
+                    c.reason.clear();
+                Event(guid, "progress", "earning experience again");
+            }
+        }
+
         if (c.status != "working")
             continue;
+
+        if (c.job == "level" && !c.stalled && now - c.progressAt >= STALL_SECONDS)
+        {
+            c.stalled = true;
+            c.reason = "no experience for " + std::to_string((now - c.progressAt) / MINUTE) + " minutes";
+            Event(guid, "stalled", c.reason);
+        }
 
         if (c.job == "level")
         {
@@ -434,7 +467,7 @@ void GuildBotMgr::WriteState(const Character& c, Player* bot)
         bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP), bot->GetMoney(), bot->GetMapId(), bot->GetZoneId(),
         bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), uint32(bot->GetHealthPercent()),
         sServerFacade.UnitIsDead(bot) ? 1 : 0, sServerFacade.IsInCombat(bot) ? 1 : 0, FreeBagSlots(bot),
-        Escape(c.job).c_str(), c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str());
+        Escape(c.job).c_str(), GetPlayerBot(c.guid) ? c.appliedSeq : c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str());
 }
 
 void GuildBotMgr::Event(uint32 guid, const std::string& kind, const std::string& detail)
