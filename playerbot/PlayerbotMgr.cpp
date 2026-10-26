@@ -1933,10 +1933,8 @@ void PlayerbotHolder::CreateBot(Player* master, const std::string param, std::li
         return;
     }
 
-    uint32 maxCharsPerAccount = 9;
-#ifdef MANGOSBOT_TWO
-    maxCharsPerAccount = 10;
-#endif
+    // The realm's own limit, which the core caps at 10 unless patched.
+    uint32 maxCharsPerAccount = sWorld.getConfig(CONFIG_UINT32_CHARACTERS_PER_REALM);
 
     if (sAccountMgr.GetCharactersCount(accountId) >= maxCharsPerAccount)
     {
