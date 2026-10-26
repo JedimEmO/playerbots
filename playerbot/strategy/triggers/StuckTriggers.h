@@ -1,6 +1,7 @@
 #pragma once
 #include "playerbot/strategy/Trigger.h"
 #include <MotionGenerators/MoveMap.h>
+#include "playerbot/TravelMgr.h"
 
 namespace ai
 {
@@ -64,6 +65,9 @@ namespace ai
     {
     public:
         MoveLongStuckTrigger(PlayerbotAI* ai) : Trigger(ai, "move long stuck", 5) {}
+
+        // A failed move adds two to the count and a good one takes one off (TravelTarget::IncRetry).
+        static constexpr uint32 STUCK_MOVE_RETRIES = 100;
 
         virtual bool IsActive() override
         {
@@ -130,6 +134,18 @@ namespace ai
 
             if (timeSinceLastXp < 15 * MINUTE)
                 return false;
+
+            // wow-playground: no path to any travel target, time after time, with the hearthstone ready. A level 26
+            // paladin rode the Gnomeregan elevator and stood on its floor for hours: each move failed, it shuffled
+            // a few yards now and then, and the elevator carried it far enough that the checks above never held. The
+            // hearthstone only, since the repop that stands in for it sends a living bot to its race's start.
+            TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
+            if (travelTarget && travelTarget->GetRetryCount(true) >= STUCK_MOVE_RETRIES && AI_VALUE2(bool, "action useful", "hearthstone"))
+            {
+                ai->TellDebug(ai->GetMaster(), "Stuck: " + std::to_string(travelTarget->GetRetryCount(true)) + " travel move retries and no experience for " + std::to_string(timeSinceLastXp) + " seconds.", "debug stuck");
+
+                return true;
+            }
 
             uint32 distanceMoved = AI_VALUE2(uint32, "distance moved since", 15 * MINUTE);
 

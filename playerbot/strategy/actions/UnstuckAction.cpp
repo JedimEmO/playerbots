@@ -1,5 +1,6 @@
 #include "playerbot/playerbot.h"
 #include "UnstuckAction.h"
+#include "playerbot/TravelMgr.h"
 
 bool UnstuckAction::Execute(Event& event)
 {
@@ -27,7 +28,11 @@ bool UnstuckAction::Execute(Event& event)
         ai->TellDebug(master, "Unstuck: Long move stuck detected, attempting hearthstone or repop.", "debug unstuck");
         if (AI_VALUE2(bool, "action useful", "hearthstone") && bot->IsAlive())
         {
-            return ai->DoSpecificAction("hearthstone", event, true);
+            // wow-playground: the travel move retries start over at home, or MoveLongStuckTrigger holds there too.
+            bool used = ai->DoSpecificAction("hearthstone", event, true);
+            if (used)
+                AI_VALUE(TravelTarget*, "travel target")->SetRetry(true, 0);
+            return used;
         }
         else
         {

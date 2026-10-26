@@ -330,6 +330,8 @@ namespace ai
 		static constexpr uint32 MIN_SPAWNS = 3;
 		static constexpr float MAX_DISTANCE = 2500.0f;
 		static constexpr uint32 LOW_LEVEL = 10;
+		// Creatures this near an elevator, across the map, stand on floors only the elevator joins (LoadGrindSpots).
+		static constexpr float LIFT_DISTANCE = 60.0f;
 		static constexpr float TOWN_DISTANCE = 150.0f;
 		static constexpr float OWN_TOWN_DISTANCE = 80.0f;
 		static constexpr uint32 IDLE_SECONDS = 75;

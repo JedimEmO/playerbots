@@ -2823,6 +2823,32 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
 
     uint32 spawnCount = 0;
 
+    // wow-playground: the elevators. The bots' paths do not ride them, and the floors they join are not joined
+    // otherwise: a level 26 paladin rode the Gnomeregan elevator to the Addled Lepers and stood there for hours,
+    // unable to reach them or to walk away. Creatures near one are left out of the spots.
+    std::vector<WorldPosition> lifts;
+    for (auto& [entry, guidps] : guidpMap)
+    {
+        if (entry >= 0)
+            continue;
+
+        GameObjectInfo const* goInfo = ObjectMgr::GetGameObjectInfo(-entry);
+        if (!goInfo || goInfo->type != GAMEOBJECT_TYPE_TRANSPORT)
+            continue;
+
+        for (auto& guidP : guidps)
+            lifts.push_back(guidP);
+    }
+
+    uint32 nearLifts = 0;
+    auto nearLift = [&lifts](const WorldPosition& pos)
+    {
+        for (auto& lift : lifts)
+            if (lift.getMapId() == pos.getMapId() && lift.sqDistance2d(pos) <= GrindSpotTravelDestination::LIFT_DISTANCE * GrindSpotTravelDestination::LIFT_DISTANCE)
+                return true;
+        return false;
+    };
+
     for (auto& [entry, guidps] : guidpMap)
     {
         if (entry <= 0)
@@ -2921,6 +2947,12 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
             if ((area->flags & cityFlags) || (zone && (zone->flags & cityFlags)))
                 continue;
 
+            if (nearLift(guidP))
+            {
+                nearLifts++;
+                continue;
+            }
+
             spawnCount++;
 
             for (uint32 t = 0; t < 2; t++)
@@ -2989,8 +3021,8 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
         teamCount[t]++;
     }
 
-    sLog.outString("Loaded %u grind spots, %u for the alliance and %u for the horde, from %u creature spawns; %u left out near the other team's towns, %u near their own.",
-        (uint32)grindSpots.size(), teamCount[0], teamCount[1], spawnCount, nearEnemyTowns, nearOwnTowns);
+    sLog.outString("Loaded %u grind spots, %u for the alliance and %u for the horde, from %u creature spawns; %u left out near the other team's towns, %u near their own; %u spawns left out near %u elevators.",
+        (uint32)grindSpots.size(), teamCount[0], teamCount[1], spawnCount, nearEnemyTowns, nearOwnTowns, nearLifts, (uint32)lifts.size());
 }
 
 void TravelMgr::GetPopulatedGrids()

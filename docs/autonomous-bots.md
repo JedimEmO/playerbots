@@ -571,8 +571,12 @@ A spot within 150 yards of a creature of the other team's factions, a town, a ca
 the guards attack.
 So is a spot within 80 yards of the character's own team's creatures,
 where guards take the kills, errands draw the bot into town, and prisoners and quest creatures stand.
+A creature within 60 yards of an elevator, across the map, counts for no spot:
+the bots' paths do not ride elevators, and the floors one joins are often joined no other way.
+A level 26 paladin rode the Gnomeregan elevator to the Addled Lepers on its middle floor,
+and stood there for hours, reaching neither the lepers nor a way out.
 The server log says how many:
-`Loaded N grind spots, A for the alliance and H for the horde, from S creature spawns; T left out near the other team's towns, O near their own.`
+`Loaded N grind spots, A for the alliance and H for the horde, from S creature spawns; T left out near the other team's towns, O near their own; L spawns left out near E elevators.`
 
 A spot's point is the spawn nearest the spawns' mean, so the bot travels to ground it can stand on.
 Its radius reaches the farthest spawn, 20 yards at least, and arriving inside it starts the work.
@@ -624,6 +628,9 @@ and does not pick it again for 15 minutes.
 On the way there, a bot that gets no 10 yards nearer in three minutes leaves the spot the same way.
 Fights, rest, death, taxis and boats do not count against it, nor does a spot more than 2500 yards off.
 A level 11 gnome mage had stood for 36 minutes at the mouth of Frostmane Hold, moving to a spot inside.
+A bot that finds no path to anything, with 100 travel move retries and no experience for 15 minutes,
+uses its hearthstone when it is ready, and starts over from its home.
+A failed move adds two retries and a good one takes one off, so this takes some 50 failures more than successes.
 Full bags or worn gear, with a vendor or repairer known, end the work at once.
 A trainer trip waits until the spot ends, which takes at most 25 minutes.
 The next trip starts a second later: a vendor or repairer when the bags or the gear need one, otherwise another spot.
