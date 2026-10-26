@@ -740,6 +740,12 @@ bool GrindSpotTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     if ((int32)maxLevel < windowMax - 1)
         return false;
 
+    // Nor above it: a spot's toughest creature is at most a level over the window's top. The cells mix whatever stands
+    // there, and the bot fights all of it; a level 16-29 spot at the Tower of Althalaxx had a level 23 warrior pull
+    // level 29 Voidcallers and flee from them for half an hour.
+    if ((int32)maxLevel > windowMax + 1)
+        return false;
+
     return (int32)maxLevel >= windowMin && (int32)minLevel <= windowMax;
 }
 

@@ -562,7 +562,8 @@ A spot's point is the spawn nearest the spawns' mean, so the bot travels to grou
 Its radius reaches the farthest spawn, 20 yards at least, and arriving inside it starts the work.
 The spot carries its creatures' lowest and highest level, and it is open to a bot when that band overlaps
 the grind window above, from three levels below the character to its own level,
-when its highest creatures are within a level of the window's top,
+when its highest creatures are within a level of the window's top, on either side,
+since the bot fights whatever stands in the spot,
 and when the bot need not sell or repair first.
 The travel partitions take the nearest open spot first, as they do for every destination.
 A spot with another player inside its radius and 20 yards is not open, the bot's group aside,
