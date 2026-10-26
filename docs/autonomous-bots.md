@@ -543,7 +543,8 @@ nearly every creature it had no quest for.
 So a levelling character grinds at grind spots instead (`GrindSpotTravelDestination`).
 At startup the travel manager buckets creature spawns into cells of 60 yards, height included,
 and keeps a cell as a spot when it holds at least three spawns, of any entries, that suit a team:
-hostile to a race of that team, not elite, rare, critter, totem or civilian,
+hostile or neutral to a race of that team, neutral only when its faction has no reputation,
+not elite, rare, critter, totem or civilian,
 no npc, guard or member of a player faction, attackable, worth experience,
 on Kalimdor or the Eastern Kingdoms, outside the capitals, and not spawned by an event.
 An elite in the cell does not count, but it marks the spot, which then needs `can fight elite`;
@@ -574,7 +575,10 @@ The bot looks within 2500 yards first.
 A character outgrows its starting zone; Teldrassil tops out near level 11,
 and a level 15 warrior found nothing there that fit.
 So when no spot within 2500 yards fits, any spot on the same map counts, the nearest first,
-and only when none does, a spot on another map.
+and only when none does, a spot on another map, from level 10.
+Neutral creatures count because a start zone can have nothing else:
+below level 3 the night elves' Shadowglen has only neutral boars, nightsabers and grells,
+and a level 2 priest set sail for the kobolds of Elwynn Forest.
 A spot that far needs a route in the travel nodes, from the node nearest the bot to the node nearest the spot,
 and the nodes link walks, flights, boats, zeppelins and portals.
 Teldrassil to Darkshore goes by the Darnassus portal and the Rut'theran flight master,

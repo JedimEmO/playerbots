@@ -745,8 +745,9 @@ bool GrindSpotTravelDestination::IsPossible(const PlayerTravelInfo& info) const
 
 bool GrindSpotTravelDestination::IsHostileTo(Player* bot) const
 {
-    // The spot was built for the team by a representative race; this is the bot's own faction.
-    return GuidPosition(bot).IsHostileTo(GuidPosition(HIGHGUID_UNIT, entries.front().first), bot->GetInstanceId());
+    // The spot was built for the team by a representative race; this is the bot's own faction. Not friendly is
+    // enough, as the build takes neutral creatures (LoadGrindSpots).
+    return !GuidPosition(bot).IsFriendlyTo(GuidPosition(HIGHGUID_UNIT, entries.front().first), bot->GetInstanceId());
 }
 
 bool GrindSpotTravelDestination::IsBusy(Player* bot)
@@ -2734,9 +2735,22 @@ void TravelMgr::LoadGrindSpots(const EntryGuidps& guidpMap)
                 continue;
             bool elite = cInfo->Rank != CREATURE_ELITE_NORMAL;
 
+            // wow-playground: neutral creatures count too, the yellow ones a character attacks first: the night elves'
+            // start in Shadowglen has only neutral creatures below level 3 (faction 189), so a level 2 priest found no
+            // spot there and sailed for Elwynn's kobolds. A faction with a reputation is left alone when neutral.
+#if defined(MANGOSBOT_ONE)
+            const FactionEntry* factionEntry = sFactionStore.LookupEntry<FactionEntry>(creatureTemplate->faction);
+#else
+            const FactionEntry* factionEntry = sFactionStore.LookupEntry(creatureTemplate->faction);
+#endif
+            bool hasReputation = factionEntry && factionEntry->HasReputation();
+
             bool hostile[2];
             for (uint32 t = 0; t < 2; t++)
-                hostile[t] = teamTemplates[t] && PlayerbotAI::GetFactionReaction(teamTemplates[t], creatureTemplate) < REP_NEUTRAL;
+            {
+                ReputationRank reaction = teamTemplates[t] ? PlayerbotAI::GetFactionReaction(teamTemplates[t], creatureTemplate) : REP_FRIENDLY;
+                hostile[t] = reaction < REP_NEUTRAL || (reaction == REP_NEUTRAL && !hasReputation);
+            }
 
             if (!hostile[0] && !hostile[1])
                 continue;
@@ -3170,6 +3184,10 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
             { FLT_MAX, true }, { FLT_MAX, false } };
         for (auto& [spotDistance, sameMap] : passes)
         {
+            // wow-playground: every start zone has its spots; a character below level 10 does not sail for another.
+            if (!sameMap && info.GetLevel() < 10)
+                continue;
+
             for (auto& spot : grindSpots)
             {
                 if (sameMap && spot->GetPoint().getMapId() != center.getMapId())
