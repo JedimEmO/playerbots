@@ -278,7 +278,10 @@ void GuildBotMgr::LoadOrders()
             c.job = f[4].GetCppString();
             c.jobArgs = f[5].GetCppString();
             c.jobSeq = f[6].GetUInt32();
-            c.role = f[7].GetCppString();
+            std::string role = f[7].GetCppString();
+            if (!isNew && role != c.role)
+                c.roleChanged = true;
+            c.role = role;
             if (isNew)
                 c.offlineSince = 0;
         } while (result->NextRow());
@@ -486,9 +489,9 @@ void GuildBotMgr::ApplyRole(Character& c, Player* bot)
     // Talents already spent in a tree that does not suit the role stay: a respec is the player's to pay for.
     std::string status = (spent > 0 && !trees.empty() && !trees.count(spec.highestTree())) ? "respec needed" : "";
 
-    if (c.role != c.appliedRole)
+    if (c.roleChanged)
     {
-        c.appliedRole = c.role;
+        c.roleChanged = false;
         if (spent == 0)
         {
             // Forget the talent path picked earlier, so the next pick follows the role.

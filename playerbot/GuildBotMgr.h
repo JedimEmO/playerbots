@@ -81,7 +81,7 @@ private:
         time_t offlineSince = 0;    // when it went offline, for the relogin delay
         time_t loginRequested = 0;
         uint32 lastLevel = 0;
-        std::string appliedRole;
+        bool roleChanged = false;   // the role column changed since the talents were last steered by it
         std::string roleStatus;     // empty, or "respec needed" when talents are spent in another role's tree
         uint64 lastProgress = 0;     // level and experience, as one number
         time_t progressAt = 0;       // when it last changed
