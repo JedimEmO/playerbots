@@ -114,10 +114,26 @@ trainableSpellMap* TrainableSpellMapValue::Calculate()
 // rogue-only skill, and the Pick Lock it teaches is in no skill line.
 bool TrainableSpellsValue::CanHaveSkillsOf(TrainerSpell const* trainerSpell) const
 {
+    // SkillRaceClassInfo.dbc itself: the spell manager's copy leaves out skills missing from SkillLine.dbc, and
+    // Lockpicking's skill step raises one of those (242).
+    static const std::multimap<uint32, SkillRaceClassInfoEntry const*> raceClassInfo = []()
+    {
+        std::multimap<uint32, SkillRaceClassInfoEntry const*> info;
+        for (uint32 i = 0; i < sSkillRaceClassInfoStore.GetNumRows(); ++i)
+            if (SkillRaceClassInfoEntry const* entry = sSkillRaceClassInfoStore.LookupEntry(i))
+                info.emplace(entry->skillId, entry);
+        return info;
+    }();
+
     auto canHaveSkill = [&](uint32 skillId)
     {
-        auto skillInfo = sSpellMgr.GetSkillRaceClassInfoMapBounds(skillId);
-        return skillInfo.first == skillInfo.second || bot->GetSkillInfo(skillId);
+        auto entries = raceClassInfo.equal_range(skillId);
+        if (entries.first == entries.second)
+            return true;
+        for (auto itr = entries.first; itr != entries.second; ++itr)
+            if ((itr->second->raceMask & bot->getRaceMask()) && (itr->second->classMask & bot->getClassMask()))
+                return true;
+        return false;
     };
 
 #ifdef MANGOSBOT_TWO
