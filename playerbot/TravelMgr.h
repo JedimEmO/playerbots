@@ -542,6 +542,10 @@ namespace ai
 		std::string GetCacheCensus() const;
 	private:
 		void Clear();
+		// wow-playground: a business spawn with this many creatures hostile to both teams within CAMP_RANGE stands in
+		// a hostile camp and is no travel point (LoadQuestTravelTable).
+		static constexpr float CAMP_RANGE = 30.0f;
+		static constexpr uint32 CAMP_MIN_CREATURES = 3;
 		// wow-playground: see GrindSpotTravelDestination.
 		void LoadGrindSpots(const EntryGuidps& guidpMap);
 		std::vector<GrindSpotTravelDestination*> grindSpots;

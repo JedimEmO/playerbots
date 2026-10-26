@@ -533,6 +533,12 @@ A player's character also sells, repairs, trains, uses the bank and gets mail wi
 even in a zone whose area level is above its own.
 The area level check had kept a level 22 mage in Dustwallow Marsh from Theramore's vendors.
 
+No bot travels to a vendor, repairer, trainer, banker, auctioneer or mailbox inside a hostile camp,
+where three or more creatures hostile to both teams stand within 30 yards of it.
+The Defias Profiteer in Moonbrook sells to both teams among the Defias, and a level 19 druid fled from them there.
+The server log names the entries left out:
+`Left N business points of E entries out, inside hostile camps: ...`.
+
 ### Grind spots
 
 A grind trip without `levelling` goes to one creature entry, a few spawns here and a few there across a zone.

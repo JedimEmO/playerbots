@@ -1731,6 +1731,78 @@ void TravelMgr::LoadQuestTravelTable()
 
     sLog.outString("Loading all travel locations.");
 
+    // wow-playground: a vendor or other business inside a hostile camp is no place to sell or train. The Defias
+    // Profiteer, friendly to both teams, stands among the Defias of Moonbrook; a level 19 druid walked to him to sell
+    // and fled from his neighbours for a quarter of an hour. Creatures hostile to both teams, by map and cell.
+    std::map<std::tuple<uint32, int32, int32>, std::vector<WorldPosition>> campCells;
+    {
+        FactionTemplateEntry const* teamTemplates[2] = { sFactionTemplateStore.LookupEntry(1), sFactionTemplateStore.LookupEntry(2) }; // Human, Orc
+        for (auto& [entry, guidps] : guidpMap)
+        {
+            if (entry <= 0)
+                continue;
+
+            CreatureInfo const* cInfo = ObjectMgr::GetCreatureTemplate(entry);
+            if (!cInfo || cInfo->NpcFlags || cInfo->CreatureType == CREATURE_TYPE_CRITTER || cInfo->CreatureType == CREATURE_TYPE_TOTEM)
+                continue;
+
+            if (cInfo->ExtraFlags & (CREATURE_EXTRA_FLAG_INVISIBLE | CREATURE_EXTRA_FLAG_CIVILIAN))
+                continue;
+
+            for (auto& guidP : guidps)
+            {
+                if (!guidP.isOverworld() || guidP.GetGameEventId())
+                    continue;
+
+                CreatureData const* data = guidP.GetCreatureData();
+                if (!data)
+                    continue;
+
+                CreatureSpawnTemplate const* spawnTemplate = data->spawnTemplate;
+                uint32 faction = spawnTemplate && spawnTemplate->faction ? spawnTemplate->faction : cInfo->Faction;
+                FactionTemplateEntry const* creatureTemplate = sFactionTemplateStore.LookupEntry(faction);
+                if (!creatureTemplate)
+                    continue;
+
+                bool hostileToBoth = true;
+                for (uint32 t = 0; t < 2; t++)
+                    if (!teamTemplates[t] || PlayerbotAI::GetFactionReaction(teamTemplates[t], creatureTemplate) >= REP_NEUTRAL)
+                        hostileToBoth = false;
+
+                if (hostileToBoth)
+                    campCells[std::make_tuple(guidP.getMapId(), (int32)floor(guidP.getX() / CAMP_RANGE), (int32)floor(guidP.getY() / CAMP_RANGE))].push_back(guidP);
+            }
+        }
+    }
+
+    auto inHostileCamp = [&campCells](const WorldPosition& point)
+    {
+        int32 cx = (int32)floor(point.getX() / CAMP_RANGE);
+        int32 cy = (int32)floor(point.getY() / CAMP_RANGE);
+        uint32 count = 0;
+        for (int32 x = cx - 1; x <= cx + 1; x++)
+            for (int32 y = cy - 1; y <= cy + 1; y++)
+            {
+                auto it = campCells.find(std::make_tuple(point.getMapId(), x, y));
+                if (it == campCells.end())
+                    continue;
+
+                for (auto& creature : it->second)
+                    if (creature.distance(point) <= CAMP_RANGE)
+                        count++;
+            }
+        return count >= CAMP_MIN_CREATURES;
+    };
+
+    auto isBusiness = [](TravelDestinationPurpose purpose)
+    {
+        return purpose == TravelDestinationPurpose::Vendor || purpose == TravelDestinationPurpose::Repair || purpose == TravelDestinationPurpose::Mail ||
+            purpose == TravelDestinationPurpose::Bank || purpose == TravelDestinationPurpose::Trainer || purpose == TravelDestinationPurpose::AH;
+    };
+
+    uint32 campSpawns = 0;
+    std::set<int32> campEntries;
+
     for (auto& [entry, purpose] : GAI_VALUE(EntryTravelPurposeMap, "entry travel purpose"))
     {
         std::vector<TravelDestination*> dests;
@@ -1779,12 +1851,27 @@ void TravelMgr::LoadQuestTravelTable()
         {
             pointsMap.insert(std::make_pair(guidP.GetRawValue(), guidP));
 
+            bool inCamp = guidP.isOverworld() && inHostileCamp(guidP);
+
             for (auto tLoc : dests)
             {
+                if (inCamp && isBusiness(tLoc->GetPurpose()))
+                {
+                    campSpawns++;
+                    campEntries.insert(entry);
+                    continue;
+                }
+
                 tLoc->AddPoint(&pointsMap.at(guidP.GetRawValue()));
             }
         }       
     }     
+
+    std::ostringstream campOut;
+    for (int32 entry : campEntries)
+        if (CreatureInfo const* cInfo = entry > 0 ? ObjectMgr::GetCreatureTemplate(entry) : nullptr)
+            campOut << " " << cInfo->Name << ",";
+    sLog.outString("Left %u business points of %u entries out, inside hostile camps:%s", campSpawns, (uint32)campEntries.size(), campOut.str().c_str());
 
     // wow-playground: see GrindSpotTravelDestination.
     sLog.outString("Loading grind spots.");
