@@ -75,7 +75,7 @@ namespace
     // The jobs the engine knows. Anything else fails with "unknown job".
     bool IsKnownJob(const std::string& job)
     {
-        return job == "idle" || job == "level";
+        return job == "idle" || job == "level" || job == "party";
     }
 }
 
@@ -435,8 +435,23 @@ void GuildBotMgr::CheckJobs()
             }
         }
 
+        if (!c.partyLeader.empty() && (c.status != "working" || c.job != "party"))
+            LeaveParty(c, bot);
+
         if (c.status != "working")
             continue;
+
+        if (c.job == "party")
+        {
+            std::string why = KeepParty(c, bot);
+            if (why != c.reason)
+            {
+                c.reason = why;
+                if (why.empty())
+                    Event(guid, "party", "joined " + c.partyLeader);
+            }
+            continue;
+        }
 
         if (c.job == "level" && !c.stalled && now - c.progressAt >= STALL_SECONDS)
         {
@@ -496,6 +511,91 @@ void GuildBotMgr::ApplyRole(Character& c, Player* bot)
         c.roleStatus = status;
         if (!status.empty())
             Event(c.guid, "respec_needed", c.role);
+    }
+}
+
+std::string GuildBotMgr::KeepParty(Character& c, Player* bot)
+{
+    std::string leaderName = ArgValue(c, "leader");
+    if (!normalizePlayerName(leaderName))
+        return "no leader given";
+    if (leaderName == c.name)
+        return "cannot lead its own party";
+
+    Player* leader = ObjectAccessor::FindPlayerByName(leaderName.c_str());
+    if (!leader || !leader->IsInWorld())
+        return "waiting for " + leaderName + " to be online";
+    // Only the player's own characters: the same account, as the invite rule has it.
+    if (leader->GetSession()->GetAccountId() != bot->GetSession()->GetAccountId())
+        return leaderName + " is not on the same account";
+
+    Group* group = bot->GetGroup();
+    if (group && group->IsMember(leader->GetObjectGuid()))
+    {
+        c.partyLeader = leaderName;
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        if (ai && ai->GetMaster() != leader && group->IsLeader(leader->GetObjectGuid()))
+        {
+            ai->SetMaster(leader);
+            ai->ResetStrategies(false);
+        }
+        return "";
+    }
+
+    if (group)
+        bot->RemoveFromGroup();
+
+    Group* leaderGroup = leader->GetGroup();
+    if (leaderGroup && !leaderGroup->IsLeader(leader->GetObjectGuid()))
+        return leaderName + " is in a group it does not lead";
+    if (leaderGroup && leaderGroup->IsFull())
+        return leaderName + "'s group is full";
+
+    // Invite and accept, the way the client does, so the core forms the group itself.
+    if (!leaderGroup)
+    {
+        leaderGroup = leader->GetGroupInvite();
+        if (!leaderGroup || !leaderGroup->IsLeader(leader->GetObjectGuid()))
+        {
+            leaderGroup = new Group();
+            if (!leaderGroup->AddLeaderInvite(leader))
+            {
+                delete leaderGroup;
+                return "could not form a group with " + leaderName;
+            }
+        }
+    }
+    if (!leaderGroup->AddInvite(bot))
+        return "could not be invited to " + leaderName + "'s group";
+
+    WorldPacket p;
+    bot->GetSession()->HandleGroupAcceptOpcode(p);
+
+    if (!bot->GetGroup() || !bot->GetGroup()->IsMember(leader->GetObjectGuid()))
+        return "could not join " + leaderName + "'s group";
+
+    c.partyLeader = leaderName;
+    if (PlayerbotAI* ai = bot->GetPlayerbotAI())
+    {
+        ai->SetMaster(leader);
+        ai->ResetStrategies(false);
+    }
+    return "";
+}
+
+void GuildBotMgr::LeaveParty(Character& c, Player* bot)
+{
+    Player* leader = ObjectAccessor::FindPlayerByName(c.partyLeader.c_str());
+    Group* group = bot->GetGroup();
+    if (group && (!leader || group->IsMember(leader->GetObjectGuid())))
+        bot->RemoveFromGroup();
+
+    Event(c.guid, "party_left", c.partyLeader);
+    c.partyLeader.clear();
+    if (PlayerbotAI* ai = bot->GetPlayerbotAI())
+    {
+        ai->SetMaster(nullptr);
+        ai->ResetStrategies(false);
     }
 }
 
@@ -631,7 +731,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
     return {
         "guildbot add <name> [job [args]]       make a character a guild character",
         "guildbot create <account> <name> <race> <class> [male|female]   create a level 1 character on an account",
-        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>]",
+        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>",
         "guildbot role <name> tank|healer|dps|none   the role its talents follow",
         "guildbot on|off <name>                 switch the engine's play on or off",
         "guildbot remove <name>                 stop treating it as a guild character",

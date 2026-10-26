@@ -87,6 +87,7 @@ private:
         time_t progressAt = 0;       // when it last changed
         bool stalled = false;
         bool dead = false;
+        std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
     };
 
     void EnsureTables();
@@ -97,6 +98,9 @@ private:
     void WriteState();
     void WriteState(const Character& c, Player* bot);
     void ApplyRole(Character& c, Player* bot);
+    // The party job: be in the leader's group. Returns why not, or empty when it is.
+    std::string KeepParty(Character& c, Player* bot);
+    void LeaveParty(Character& c, Player* bot);
 
     void Event(uint32 guid, const std::string& kind, const std::string& detail = "");
     Character* Find(const std::string& name);
