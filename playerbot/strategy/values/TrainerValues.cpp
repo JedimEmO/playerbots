@@ -1,5 +1,6 @@
 
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "TrainerValues.h"
 #include "SharedValueContext.h"
 #include "playerbot/PlayerbotHelpMgr.h"
@@ -128,6 +129,11 @@ std::vector<TrainerSpell const*> TrainableSpellsValue::Calculate()
             if (trainerType == TRAINER_TYPE_MOUNTS && requirement != bot->getRace())
                 continue;
 
+            // A profession is its player's choice: a guild character learns only the one its job names.
+            if (trainerType == TRAINER_TYPE_TRADESKILLS && !sGuildBotMgr.MayLearnSkill(bot, requirement))
+                continue;
+            bool orderedProfession = trainerType == TRAINER_TYPE_TRADESKILLS && sGuildBotMgr.IsGuildBot(bot) && !bot->HasSkill(requirement);
+
             for (auto& [trainerSpell, trainers] : trainerSpellList)
             {
                 uint32 reqLevel = 0;
@@ -139,9 +145,9 @@ std::vector<TrainerSpell const*> TrainableSpellsValue::Calculate()
 
                 //Skip initial profession training.
 #ifdef MANGOSBOT_ZERO
-                if (bot->GetLevel() < 10 && sSpellMgr.IsProfessionSpell(trainerSpell->learnedSpell) && sSpellMgr.GetSpellRank(trainerSpell->learnedSpell) == 1)
+                if (!orderedProfession && bot->GetLevel() < 10 && sSpellMgr.IsProfessionSpell(trainerSpell->learnedSpell) && sSpellMgr.GetSpellRank(trainerSpell->learnedSpell) == 1)
 #else
-                if (bot->GetLevel() < 10 && sSpellMgr.IsProfessionSpell(trainerSpell->learnedSpell[0]) && sSpellMgr.GetSpellRank(trainerSpell->learnedSpell[0]) == 1)
+                if (!orderedProfession && bot->GetLevel() < 10 && sSpellMgr.IsProfessionSpell(trainerSpell->learnedSpell[0]) && sSpellMgr.GetSpellRank(trainerSpell->learnedSpell[0]) == 1)
 #endif
                     continue;
 

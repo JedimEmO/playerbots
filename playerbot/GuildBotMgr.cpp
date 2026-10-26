@@ -75,7 +75,7 @@ namespace
     // The jobs the engine knows. Anything else fails with "unknown job".
     bool IsKnownJob(const std::string& job)
     {
-        return job == "idle" || job == "level" || job == "party" || job == "farm";
+        return job == "idle" || job == "level" || job == "party" || job == "farm" || job == "learn";
     }
 }
 
@@ -132,6 +132,27 @@ bool GuildBotMgr::IsJobItem(uint32 guid, uint32 itemId) const
     return GetFarmOrder(guid, farmItem, amount) && farmItem == itemId;
 }
 
+uint32 GuildBotMgr::ProfessionSkill(const std::string& name)
+{
+    static const std::map<std::string, uint32> skills = {
+        { "alchemy", SKILL_ALCHEMY }, { "blacksmithing", SKILL_BLACKSMITHING }, { "enchanting", SKILL_ENCHANTING },
+        { "engineering", SKILL_ENGINEERING }, { "herbalism", SKILL_HERBALISM }, { "leatherworking", SKILL_LEATHERWORKING },
+        { "mining", SKILL_MINING }, { "skinning", SKILL_SKINNING }, { "tailoring", SKILL_TAILORING },
+        { "cooking", SKILL_COOKING }, { "first_aid", SKILL_FIRST_AID }, { "fishing", SKILL_FISHING },
+    };
+    auto it = skills.find(name);
+    return it == skills.end() ? 0 : it->second;
+}
+
+bool GuildBotMgr::MayLearnSkill(Player* bot, uint32 skill) const
+{
+    if (!IsGuildBot(bot) || bot->HasSkill(skill))
+        return true;
+
+    auto it = characters.find(bot->GetGUIDLow());
+    return GetActiveJob(bot->GetGUIDLow()) == "learn" && ProfessionSkill(ArgValue(it->second, "profession")) == skill;
+}
+
 std::string GuildBotMgr::ArgValue(const Character& c, const std::string& key) const
 {
     std::istringstream in(c.jobArgs);
@@ -167,6 +188,18 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     }
 
     const std::string job = GetActiveJob(player->GetGUIDLow());
+
+    if (job == "learn")
+    {
+        // Walk to a trainer of the profession and learn it there; the town services as usual, no grinding.
+        engine->addStrategies("collision", "travel", "rpg", "free", "guild level", NULL);
+        engine->removeStrategy("rpg quest");
+        engine->removeStrategy("rpg explore");
+        engine->removeStrategy("rpg player");
+        engine->removeStrategy("rpg bg");
+        engine->removeStrategy("rpg guild");
+        return;
+    }
 
     if (job == "farm")
     {
@@ -419,10 +452,23 @@ void GuildBotMgr::ApplyOrders()
         c.progressAt = 0;
         c.stalled = false;
         uint32 farmItem = uint32(atoi(ArgValue(c, "item").c_str()));
+        uint32 learnSkill = ProfessionSkill(ArgValue(c, "profession"));
         if (c.job == "farm" && (!farmItem || !sObjectMgr.GetItemPrototype(farmItem)))
         {
             c.status = "failed";
             c.reason = "farm needs item=<item id> of an item that exists";
+            Event(guid, "job_failed", c.reason);
+        }
+        else if (c.job == "learn" && !learnSkill)
+        {
+            c.status = "failed";
+            c.reason = "learn needs profession=<alchemy|blacksmithing|enchanting|engineering|herbalism|leatherworking|mining|skinning|tailoring|cooking|first_aid|fishing>";
+            Event(guid, "job_failed", c.reason);
+        }
+        else if (c.job == "learn" && IsPrimaryProfessionSkill(learnSkill) && !bot->HasSkill(learnSkill) && !bot->GetFreePrimaryProfessionPoints())
+        {
+            c.status = "failed";
+            c.reason = "already has two primary professions";
             Event(guid, "job_failed", c.reason);
         }
         else if (IsKnownJob(c.job))
@@ -489,6 +535,20 @@ void GuildBotMgr::CheckJobs()
                 c.reason = why;
                 if (why.empty())
                     Event(guid, "party", "joined " + c.partyLeader);
+            }
+            continue;
+        }
+
+        if (c.job == "learn")
+        {
+            uint32 skill = ProfessionSkill(ArgValue(c, "profession"));
+            if (skill && bot->HasSkill(skill))
+            {
+                c.status = "done";
+                c.reason = "knows " + ArgValue(c, "profession");
+                Event(guid, "job_done", "learn " + c.reason);
+                if (bot->GetPlayerbotAI())
+                    bot->GetPlayerbotAI()->ResetStrategies(false);
             }
             continue;
         }
@@ -798,7 +858,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
     return {
         "guildbot add <name> [job [args]]       make a character a guild character",
         "guildbot create <account> <name> <race> <class> [male|female]   create a level 1 character on an account",
-        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>, farm item=<id> [amount=<n>]",
+        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>, farm item=<id> [amount=<n>], learn profession=<name>",
         "guildbot role <name> tank|healer|dps|none   the role its talents follow",
         "guildbot on|off <name>                 switch the engine's play on or off",
         "guildbot remove <name>                 stop treating it as a guild character",

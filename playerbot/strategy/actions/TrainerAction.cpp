@@ -1,5 +1,6 @@
 
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "TrainerAction.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/BudgetValues.h"
@@ -84,6 +85,22 @@ bool TrainerAction::Iterate(Player* requester, Creature* creature, TrainerSpellA
 
         if (!tSpell)
             continue;
+
+        // The same profession rule as the trainable spells value: the skill is the spell's requirement,
+        // or the one the learned spell teaches.
+        if (creature->GetCreatureInfo()->TrainerType == TRAINER_TYPE_TRADESKILLS && sGuildBotMgr.IsGuildBot(bot))
+        {
+            uint32 skill = tSpell->reqSkill;
+#ifdef MANGOSBOT_ZERO
+            SpellEntry const* learned = sServerFacade.LookupSpellInfo(tSpell->learnedSpell);
+#else
+            SpellEntry const* learned = sServerFacade.LookupSpellInfo(tSpell->learnedSpell[0]);
+#endif
+            if (!skill && learned)
+                skill = learned->EffectMiscValue[1];
+            if (skill && !sGuildBotMgr.MayLearnSkill(bot, skill))
+                continue;
+        }
 
         uint32 reqLevel = 0;
 

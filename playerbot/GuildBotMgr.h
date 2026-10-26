@@ -42,6 +42,11 @@ public:
     bool GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const;
     // True for the item the character's job is collecting, which it must keep.
     bool IsJobItem(uint32 guid, uint32 itemId) const;
+    // Whether the character may learn from a profession trainer for this skill: always for a bot that is not a
+    // guild character; for one, only ranks of a profession it has, or the profession its learn job names.
+    bool MayLearnSkill(Player* bot, uint32 skill) const;
+    // The skill a profession name stands for, such as herbalism, or 0.
+    static uint32 ProfessionSkill(const std::string& name);
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;
