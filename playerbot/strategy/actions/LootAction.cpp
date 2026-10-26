@@ -58,9 +58,16 @@ bool OpenLootAction::Execute(Event& event)
     // what the bot last did with a loot window, since it is a bug when it happens.
     if (!lootObject.IsEmpty() && !AI_VALUE(LootObjectStack*, "available loot")->NoteOpen(lootObject.guid))
     {
-        WorldObject* wo = ai->GetWorldObject(lootObject.guid);
+        std::string name = "an object";
+        if (lootObject.guid.IsGameObject())
+        {
+            if (GameObjectInfo const* info = sObjectMgr.GetGameObjectInfo(lootObject.guid.GetEntry()))
+                name = info->name;
+        }
+        else if (WorldObject* wo = ai->GetWorldObject(lootObject.guid))
+            name = wo->GetName();
         sLog.outString("Loot: %s gives up on %s %u after opening it again and again; last loot window: %s", bot->GetName(),
-            wo ? wo->GetName() : "an object", lootObject.guid.GetCounter(),
+            name.c_str(), lootObject.guid.GetCounter(),
             AI_VALUE2(std::string, "manual string", "last store loot").c_str());
         context->GetValue<LootObject>("loot target")->Set(LootObject());
         return false;
@@ -285,9 +292,13 @@ bool StoreLootAction::Execute(Event& event)
 
     bot->SetLootGuid(guid);
 
-    // wow-playground: what this loot window came to, item by item, for OpenLootAction's give-up line.
+    // wow-playground: what this loot window came to, item by item, for OpenLootAction's give-up line. A loot error
+    // (Player::SendLootError) is the guid, loot type 0 and the error, ten bytes.
     std::ostringstream stored;
-    stored << guid.GetCounter() << ", " << uint32(items) << " items at " << time(nullptr) << ":";
+    stored << guid.GetCounter() << ", loot type " << uint32(loot_type);
+    if (p.size() == 10)
+        stored << ", loot error " << uint32(p.contents()[9]);
+    stored << ", " << uint32(items) << " items at " << time(nullptr) << ":";
     auto note = [&](uint32 itemId, uint32 count, const char* what)
     {
         ItemPrototype const* p = sItemStorage.LookupEntry<ItemPrototype>(itemId);

@@ -167,7 +167,10 @@ one it cannot reach in time is given up on, as for any loot.
 Any bot also gives up on a loot object for ten minutes when it is about to open it a fourth time within two minutes
 with nothing taken since, as the object still being there means its loot was never taken;
 a mining vein that gives loot several times over is opened as often as it gives,
-and the server log says so in a line starting `Loot:` with what the bot did with its last loot window.
+and the server log says so in a line starting `Loot:` with what the bot did with its last loot window:
+its loot type, a loot error if the server sent one, and each item with what became of it.
+A node someone already gathered and that has not despawned yet no longer counts as lootable:
+its items stay in the loot, marked with who took them, and the bot now reads them as the loot window would show them.
 A priest cast Herb Gathering on one Peacebloom node every five seconds for ten minutes before this rule.
 While a bag slot is free, it also loots the item into a new stack,
 where other bots with bags more than 80% full only top up stacks they have.

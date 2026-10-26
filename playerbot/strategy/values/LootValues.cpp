@@ -423,6 +423,12 @@ bool ShouldLootObject::Calculate()
 		if (!lItem->itemId)
 			continue;
 
+		// wow-playground: only what the loot window would show the bot. A chest's or gathering node's items stay in
+		// the list once taken, marked with who took them, so a node already gathered and not yet despawned counted as
+		// lootable: a priest cast Herb Gathering on one four times over for an empty loot window.
+		if (lItem->GetSlotTypeForSharedLoot(bot, object->m_loot) == MAX_LOOT_SLOT_TYPE)
+			continue;
+
 		uint32 canLootAmount = AI_VALUE2(uint32, "stack space for item", lItem->itemId);
 
 		if (canLootAmount < lItem->count)
