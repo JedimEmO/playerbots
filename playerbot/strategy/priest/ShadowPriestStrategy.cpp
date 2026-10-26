@@ -10,10 +10,15 @@ public:
     ShadowPriestStrategyActionNodeFactory()
     {
         creators["dispersion"] = &dispersion;
+        creators["mind flay"] = &mind_flay;
     }
 
 private:
     ACTION_NODE_A(dispersion, "dispersion", "mana potion");
+
+    // wow-playground: Mind Flay is a level-20 talent, so a shadow priest below it had nothing to cast between Mind
+    // Blasts and stood in the fight at full mana. Smite fills in, as Wrath does for a balance druid's Starfire.
+    ACTION_NODE_A(mind_flay, "mind flay", "smite");
 };
 
 ShadowPriestStrategy::ShadowPriestStrategy(PlayerbotAI* ai) : PriestStrategy(ai)

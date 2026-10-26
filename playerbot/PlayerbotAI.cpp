@@ -1324,11 +1324,19 @@ void PlayerbotAI::OnDeath()
         {
             // wow-playground: a player's character's deaths in the server log, to weigh against its flights and
             // give-ups (OutNumberedTrigger, CheckTargetProgress).
+            // The server has emptied the attacker list by now, so the line reads the bot's last target and its
+            // cached attackers value, which the death has not recalculated yet.
             if (sRandomPlayerbotMgr.IsAutonomousBot(bot))
             {
-                Unit* killer = bot->getAttackers().empty() ? nullptr : *bot->getAttackers().begin();
-                sLog.outString("Playerbot %s died, level %u, to %s with %u attackers.", bot->GetName(), bot->GetLevel(),
-                    killer ? killer->GetName() : "nothing", (uint32)bot->getAttackers().size());
+                Unit* killer = GetUnit(AI_VALUE_LAZY(ObjectGuid, "current target"));
+                uint32 attackers = (uint32)AI_VALUE_LAZY(std::list<ObjectGuid>, "attackers").size();
+                if (killer)
+                    sLog.outString("Playerbot %s died, level %u, to %s (level %u, %u%% health) with %u attackers.",
+                        bot->GetName(), bot->GetLevel(), killer->GetName(), killer->GetLevel(),
+                        (uint32)killer->GetHealthPercent(), attackers);
+                else
+                    sLog.outString("Playerbot %s died, level %u, with no target and %u attackers.", bot->GetName(),
+                        bot->GetLevel(), attackers);
             }
 
             SET_AI_VALUE(uint32, "death count", AI_VALUE(uint32, "death count") + 1);
