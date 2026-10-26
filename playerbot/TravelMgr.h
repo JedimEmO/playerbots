@@ -2,6 +2,7 @@
 
 #include "strategy/AiObject.h"
 #include <boost/functional/hash.hpp>
+#include <unordered_set>
 #include "GuidPosition.h"
 #include "strategy/values/TravelValues.h"
 #include "WorldSquare.h"
@@ -66,6 +67,8 @@ namespace ai
 		bool GetBoolValue2(const std::string& valueName, const std::string& qualifier) const { return boolValues.at(valueName + "::" + qualifier); };
 		uint8 GetUint8Value(const std::string& valueName) const { return uint8Values.at(valueName);};
 		uint8 GetUint32Value(const std::string& valueName) const { return uint32Values.at(valueName); };
+		// wow-playground: a grind spot the bot left less than GrindSpotTravelDestination::LEFT_SECONDS ago.
+		bool HasLeftGrindSpot(uint32 id) const { return leftGrindSpots.find(id) != leftGrindSpots.end(); }
 
 	private:
 		WorldPosition position;
@@ -78,6 +81,7 @@ namespace ai
 		uint32 money = 0;
 
 		focusQuestTravelList focusList = {};
+		std::unordered_set<uint32> leftGrindSpots;
 
 		std::unordered_map<std::string, bool> boolValues = 
 		{
@@ -352,7 +356,9 @@ namespace ai
 		// For debug why: how long the bot has been working the spot and without a fight, and how many creatures live.
 		std::string GetWorkStatus(Player* bot) const;
 		const WorldPosition& GetPoint() const { return point; }
-		// Not again for LEFT_SECONDS, so the next choice is another spot.
+		uint32 GetId() const { return id; }
+		// Not again for LEFT_SECONDS, so the next choice is another spot. The spots left are also kept in "manual
+		// string" "grind spots left", as id:time pairs, which PlayerTravelInfo reads for TravelMgr::GetDestinations.
 		void Leave(Player* bot, const std::string& reason) const;
 	private:
 		bool IsHostileTo(Player* bot) const;

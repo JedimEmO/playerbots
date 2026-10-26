@@ -46,6 +46,17 @@ PlayerTravelInfo::PlayerTravelInfo(Player* player)
 
     focusList = AI_VALUE(focusQuestTravelList, "focus travel target");
 
+    // wow-playground: the grind spots left lately (GrindSpotTravelDestination::Leave), which the nearest search passes over.
+    time_t now = time(0);
+    std::istringstream left(AI_VALUE2(std::string, "manual string", "grind spots left"));
+    for (std::string pair; std::getline(left, pair, ',');)
+    {
+        uint32 id = 0;
+        long long at = 0;
+        if (sscanf(pair.c_str(), "%u:%lld", &id, &at) == 2 && at + GrindSpotTravelDestination::LEFT_SECONDS > now)
+            leftGrindSpots.insert(id);
+    }
+
     for (auto& [valueName, value] : boolValues)
         value = AI_VALUE(bool, valueName);
 
@@ -883,7 +894,22 @@ void GrindSpotTravelDestination::Leave(Player* bot, const std::string& reason) c
 {
     PlayerbotAI* ai = bot->GetPlayerbotAI();
     AiObjectContext* context = ai->GetAiObjectContext();
-    SET_AI_VALUE2(time_t, "manual time", "grind spot left " + std::to_string(id), time(0));
+    time_t now = time(0);
+    SET_AI_VALUE2(time_t, "manual time", "grind spot left " + std::to_string(id), now);
+
+    // The list GetDestinations reads, through PlayerTravelInfo: the spots still within LEFT_SECONDS, and this one.
+    std::ostringstream kept;
+    std::istringstream left(AI_VALUE2(std::string, "manual string", "grind spots left"));
+    for (std::string pair; std::getline(left, pair, ',');)
+    {
+        uint32 otherId = 0;
+        long long at = 0;
+        if (sscanf(pair.c_str(), "%u:%lld", &otherId, &at) == 2 && otherId != id && at + LEFT_SECONDS > now)
+            kept << otherId << ":" << at << ",";
+    }
+    kept << id << ":" << (long long)now;
+    SET_AI_VALUE2(std::string, "manual string", "grind spots left", kept.str());
+
     ai->TellDebug(ai->GetMaster(), "Leaving " + GetTitle() + ": " + reason + ".", "debug travel");
 }
 
@@ -3296,7 +3322,9 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
     // wow-playground: a levelling character grinds at grind spots, the nearest first by the partitions, within
     // GrindSpotTravelDestination::MAX_DISTANCE. A character that outgrew the zone finds none there; then any spot on
     // its map counts, and only then the other maps. GrindSpotTravelDestination::IsActive keeps those it has no route to out. The
-    // single entry destinations are left out, unless no spot is possible anywhere.
+    // single entry destinations are left out, unless no spot is possible anywhere. The spots the bot left lately do not
+    // count: a level 26 paladin left the one spot near Gnomeregan for its level, and with it still counted, the search
+    // never went on to the spots farther out, and the bot stood without a destination for an hour.
     bool useGrindSpots = purposeFlag != (uint32)TravelDestinationPurpose::None && (purposeFlag & (uint32)TravelDestinationPurpose::Grind) &&
         entries.empty() && info.GetBoolValue2("has strategy", "levelling");
 
@@ -3323,6 +3351,9 @@ DestinationList TravelMgr::GetDestinations(const PlayerTravelInfo& info, uint32 
                     continue;
 
                 if (onlyPossible && !spot->IsPossible(info))
+                    continue;
+
+                if (info.HasLeftGrindSpot(spot->GetId()))
                     continue;
 
                 float distance = spot->DistanceTo(center);

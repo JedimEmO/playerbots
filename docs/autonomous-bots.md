@@ -605,8 +605,12 @@ and the nodes link walks, flights, boats, zeppelins and portals.
 Teldrassil to Darkshore goes by the Darnassus portal and the Rut'theran flight master,
 Kalimdor to the Eastern Kingdoms by the Ratchet boat.
 A spot the bot fails to walk to, after its move retries, counts as left.
+A spot the bot left in the last 15 minutes is passed over in that search,
+so a bot that left the one spot near it for its level looks farther away.
+A level 26 paladin left the Addled Lepers by Gnomeregan, out of reach behind the elevator,
+and stood without a destination for an hour while the search kept finding only them.
 Only when no spot fits anywhere does the bot fall back to the single entry destinations;
-a spot it left recently still counts as fitting, so the bot looks farther away instead.
+a spot it left recently still counts as fitting there, so the fallback waits for a spot to come back.
 
 While the bot works a spot, it attacks any creature in sight, quest or not.
 With nothing to fight it walks to one of the spot's spawns at least 15 yards away,
