@@ -786,7 +786,13 @@ bool GrindSpotTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& i
         return false;
 
     TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
-    if (target->GetDestination() != this || target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
+
+    // wow-playground: random bots crowd the starter zones, and a spot of three to five spawns feeds one character. A
+    // spot with other players in it is not picked; the partitions then offer the next nearest, a little farther.
+    if (target->GetDestination() != this)
+        return !CountOtherPlayers(bot);
+
+    if (target->GetStatus() != TravelStatus::TRAVEL_STATUS_WORK)
         return true;
 
     // Working the spot. It stays active while the bot keeps fighting, looting and resting.
@@ -797,11 +803,26 @@ bool GrindSpotTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& i
     time_t busy = std::max(AI_VALUE2(time_t, "manual time", "grind spot busy"), now - (time_t)worked);
     uint32 idle = now - busy;
 
+    // wow-playground: another player taking the spot's creatures: half of them or more dead while someone else is
+    // there, for CROWDED_SECONDS on end. The bot moves on instead of walking between empty spawn points.
+    uint32 crowdedFor = 0;
+    if (CountAlive(bot) * 2 <= spawns.size() && CountOtherPlayers(bot))
+    {
+        time_t crowded = AI_VALUE2(time_t, "manual time", "grind spot crowded");
+        if (!crowded || crowded < now - (time_t)worked)
+            SET_AI_VALUE2(time_t, "manual time", "grind spot crowded", crowded = now);
+        crowdedFor = now - crowded;
+    }
+    else
+        SET_AI_VALUE2(time_t, "manual time", "grind spot crowded", 0);
+
     std::string reason;
     if (idle >= IDLE_SECONDS)
         reason = "nothing to fight for " + std::to_string(idle) + "s";
     else if (worked >= MAX_SECONDS)
         reason = "worked it for " + std::to_string(worked / MINUTE) + " minutes";
+    else if (crowdedFor >= CROWDED_SECONDS)
+        reason = "others take its creatures, " + std::to_string(crowdedFor) + "s";
 
     if (reason.empty())
         return true;
@@ -816,6 +837,47 @@ void GrindSpotTravelDestination::Leave(Player* bot, const std::string& reason) c
     AiObjectContext* context = ai->GetAiObjectContext();
     SET_AI_VALUE2(time_t, "manual time", "grind spot left " + std::to_string(id), time(0));
     ai->TellDebug(ai->GetMaster(), "Leaving " + GetTitle() + ": " + reason + ".", "debug travel");
+}
+
+uint32 GrindSpotTravelDestination::CountOtherPlayers(Player* bot) const
+{
+    if (bot->GetMapId() != point.getMapId() || !bot->GetMap())
+        return 0;
+
+    // The players of the bot's own map, a short list next to the map's creatures, walked on the bot's map thread.
+    float range = radius + CROWD_MARGIN;
+    uint32 count = 0;
+    Group* group = bot->GetGroup();
+    for (auto& ref : bot->GetMap()->GetPlayers())
+    {
+        Player* player = ref.getSource();
+        if (!player || player == bot || !player->IsInWorld() || !player->IsAlive() || player->IsTaxiFlying())
+            continue;
+
+        if (group && group->IsMember(player->GetObjectGuid()))
+            continue;
+
+        // One far above the spot's creatures gets nothing from them and does not stay.
+        if (player->GetLevel() > maxLevel + 10)
+            continue;
+
+        if (point.sqDistance2d(WorldPosition(player)) <= range * range)
+            count++;
+    }
+
+    return count;
+}
+
+uint32 GrindSpotTravelDestination::CountAlive(Player* bot) const
+{
+    uint32 alive = 0;
+    for (auto& spawn : spawns)
+    {
+        Creature* creature = spawn.GetCreature(bot->GetInstanceId());
+        if (creature && creature->IsInWorld() && creature->IsAlive())
+            alive++;
+    }
+    return alive;
 }
 
 bool GrindSpotTravelDestination::IsRoutable(Player* bot) const
@@ -867,16 +929,9 @@ std::string GrindSpotTravelDestination::GetWorkStatus(Player* bot) const
     AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
     TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
 
-    uint32 alive = 0;
-    for (auto& spawn : spawns)
-    {
-        Creature* creature = spawn.GetCreature(bot->GetInstanceId());
-        if (creature && creature->IsInWorld() && creature->IsAlive())
-            alive++;
-    }
-
     std::ostringstream out;
-    out << "grind spot " << id << ": " << alive << "/" << spawns.size() << " alive, radius " << uint32(radius) << "y";
+    out << "grind spot " << id << ": " << CountAlive(bot) << "/" << spawns.size() << " alive, radius " << uint32(radius) << "y";
+    out << ", " << CountOtherPlayers(bot) << " other players";
 
     if (target->GetDestination() == this && target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK)
     {
@@ -885,6 +940,8 @@ std::string GrindSpotTravelDestination::GetWorkStatus(Player* bot) const
         time_t busy = std::max(AI_VALUE2(time_t, "manual time", "grind spot busy"), now - (time_t)worked);
         out << " | working " << worked / MINUTE << "m" << worked % MINUTE << "s of " << MAX_SECONDS / MINUTE << "m";
         out << " | no fight for " << uint32(now - busy) << "s of " << IDLE_SECONDS << "s";
+        if (time_t crowded = AI_VALUE2(time_t, "manual time", "grind spot crowded"))
+            out << " | crowded for " << uint32(now - crowded) << "s of " << CROWDED_SECONDS << "s";
     }
 
     return out.str();

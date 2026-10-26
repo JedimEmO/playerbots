@@ -505,6 +505,10 @@ the grind window above, from three levels below the character to its own level,
 when its highest creatures are within a level of the window's top,
 and when the bot need not sell or repair first.
 The travel partitions take the nearest open spot first, as they do for every destination.
+A spot with another player inside its radius and 20 yards is not open, the bot's group aside,
+and players more than ten levels above its creatures, who get nothing from them, aside too.
+Random bots crowd the starting zones, and three to five spawns feed one character,
+so the bot takes the next spot, a little farther, instead.
 The zone's area level does not count for a spot; the creatures' own levels decide.
 
 The bot looks within 2500 yards first.
@@ -526,7 +530,9 @@ one with a living creature when there is one, trying five until one has a path.
 That walk is the one trigger of `levelling`, at 1.5, below eating, drinking, looting and attacking.
 Fighting, looting and resting count as work; a fight counts when it ends, since the spot is checked out of combat.
 The spot is checked whenever the bot stands, or has been moving for ten seconds without getting anywhere.
-After 75 seconds without work, or 25 minutes in all, the bot leaves the spot,
+After 75 seconds without work, 25 minutes in all,
+or two minutes on end with half its creatures or more dead while another player is there,
+the bot leaves the spot,
 and does not pick it again for 15 minutes.
 Full bags or worn gear, with a vendor or repairer known, end the work at once.
 A trainer trip waits until the spot ends, which takes at most 25 minutes.
@@ -534,7 +540,8 @@ The next trip starts a second later: a vendor or repairer when the bags or the g
 
 `.rndbot do <bot> debug why` names the spot on the travel line,
 for instance `grind spot [Riverpaw Gnoll, Riverpaw Scout] L11-13 (7 spawns)`,
-and adds a line below it with the living creatures, the radius, the time worked and the time without a fight.
+and adds a line below it with the living creatures, the radius, the other players there,
+the time worked, the time without a fight and the time it has been crowded.
 `debug travel` reports why the bot left a spot.
 
 ## Where they differ from random bots

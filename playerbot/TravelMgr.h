@@ -328,6 +328,8 @@ namespace ai
 		static constexpr uint32 IDLE_SECONDS = 75;
 		static constexpr uint32 MAX_SECONDS = 25 * MINUTE;
 		static constexpr uint32 LEFT_SECONDS = 15 * MINUTE;
+		static constexpr float CROWD_MARGIN = 20.0f;
+		static constexpr uint32 CROWDED_SECONDS = 2 * MINUTE;
 
 		GrindSpotTravelDestination(uint32 id, Team team, const std::vector<AsyncGuidPosition>& spawns, bool hasElite);
 
@@ -349,6 +351,9 @@ namespace ai
 	private:
 		bool IsHostileTo(Player* bot) const;
 		bool IsRoutable(Player* bot) const;
+		// Other players, the bot's group aside, within the radius and CROWD_MARGIN, who could take its creatures.
+		uint32 CountOtherPlayers(Player* bot) const;
+		uint32 CountAlive(Player* bot) const;
 		static bool IsBusy(Player* bot);
 
 		uint32 id;
