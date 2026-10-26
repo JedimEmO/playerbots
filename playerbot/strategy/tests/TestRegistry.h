@@ -21,6 +21,7 @@ namespace ai
         static void RegisterTeleportTests();
         static void RegisterLabTests();
         static void RegisterLabMicroTests();
+        static void RegisterFleeTests();
         static void RegisterLabStayGuardTests();
 
         static void RegisterTest(const std::string& name, const std::vector<std::string>& script);

@@ -853,6 +853,7 @@ void TestRegistry::EnsureTestsRegistered()
     RegisterTeleportTests();
     RegisterLabTests();
     RegisterLabMicroTests();
+    RegisterFleeTests();
     RegisterLabStayGuardTests();
 
     sTestsRegistered = true;
