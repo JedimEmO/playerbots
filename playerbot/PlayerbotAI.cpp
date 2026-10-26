@@ -1098,6 +1098,139 @@ void PlayerbotAI::OnCombatStarted()
     }
 }
 
+// wow-playground: a bot locked onto a creature it could not reach, in water mmaps do not path into or on a ledge,
+// stood there "reaching" it with success every tick until the sidecar's watchdog reset it, and then picked the same
+// creature again; one that evaded and healed up kept a warrior swinging at nothing. Once a second in combat, the
+// current target makes progress when the bot gets two yards closer than before or the target loses health, or while it
+// fights the bot, its pet or a group member. Without progress for NO_PROGRESS_SECONDS, without damage for
+// NO_DAMAGE_SECONDS, when the target evades, or when it heals a tenth of its health back, the bot gives up on it.
+// Never for a bot with a real player master, whose player picks its targets, nor in a battleground.
+void PlayerbotAI::CheckTargetProgress()
+{
+    if (HasRealPlayerMaster() || !sRandomPlayerbotMgr.IsFreeBot(bot) || bot->InBattleGround() || !bot->IsAlive() ||
+        currentEngine != engines[(uint8)BotState::BOT_STATE_COMBAT])
+    {
+        targetProgress = TargetProgress();
+        return;
+    }
+
+    time_t now = time(0);
+    if (targetProgress.lastCheck == now)
+        return;
+    targetProgress.lastCheck = now;
+
+    Unit* target = GetUnit(aiObjectContext->GetValue<ObjectGuid>("current target")->Get());
+    if (!target)
+        target = bot->GetVictim();
+
+    Creature* creature = target ? dynamic_cast<Creature*>(target) : nullptr;
+    if (!creature || !creature->IsAlive() || creature->IsPet())
+    {
+        targetProgress = TargetProgress();
+        return;
+    }
+
+    float distance = bot->GetDistance(creature);
+    uint32 health = creature->GetHealth();
+
+    if (targetProgress.guid != creature->GetObjectGuid())
+    {
+        targetProgress = TargetProgress();
+        targetProgress.guid = creature->GetObjectGuid();
+        targetProgress.lastCheck = targetProgress.lastProgress = targetProgress.lastDamage = now;
+        targetProgress.bestDistance = distance;
+        targetProgress.lowestHealth = health;
+        return;
+    }
+
+    Unit* victim = creature->GetVictim();
+    bool fightingBack = victim && (victim == bot || victim == bot->GetPet() ||
+        (victim->GetTypeId() == TYPEID_PLAYER && bot->GetGroup() && bot->GetGroup()->IsMember(victim->GetObjectGuid())));
+
+    std::string reason;
+    if (creature->GetCombatManager().IsInEvadeMode())
+        reason = "it evades";
+    else if (!fightingBack && health > targetProgress.lowestHealth + creature->GetMaxHealth() / 10)
+        reason = "it heals back up";
+
+    if (fightingBack || health < targetProgress.lowestHealth)
+    {
+        targetProgress.lastProgress = targetProgress.lastDamage = now;
+        targetProgress.lowestHealth = std::min(targetProgress.lowestHealth, health);
+        targetProgress.bestDistance = std::min(targetProgress.bestDistance, distance);
+    }
+    else if (distance < targetProgress.bestDistance - 2.0f)
+    {
+        targetProgress.lastProgress = now;
+        targetProgress.bestDistance = distance;
+    }
+
+    if (reason.empty() && now - targetProgress.lastProgress >= NO_PROGRESS_SECONDS)
+        reason = "no headway for " + std::to_string(now - targetProgress.lastProgress) + "s";
+    else if (reason.empty() && now - targetProgress.lastDamage >= NO_DAMAGE_SECONDS)
+        reason = "no damage for " + std::to_string(now - targetProgress.lastDamage) + "s";
+
+    if (!reason.empty())
+        GiveUpOn(creature, reason);
+}
+
+void PlayerbotAI::GiveUpOn(Unit* target, const std::string& reason)
+{
+    AiObjectContext* context = aiObjectContext;
+
+    givenUpTargets[target->GetObjectGuid().GetRawValue()] = time(0) + GIVE_UP_SECONDS;
+    targetProgress = TargetProgress();
+
+    sLog.outString("Playerbot %s gives up on %s (%u) at %.1f yards: %s.", bot->GetName(), target->GetName(), target->GetGUIDLow(),
+        bot->GetDistance(target), reason.c_str());
+    TellDebug(GetMaster(), "Giving up on " + std::string(target->GetName()) + ": " + reason + ".", "debug grind");
+
+    RESET_AI_VALUE(ObjectGuid, "current target");
+    RESET_AI_VALUE(ObjectGuid, "attack target");
+    RESET_AI_VALUE(ObjectGuid, "pull target");
+    RESET_AI_VALUE(ObjectGuid, "grind target");
+    RESET_AI_VALUE(ObjectGuid, "dps target");
+    RESET_AI_VALUE(std::list<ObjectGuid>, "attackers");
+    RESET_AI_VALUE(std::list<ObjectGuid>, "possible attack targets");
+    bot->AttackStop();
+    bot->SetSelectionGuid(ObjectGuid());
+    StopMoving();
+
+    // With nothing else on it, out of combat, so the bot goes back to grinding and travel.
+    if (bot->getAttackers().empty())
+    {
+        if (sServerFacade.IsInCombat(bot))
+            bot->CombatStop(true);
+        Reset();
+    }
+}
+
+bool PlayerbotAI::HasGivenUpOn(const Unit* target)
+{
+    if (!target || givenUpTargets.empty())
+        return false;
+
+    auto it = givenUpTargets.find(target->GetObjectGuid().GetRawValue());
+    if (it == givenUpTargets.end())
+        return false;
+
+    if (it->second <= time(0))
+    {
+        givenUpTargets.erase(it);
+        return false;
+    }
+
+    return true;
+}
+
+uint32 PlayerbotAI::GetGivenUpCount()
+{
+    time_t now = time(0);
+    for (auto it = givenUpTargets.begin(); it != givenUpTargets.end();)
+        it = it->second <= now ? givenUpTargets.erase(it) : std::next(it);
+    return givenUpTargets.size();
+}
+
 void PlayerbotAI::OnCombatEnded()
 {
     if (!IsStateActive(BotState::BOT_STATE_NON_COMBAT))
@@ -2403,6 +2536,9 @@ void PlayerbotAI::DoNextAction(bool min)
     }
 
     bool minimal = !AllowActivity();
+
+    // wow-playground: see HasGivenUpOn.
+    CheckTargetProgress();
 
     currentEngine->DoNextAction(NULL, 0, (minimal || min), bot->IsTaxiFlying());
 

@@ -5312,7 +5312,9 @@ bool DebugAction::HandleWhy(Event& event, Player* requester, const std::string& 
     combat << "combat: in-combat=" << (facts.isInCombat ? "yes" : "no")
            << " attackers=" << bot->getAttackers().size()
            << " victim=" << (bot->GetVictim() ? bot->GetVictim()->GetName() : "none")
-           << " invalid-target=" << (invalidTarget ? "yes" : "no");
+           << " invalid-target=" << (invalidTarget ? "yes" : "no")
+           // wow-playground: creatures the bot gave up on (PlayerbotAI::HasGivenUpOn).
+           << " gave-up=" << ai->GetGivenUpCount();
     ai->TellPlayerNoFacing(requester, combat.str());
 
     // travel

@@ -719,6 +719,15 @@ public:
 
     void OnCombatStarted();
     void OnCombatEnded();
+
+    // wow-playground: a free bot without a real player master gives up on a creature it gets nowhere against: one it
+    // cannot reach, one that evades, one that heals back up (CheckTargetProgress). It leaves that creature alone for
+    // GIVE_UP_SECONDS unless the creature attacks it (AttackersValue::IgnoreTarget).
+    static constexpr uint32 NO_PROGRESS_SECONDS = 20;
+    static constexpr uint32 NO_DAMAGE_SECONDS = 60;
+    static constexpr uint32 GIVE_UP_SECONDS = 5 * MINUTE;
+    bool HasGivenUpOn(const Unit* target);
+    uint32 GetGivenUpCount();
     void OnDeath();
     void OnResurrected();
     void LogKillEvents();
@@ -805,6 +814,18 @@ protected:
     WorldPosition jumpDestination;
     uint32 jumpTime;
     bool fallAfterJump;
+    // wow-playground: see HasGivenUpOn.
+    struct TargetProgress
+    {
+        ObjectGuid guid;
+        time_t lastCheck = 0, lastProgress = 0, lastDamage = 0;
+        float bestDistance = 0.0f;
+        uint32 lowestHealth = 0;
+    };
+    TargetProgress targetProgress;
+    std::unordered_map<uint64, time_t> givenUpTargets;
+    void CheckTargetProgress();
+    void GiveUpOn(Unit* target, const std::string& reason);
     uint32 faceTargetUpdateDelay;
     bool isPlayerFriend = false;
     bool isMovingToTransport = false;

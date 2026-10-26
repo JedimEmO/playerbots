@@ -444,7 +444,8 @@ Chat, emotes, gossip and duels, 1 to 10, kept a druid walking around Kharanos in
 While it works a trip, the npc must also be within 40 yards, unless the bot must sell or repair;
 an errand to buy took a druid 250 yards from its spot into Sentinel Hill, where it stuck among the vendors.
 
-Two traps held characters for an hour on the live server, and their fixes apply to every bot.
+Three traps held characters for an hour on the live server, and their fixes apply to every bot,
+the third to every free bot without a real player master.
 
 - A game object whose respawn time is negative starts despawned, and only a script shows it, for a moment.
   The travel map leaves those out (`EntryGuidpsValue`).
@@ -454,6 +455,17 @@ Two traps held characters for an hour on the live server, and their fixes apply 
   A bot that spends a minute walking at one loot object without looting it
   now leaves that object alone for ten minutes (`LootObjectStack::NoteApproach`).
   A gap of ten seconds, such as a fight on the way, starts the minute again.
+- A creature in water or marsh the bot cannot path into was "reached" with success every tick, and the bot stood
+  until the sidecar's watchdog reset it, then picked the same creature and was sent home.
+  A Greymist Warrior that evaded and healed up kept a warrior swinging at nothing.
+  Once a second in combat, the bot now watches its target (`PlayerbotAI::CheckTargetProgress`):
+  getting two yards closer than before, or the target losing health, is progress,
+  and so is any moment the target fights the bot, its pet or a group member.
+  After 20 seconds without progress, 60 without damage, when the target evades,
+  or when it heals a tenth of its health back, the bot gives up on it, drops out of combat if nothing else attacks it,
+  and leaves it alone for five minutes unless it attacks (`AttackersValue::IgnoreTarget`).
+  The server log says `Playerbot <name> gives up on <creature> (<guid>) at <distance> yards: <reason>.`,
+  and `debug why` counts the creatures given up on, `gave-up=N` on the combat line.
 
 ### Grind spots
 
