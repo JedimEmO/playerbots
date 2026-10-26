@@ -894,6 +894,12 @@ void Engine::ChangeStrategy(const std::string& names)
         {
             case '+':
             {
+                // wow-playground: adding a strategy the engine already has is a no-op. addStrategy removes and adds
+                // it again and re-initialises the engine, which drops the queued actions; the sidecar sends its task
+                // lines again every minute to keep them on through logins and resets, and each of those re-adds
+                // cleared what the bot was about to do.
+                if (strategies.find(name + 1) != strategies.end())
+                    break;
                 addStrategy(name+1);
                 break;
             }

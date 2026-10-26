@@ -304,6 +304,11 @@ Group members already passed these checks for chat commands,
 but not for guild invitations and petitions, which ignore the group;
 with the setting on, a real player in the bot's group passes those too.
 
+A strategy line such as `nc +grind,-wander` ignores a `+` for a strategy the engine already has.
+Adding one again used to remove and re-add it and re-initialise the engine, which drops the queued actions;
+the sidecar sends a task's strategy lines every minute, to keep them on through logins and resets,
+so each repeat cut into what the bot was doing.
+
 ## What never happens to them
 
 `IsRandomBot` is false for an autonomous bot,
