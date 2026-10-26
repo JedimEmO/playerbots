@@ -16,6 +16,8 @@ namespace ai
     public:
         virtual bool Execute(Event& event) override;
         static bool AutoSelectTalents(Player* bot, std::ostringstream* out, BotRoles role = BotRoles::BOT_ROLE_NONE);
+        // The talent trees the premade paths for a role end in; empty for no role or when no path has it.
+        static std::set<int> RoleTrees(uint8 cls, BotRoles role);
     private:
         static std::vector<TalentPath*> getPremadePaths(uint8 cls, std::string findName, BotRoles role = BotRoles::BOT_ROLE_NONE);
         static std::vector<TalentPath*> getPremadePaths(Player* bot, TalentSpec* oldSpec);

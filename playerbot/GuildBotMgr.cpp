@@ -3,6 +3,8 @@
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/Engine.h"
+#include "playerbot/strategy/actions/ChangeTalentsAction.h"
+#include "playerbot/Talentspec.h"
 #include "Accounts/AccountMgr.h"
 #include "Chat/Chat.h"
 
@@ -61,6 +63,15 @@ namespace
         return free;
     }
 
+    // The tree with the most talent points, by name, or empty below level 10.
+    std::string TreeName(Player* bot)
+    {
+        TalentSpec spec(bot);
+        if (!spec.GetTalentPoints())
+            return "";
+        return ChatHelper::formatClass(bot, spec.highestTree());
+    }
+
     // The jobs the engine knows. Anything else fails with "unknown job".
     bool IsKnownJob(const std::string& job)
     {
@@ -96,6 +107,12 @@ std::string GuildBotMgr::GetActiveJob(uint32 guid) const
         return "idle";
 
     return c.job;
+}
+
+BotRoles GuildBotMgr::GetRole(uint32 guid) const
+{
+    auto it = characters.find(guid);
+    return it == characters.end() ? BotRoles::BOT_ROLE_NONE : ChatHelper::parseRole(it->second.role);
 }
 
 std::string GuildBotMgr::ArgValue(const Character& c, const std::string& key) const
@@ -191,6 +208,8 @@ void GuildBotMgr::EnsureTables()
         " job_seq INT UNSIGNED NOT NULL DEFAULT 1,"
         " updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    CharacterDatabase.DirectExecute(
+        "ALTER TABLE guildbot_character ADD COLUMN IF NOT EXISTS role VARCHAR(8) NOT NULL DEFAULT '' AFTER job_seq");
 
     CharacterDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS guildbot_state ("
@@ -216,6 +235,13 @@ void GuildBotMgr::EnsureTables()
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
     CharacterDatabase.DirectExecute(
+        "ALTER TABLE guildbot_state"
+        " ADD COLUMN IF NOT EXISTS role VARCHAR(8) NOT NULL DEFAULT '',"
+        " ADD COLUMN IF NOT EXISTS talent_tree VARCHAR(32) NOT NULL DEFAULT '',"
+        " ADD COLUMN IF NOT EXISTS talent_points TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        " ADD COLUMN IF NOT EXISTS role_status VARCHAR(32) NOT NULL DEFAULT ''");
+
+    CharacterDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS guildbot_event ("
         " id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,"
         " guid INT UNSIGNED NOT NULL,"
@@ -231,7 +257,7 @@ void GuildBotMgr::EnsureTables()
 void GuildBotMgr::LoadOrders()
 {
     auto result = CharacterDatabase.PQuery(
-        "SELECT g.guid, c.account, c.name, g.enabled, g.job, g.job_args, g.job_seq "
+        "SELECT g.guid, c.account, c.name, g.enabled, g.job, g.job_args, g.job_seq, g.role "
         "FROM guildbot_character g JOIN characters c ON c.guid = g.guid");
 
     std::set<uint32> seen;
@@ -252,6 +278,7 @@ void GuildBotMgr::LoadOrders()
             c.job = f[4].GetCppString();
             c.jobArgs = f[5].GetCppString();
             c.jobSeq = f[6].GetUInt32();
+            c.role = f[7].GetCppString();
             if (isNew)
                 c.offlineSince = 0;
         } while (result->NextRow());
@@ -386,6 +413,8 @@ void GuildBotMgr::CheckJobs()
             Event(guid, "level", std::to_string(bot->GetLevel()));
         c.lastLevel = bot->GetLevel();
 
+        ApplyRole(c, bot);
+
         bool dead = sServerFacade.UnitIsDead(bot);
         if (dead && !c.dead)
             Event(guid, "died", std::to_string(bot->GetZoneId()));
@@ -432,6 +461,44 @@ void GuildBotMgr::CheckJobs()
     }
 }
 
+void GuildBotMgr::ApplyRole(Character& c, Player* bot)
+{
+    BotRoles role = ChatHelper::parseRole(c.role);
+    std::set<int> trees = ChangeTalentsAction::RoleTrees(bot->getClass(), role);
+    TalentSpec spec(bot);
+    int spent = spec.GetTalentPoints();
+
+    // Talents already spent in a tree that does not suit the role stay: a respec is the player's to pay for.
+    std::string status = (spent > 0 && !trees.empty() && !trees.count(spec.highestTree())) ? "respec needed" : "";
+
+    if (c.role != c.appliedRole)
+    {
+        c.appliedRole = c.role;
+        if (spent == 0)
+        {
+            // Forget the talent path picked earlier, so the next pick follows the role.
+            sRandomPlayerbotMgr.SetValue(bot->GetGUIDLow(), "specNo", 0);
+            sRandomPlayerbotMgr.SetValue(bot->GetGUIDLow(), "specLink", 0, "");
+        }
+        Event(c.guid, "role", (c.role.empty() ? std::string("none") : c.role) + (status.empty() ? "" : " (" + status + ")"));
+
+        if (spent == 0 && bot->CalculateTalentsPoints() > 0)
+        {
+            std::ostringstream out;
+            ChangeTalentsAction::AutoSelectTalents(bot, &out, role);
+            if (bot->GetPlayerbotAI())
+                bot->GetPlayerbotAI()->ResetStrategies(false);
+        }
+    }
+
+    if (status != c.roleStatus)
+    {
+        c.roleStatus = status;
+        if (!status.empty())
+            Event(c.guid, "respec_needed", c.role);
+    }
+}
+
 void GuildBotMgr::WriteState()
 {
     for (auto& [guid, c] : characters)
@@ -454,20 +521,21 @@ void GuildBotMgr::WriteState(const Character& c, Player* bot)
             "0, 0, 0, 0, '%s', %u, '%s', '%s' FROM characters c WHERE c.guid = %u "
             "ON DUPLICATE KEY UPDATE controller = 'offline', level = VALUES(level), xp = VALUES(xp), money = VALUES(money), "
             "map = VALUES(map), zone = VALUES(zone), x = VALUES(x), y = VALUES(y), z = VALUES(z), in_combat = 0, "
-            "job = VALUES(job), job_seq = VALUES(job_seq), job_status = VALUES(job_status), job_reason = VALUES(job_reason)",
-            Escape(c.job).c_str(), c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str(), c.guid);
+            "job = VALUES(job), job_seq = VALUES(job_seq), job_status = VALUES(job_status), job_reason = VALUES(job_reason), role = '%s'",
+            Escape(c.job).c_str(), c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str(), c.guid, Escape(c.role).c_str());
         return;
     }
 
     CharacterDatabase.PExecute(
         "REPLACE INTO guildbot_state (guid, name, controller, level, xp, xp_next, money, map, zone, x, y, z, "
-        "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason) "
-        "VALUES (%u, '%s', '%s', %u, %u, %u, %u, %u, %u, %f, %f, %f, %u, %u, %u, %u, '%s', %u, '%s', '%s')",
+        "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason, role, talent_tree, talent_points, role_status) "
+        "VALUES (%u, '%s', '%s', %u, %u, %u, %u, %u, %u, %f, %f, %f, %u, %u, %u, %u, '%s', %u, '%s', '%s', '%s', '%s', %u, '%s')",
         c.guid, Escape(c.name).c_str(), controller.c_str(), bot->GetLevel(), bot->GetUInt32Value(PLAYER_XP),
         bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP), bot->GetMoney(), bot->GetMapId(), bot->GetZoneId(),
         bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), uint32(bot->GetHealthPercent()),
         sServerFacade.UnitIsDead(bot) ? 1 : 0, sServerFacade.IsInCombat(bot) ? 1 : 0, FreeBagSlots(bot),
-        Escape(c.job).c_str(), GetPlayerBot(c.guid) ? c.appliedSeq : c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str());
+        Escape(c.job).c_str(), GetPlayerBot(c.guid) ? c.appliedSeq : c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str(),
+        Escape(c.role).c_str(), Escape(TreeName(bot)).c_str(), uint32(TalentSpec(bot).GetTalentPoints()), Escape(c.roleStatus).c_str());
 }
 
 void GuildBotMgr::Event(uint32 guid, const std::string& kind, const std::string& detail)
@@ -557,13 +625,14 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         return HandleList();
     if (sub == "state")
         return HandleState(rest);
-    if (sub == "on" || sub == "off" || sub == "job" || sub == "remove")
+    if (sub == "on" || sub == "off" || sub == "job" || sub == "remove" || sub == "role")
         return HandleOrder(sub, rest);
 
     return {
         "guildbot add <name> [job [args]]       make a character a guild character",
         "guildbot create <account> <name> <race> <class> [male|female]   create a level 1 character on an account",
         "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>]",
+        "guildbot role <name> tank|healer|dps|none   the role its talents follow",
         "guildbot on|off <name>                 switch the engine's play on or off",
         "guildbot remove <name>                 stop treating it as a guild character",
         "guildbot list                          every guild character, one line each",
@@ -613,6 +682,13 @@ std::list<std::string> GuildBotMgr::HandleOrder(const std::string& sub, const st
         CharacterDatabase.DirectPExecute("UPDATE guildbot_character SET enabled = %u WHERE guid = %u", sub == "on" ? 1 : 0, low);
     else if (sub == "remove")
         CharacterDatabase.DirectPExecute("DELETE FROM guildbot_character WHERE guid = %u", low);
+    else if (sub == "role")
+    {
+        std::string role = rest == "none" ? "" : rest;
+        if (!role.empty() && ChatHelper::parseRole(role) == BotRoles::BOT_ROLE_NONE)
+            return { "usage: guildbot role <name> tank|healer|dps|none" };
+        CharacterDatabase.DirectPExecute("UPDATE guildbot_character SET role = '%s' WHERE guid = %u", Escape(role).c_str(), low);
+    }
     else
     {
         auto [job, jobArgs] = SplitWord(rest);
@@ -636,6 +712,7 @@ std::list<std::string> GuildBotMgr::HandleList()
         std::ostringstream line;
         line << c.name << " " << (!player ? "offline" : GetPlayerBot(guid) ? "bot" : "player")
              << (c.enabled ? "" : " (off)") << " L" << (player ? player->GetLevel() : 0)
+             << (c.role.empty() ? "" : " role=" + c.role) << (c.roleStatus.empty() ? "" : " (" + c.roleStatus + ")")
              << " job=" << c.job << (c.jobArgs.empty() ? "" : " " + c.jobArgs)
              << " #" << c.jobSeq << " " << c.status << (c.reason.empty() ? "" : " (" + c.reason + ")");
         out.push_back(line.str());

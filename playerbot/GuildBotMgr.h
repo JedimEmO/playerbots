@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PlayerbotMgr.h"
+#include "ChatHelper.h"
 
 #include <map>
 #include <string>
@@ -35,6 +36,8 @@ public:
 
     // The job the character should be doing: its order, or "idle" once that order is done or failed.
     std::string GetActiveJob(uint32 guid) const;
+    // The role the player gave the character, which its talents follow; none if not a guild character.
+    BotRoles GetRole(uint32 guid) const;
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;
@@ -68,6 +71,7 @@ private:
         std::string job = "idle";
         std::string jobArgs;
         uint32 jobSeq = 0;
+        std::string role;           // tank, healer, dps, or empty for the class default
 
         // Engine side.
         uint32 appliedSeq = 0;      // the order the AI's strategies were built for
@@ -77,6 +81,8 @@ private:
         time_t offlineSince = 0;    // when it went offline, for the relogin delay
         time_t loginRequested = 0;
         uint32 lastLevel = 0;
+        std::string appliedRole;
+        std::string roleStatus;     // empty, or "respec needed" when talents are spent in another role's tree
         uint64 lastProgress = 0;     // level and experience, as one number
         time_t progressAt = 0;       // when it last changed
         bool stalled = false;
@@ -90,6 +96,7 @@ private:
     void CheckJobs();
     void WriteState();
     void WriteState(const Character& c, Player* bot);
+    void ApplyRole(Character& c, Player* bot);
 
     void Event(uint32 guid, const std::string& kind, const std::string& detail = "");
     Character* Find(const std::string& name);

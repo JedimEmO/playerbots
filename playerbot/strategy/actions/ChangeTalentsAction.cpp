@@ -3,6 +3,7 @@
 #include "playerbot/Talentspec.h"
 #include "ChangeTalentsAction.h"
 #include "playerbot/AiFactory.h"
+#include "playerbot/GuildBotMgr.h"
 
 using namespace ai;
 
@@ -252,6 +253,19 @@ TalentPath* ChangeTalentsAction::PickPremadePath(std::vector<TalentPath*> paths,
     return paths[0];
 }
 
+std::set<int> ChangeTalentsAction::RoleTrees(uint8 cls, BotRoles role)
+{
+    std::set<int> trees;
+    if (role == BotRoles::BOT_ROLE_NONE)
+        return trees;
+
+    for (TalentPath* path : getPremadePaths(cls, "", role))
+        if (!path->talentSpec.empty())
+            trees.insert(path->talentSpec.back().highestTree());
+
+    return trees;
+}
+
 bool ChangeTalentsAction::AutoSelectTalents(Player* bot, std::ostringstream* out, BotRoles role)
 {
     //Does the bot have talentpoints?
@@ -412,7 +426,8 @@ bool AutoSetTalentsAction::Execute(Event& event)
         return false;
     }
 
-    AutoSelectTalents(bot, &out);
+    // A guild character's talents follow the role its player gave it.
+    AutoSelectTalents(bot, &out, sGuildBotMgr.GetRole(bot->GetGUIDLow()));
 
     ai->TellPlayer(requester, out, PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL, false);
 
