@@ -1155,7 +1155,11 @@ void PlayerbotAI::CheckTargetProgress()
     Unit* victim = creature->GetVictim();
     bool fightingBack = victim && (victim == bot || victim == bot->GetPet() ||
         (victim->GetTypeId() == TYPEID_PLAYER && bot->GetGroup() && bot->GetGroup()->IsMember(victim->GetObjectGuid()))) &&
-        (creature->CanReachWithMeleeAttack(victim) || creature->IsNonMeleeSpellCasted(false));
+        CanHit(creature);
+
+    // A ranged bot casting or shooting is at work where it stands; whether that lands is the no-headway rule's to judge.
+    if (bot->IsNonMeleeSpellCasted(false))
+        targetProgress.lastMoved = now;
 
     bool invalid = aiObjectContext->GetValue<bool>("invalid target", "current target")->Get() && bot->getAttackers().empty();
     if (!invalid)
@@ -1195,15 +1199,28 @@ void PlayerbotAI::CheckTargetProgress()
         GiveUpOn(creature, reason);
 }
 
+// wow-playground: a creature that attacks the bot but cannot get at it, and that the bot cannot get at either, came
+// back as an attacker the moment the bot gave up on it, and the bot gave up again every 8 seconds, standing, one
+// Nightsaber 65 times. So for STRICT_GIVE_UP_SECONDS the creature is left alone even as an attacker, unless it can
+// hit the bot, and when nothing else that can hit the bot attacks it, the bot leaves combat and goes back to its
+// travel and grinding, away from the creature, which then leashes.
 void PlayerbotAI::GiveUpOn(Unit* target, const std::string& reason)
 {
     AiObjectContext* context = aiObjectContext;
+    time_t now = time(0);
 
-    givenUpTargets[target->GetObjectGuid().GetRawValue()] = time(0) + GIVE_UP_SECONDS;
+    GivenUp& givenUp = givenUpTargets[target->GetObjectGuid().GetRawValue()];
+    givenUp.expires = now + GIVE_UP_SECONDS;
+    givenUp.strictUntil = now + STRICT_GIVE_UP_SECONDS;
     targetProgress = TargetProgress();
 
-    sLog.outString("Playerbot %s gives up on %s (%u) at %.1f yards: %s.", bot->GetName(), target->GetName(), target->GetGUIDLow(),
-        bot->GetDistance(target), reason.c_str());
+    // Once a creature in a few minutes is enough for the log.
+    if (givenUp.logged + GIVE_UP_LOG_SECONDS <= now)
+    {
+        givenUp.logged = now;
+        sLog.outString("Playerbot %s gives up on %s (%u) at %.1f yards: %s.", bot->GetName(), target->GetName(), target->GetGUIDLow(),
+            bot->GetDistance(target), reason.c_str());
+    }
     TellDebug(GetMaster(), "Giving up on " + std::string(target->GetName()) + ": " + reason + ".", "debug grind");
 
     RESET_AI_VALUE(ObjectGuid, "current target");
@@ -1217,13 +1234,20 @@ void PlayerbotAI::GiveUpOn(Unit* target, const std::string& reason)
     bot->SetSelectionGuid(ObjectGuid());
     StopMoving();
 
-    // With nothing else on it, out of combat, so the bot goes back to grinding and travel.
-    if (bot->getAttackers().empty())
-    {
-        if (sServerFacade.IsInCombat(bot))
-            bot->CombatStop(true);
-        Reset();
-    }
+    // With nothing else on it that can hit it, out of combat, so the bot goes back to grinding and travel.
+    for (Unit* attacker : bot->getAttackers())
+        if (attacker != target && (!HasGivenUpOnStrictly(attacker) || CanHit(attacker)))
+            return;
+
+    if (sServerFacade.IsInCombat(bot))
+        bot->CombatStop(true);
+    Reset();
+}
+
+bool PlayerbotAI::CanHit(const Unit* creature)
+{
+    Unit* victim = creature->GetVictim();
+    return victim && (creature->CanReachWithMeleeAttack(victim) || creature->IsNonMeleeSpellCasted(false));
 }
 
 bool PlayerbotAI::HasGivenUpOn(const Unit* target)
@@ -1235,21 +1259,35 @@ bool PlayerbotAI::HasGivenUpOn(const Unit* target)
     if (it == givenUpTargets.end())
         return false;
 
-    if (it->second <= time(0))
-    {
-        givenUpTargets.erase(it);
-        return false;
-    }
+    // The entry stays for its log time, so a creature given up on again is not logged again at once.
+    return it->second.expires > time(0);
+}
 
-    return true;
+bool PlayerbotAI::HasGivenUpOnStrictly(const Unit* target)
+{
+    if (!target || givenUpTargets.empty())
+        return false;
+
+    auto it = givenUpTargets.find(target->GetObjectGuid().GetRawValue());
+    return it != givenUpTargets.end() && it->second.strictUntil > time(0);
 }
 
 uint32 PlayerbotAI::GetGivenUpCount()
 {
     time_t now = time(0);
+    uint32 count = 0;
     for (auto it = givenUpTargets.begin(); it != givenUpTargets.end();)
-        it = it->second <= now ? givenUpTargets.erase(it) : std::next(it);
-    return givenUpTargets.size();
+    {
+        if (it->second.expires <= now && it->second.logged + GIVE_UP_LOG_SECONDS <= now)
+        {
+            it = givenUpTargets.erase(it);
+            continue;
+        }
+        if (it->second.expires > now)
+            count++;
+        ++it;
+    }
+    return count;
 }
 
 void PlayerbotAI::OnCombatEnded()

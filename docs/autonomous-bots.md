@@ -487,9 +487,15 @@ the third to every free bot without a real player master.
   and when it has been an invalid target for 3 seconds with nothing attacking the bot.
   The clock belongs to the creature, so a target dropped and picked again keeps it;
   restarting it each time kept a warrior on a Vile Sprite on a ledge for good.
-  The bot then drops out of combat if nothing else attacks it,
-  and leaves the creature alone for five minutes unless it attacks (`AttackersValue::IgnoreTarget`).
+  A bot casting or shooting is never standing; whether that lands is for the 20 seconds to judge.
+  The bot leaves the creature alone for five minutes unless it attacks (`AttackersValue::IgnoreTarget`),
+  and for the first minute even then, while the creature cannot hit it from where it stands.
+  Without that, a creature that could reach the bot no more than the bot could reach it
+  came back as an attacker at once, and one Nightsaber was given up 65 times, every 8 seconds.
+  When nothing else that can hit the bot attacks it, the bot leaves combat and goes back to its travel and grinding,
+  away from the creature, which leashes.
   The server log says `Playerbot <name> gives up on <creature> (<guid>) at <distance> yards: <reason>.`,
+  once a creature in three minutes,
   and `debug why` counts the creatures given up on, `gave-up=N` on the combat line.
 
 ### Trips across the sea

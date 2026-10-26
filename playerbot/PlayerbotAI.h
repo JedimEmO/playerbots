@@ -728,8 +728,14 @@ public:
     static constexpr uint32 INVALID_SECONDS = 3;
     static constexpr uint32 NO_DAMAGE_SECONDS = 60;
     static constexpr uint32 GIVE_UP_SECONDS = 5 * MINUTE;
+    static constexpr uint32 STRICT_GIVE_UP_SECONDS = MINUTE;
+    static constexpr uint32 GIVE_UP_LOG_SECONDS = 3 * MINUTE;
     bool HasGivenUpOn(const Unit* target);
+    // Given up on within STRICT_GIVE_UP_SECONDS: left alone even while it attacks, as long as it cannot hit the bot.
+    bool HasGivenUpOnStrictly(const Unit* target);
     uint32 GetGivenUpCount();
+    // A creature that hits the bot from where it stands, in melee reach of its victim or casting.
+    static bool CanHit(const Unit* creature);
     void OnDeath();
     void OnResurrected();
     void LogKillEvents();
@@ -826,7 +832,11 @@ protected:
         WorldPosition botPosition;
     };
     TargetProgress targetProgress;
-    std::unordered_map<uint64, time_t> givenUpTargets;
+    struct GivenUp
+    {
+        time_t expires = 0, strictUntil = 0, logged = 0;
+    };
+    std::unordered_map<uint64, GivenUp> givenUpTargets;
     void CheckTargetProgress();
     void GiveUpOn(Unit* target, const std::string& reason);
     uint32 faceTargetUpdateDelay;

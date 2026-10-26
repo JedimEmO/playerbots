@@ -426,8 +426,10 @@ bool AttackersValue::IgnoreTarget(Unit* target, Player* playerToCheckAgainst)
     PlayerbotAI* ai = playerToCheckAgainst->GetPlayerbotAI();
     AiObjectContext* context = ai->GetAiObjectContext();
 
-    // wow-playground: a creature the bot gave up on (PlayerbotAI::HasGivenUpOn) is left alone, unless it attacks.
-    if (ai->HasGivenUpOn(target) && target->GetVictim() != playerToCheckAgainst)
+    // wow-playground: a creature the bot gave up on (PlayerbotAI::HasGivenUpOn) is left alone, unless it attacks; and
+    // for the first minute even then, while it cannot hit the bot from where it stands.
+    if (ai->HasGivenUpOn(target) && (target->GetVictim() != playerToCheckAgainst ||
+        (ai->HasGivenUpOnStrictly(target) && !PlayerbotAI::CanHit(target))))
         return true;
 
     //Ignore Hard hostiles while not already fighting.
