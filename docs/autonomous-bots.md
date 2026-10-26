@@ -437,6 +437,8 @@ a vendor nearby buys the loot.
 And near a grind spot the bot picks an npc to walk to only for business, a weight of 25 and up
 in `ChooseRpgTargetAction`: healing, buying, selling, repairing, training, mail, the bank.
 Chat, emotes, gossip and duels, 1 to 10, kept a druid walking around Kharanos instead of fighting.
+While it works a trip, the npc must also be within 40 yards, unless the bot must sell or repair;
+an errand to buy took a druid 250 yards from its spot into Sentinel Hill, where it stuck among the vendors.
 
 Two traps held characters for an hour on the live server, and their fixes apply to every bot.
 

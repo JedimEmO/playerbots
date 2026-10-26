@@ -133,6 +133,10 @@ std::unordered_map<ObjectGuid, float> ChooseRpgTargetAction::GetTargets(Player* 
     bool levelling = ai->HasStrategy("levelling", BotState::BOT_STATE_NON_COMBAT) || ai->HasStrategy("farm", BotState::BOT_STATE_NON_COMBAT) ||
         AI_VALUE(bool, "has farm order");
 
+    // wow-playground: and while it works a trip, only an npc close by, unless it must sell or repair; those trips come
+    // through travel anyway. Errands to buy kept a druid 250 yards from its grind spot, stuck among Sentinel Hill's vendors.
+    bool working = levelling && AI_VALUE(bool, "travel target working") && !AI_VALUE(bool, "should sell") && !AI_VALUE(bool, "should repair");
+
     //Shuffle the target list to randomly process it each time.
     for (auto& target : targets)
         targetList.push_back(target.first);
@@ -220,6 +224,9 @@ std::unordered_map<ObjectGuid, float> ChooseRpgTargetAction::GetTargets(Player* 
         // up; chat, emotes, gossip, duels and the like score 1 to 10 and kept a grinding bot walking around town.
         if (levelling && relevance < 25.0f)
             SkipRpgTarget("Levelling or farming, and nothing to do here.");
+
+        if (working && guidP.distance(bot) > 40.0f)
+            SkipRpgTarget("Working a trip, and too far from it.");
 
         bool travelHasQuest = false;
         if (isTravelTarget && guidP.GetEntry())
