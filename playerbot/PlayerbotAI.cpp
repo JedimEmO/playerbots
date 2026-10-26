@@ -1102,17 +1102,18 @@ void PlayerbotAI::OnCombatStarted()
 // stood there "reaching" it with success every tick until the sidecar's watchdog reset it, and then picked the same
 // creature again; one that evaded and healed up kept a warrior swinging at nothing. Once a second in combat, the
 // current target makes progress when the bot gets two yards closer than before or the target loses health, or while it
-// fights the bot, its pet or a group member. Without progress for NO_PROGRESS_SECONDS, without damage for
-// NO_DAMAGE_SECONDS, when the target evades, or when it heals a tenth of its health back, the bot gives up on it.
-// Never for a bot with a real player master, whose player picks its targets, nor in a battleground.
+// fights the bot, its pet or a group member from where it stands. The bot gives up on it without progress for
+// NO_PROGRESS_SECONDS, or STANDING_SECONDS when the bot has not moved either (a hunter out of range or sight of a
+// creature on the shore, its shots impossible), without damage for NO_DAMAGE_SECONDS, when the target evades, when it
+// heals a tenth of its health back, and when it is an invalid target for INVALID_SECONDS with nothing attacking the
+// bot. The clock belongs to the creature: an invalid target dropped and picked again keeps it, where restarting it each
+// time kept a warrior on a Vile Sprite for good. Never for a bot with a real player master, whose player picks its
+// targets, nor in a battleground.
 void PlayerbotAI::CheckTargetProgress()
 {
     if (HasRealPlayerMaster() || !sRandomPlayerbotMgr.IsFreeBot(bot) || bot->InBattleGround() || !bot->IsAlive() ||
         currentEngine != engines[(uint8)BotState::BOT_STATE_COMBAT])
-    {
-        targetProgress = TargetProgress();
         return;
-    }
 
     time_t now = time(0);
     if (targetProgress.lastCheck == now)
@@ -1125,33 +1126,50 @@ void PlayerbotAI::CheckTargetProgress()
 
     Creature* creature = target ? dynamic_cast<Creature*>(target) : nullptr;
     if (!creature || !creature->IsAlive() || creature->IsPet())
-    {
-        targetProgress = TargetProgress();
         return;
-    }
 
     float distance = bot->GetDistance(creature);
     uint32 health = creature->GetHealth();
+    WorldPosition botPosition(bot);
 
-    if (targetProgress.guid != creature->GetObjectGuid())
+    // A different creature, or the same one after a minute away, starts a new clock.
+    if (targetProgress.guid != creature->GetObjectGuid() || now - targetProgress.lastSeen > MINUTE)
     {
         targetProgress = TargetProgress();
         targetProgress.guid = creature->GetObjectGuid();
-        targetProgress.lastCheck = targetProgress.lastProgress = targetProgress.lastDamage = now;
+        targetProgress.lastCheck = targetProgress.lastProgress = targetProgress.lastDamage = targetProgress.lastMoved = targetProgress.lastSeen = now;
         targetProgress.bestDistance = distance;
         targetProgress.lowestHealth = health;
+        targetProgress.botPosition = botPosition;
         return;
     }
+    targetProgress.lastSeen = now;
 
+    if (botPosition.distance(targetProgress.botPosition) > 1.0f)
+    {
+        targetProgress.lastMoved = now;
+        targetProgress.botPosition = botPosition;
+    }
+
+    // Its victim is not enough: a creature that cannot get at the bot still has it as its victim.
     Unit* victim = creature->GetVictim();
     bool fightingBack = victim && (victim == bot || victim == bot->GetPet() ||
-        (victim->GetTypeId() == TYPEID_PLAYER && bot->GetGroup() && bot->GetGroup()->IsMember(victim->GetObjectGuid())));
+        (victim->GetTypeId() == TYPEID_PLAYER && bot->GetGroup() && bot->GetGroup()->IsMember(victim->GetObjectGuid()))) &&
+        (creature->CanReachWithMeleeAttack(victim) || creature->IsNonMeleeSpellCasted(false));
+
+    bool invalid = aiObjectContext->GetValue<bool>("invalid target", "current target")->Get() && bot->getAttackers().empty();
+    if (!invalid)
+        targetProgress.invalidSince = 0;
+    else if (!targetProgress.invalidSince)
+        targetProgress.invalidSince = now;
 
     std::string reason;
     if (creature->GetCombatManager().IsInEvadeMode())
         reason = "it evades";
     else if (!fightingBack && health > targetProgress.lowestHealth + creature->GetMaxHealth() / 10)
         reason = "it heals back up";
+    else if (targetProgress.invalidSince && now - targetProgress.invalidSince >= INVALID_SECONDS)
+        reason = "an invalid target for " + std::to_string(now - targetProgress.invalidSince) + "s";
 
     if (fightingBack || health < targetProgress.lowestHealth)
     {
@@ -1165,8 +1183,11 @@ void PlayerbotAI::CheckTargetProgress()
         targetProgress.bestDistance = distance;
     }
 
+    time_t standing = now - std::max(targetProgress.lastProgress, targetProgress.lastMoved);
     if (reason.empty() && now - targetProgress.lastProgress >= NO_PROGRESS_SECONDS)
         reason = "no headway for " + std::to_string(now - targetProgress.lastProgress) + "s";
+    else if (reason.empty() && standing >= STANDING_SECONDS)
+        reason = "standing without headway for " + std::to_string(standing) + "s";
     else if (reason.empty() && now - targetProgress.lastDamage >= NO_DAMAGE_SECONDS)
         reason = "no damage for " + std::to_string(now - targetProgress.lastDamage) + "s";
 

@@ -724,6 +724,8 @@ public:
     // cannot reach, one that evades, one that heals back up (CheckTargetProgress). It leaves that creature alone for
     // GIVE_UP_SECONDS unless the creature attacks it (AttackersValue::IgnoreTarget).
     static constexpr uint32 NO_PROGRESS_SECONDS = 20;
+    static constexpr uint32 STANDING_SECONDS = 8;
+    static constexpr uint32 INVALID_SECONDS = 3;
     static constexpr uint32 NO_DAMAGE_SECONDS = 60;
     static constexpr uint32 GIVE_UP_SECONDS = 5 * MINUTE;
     bool HasGivenUpOn(const Unit* target);
@@ -818,9 +820,10 @@ protected:
     struct TargetProgress
     {
         ObjectGuid guid;
-        time_t lastCheck = 0, lastProgress = 0, lastDamage = 0;
+        time_t lastCheck = 0, lastProgress = 0, lastDamage = 0, lastMoved = 0, lastSeen = 0, invalidSince = 0;
         float bestDistance = 0.0f;
         uint32 lowestHealth = 0;
+        WorldPosition botPosition;
     };
     TargetProgress targetProgress;
     std::unordered_map<uint64, time_t> givenUpTargets;

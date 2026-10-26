@@ -479,10 +479,16 @@ the third to every free bot without a real player master.
   A Greymist Warrior that evaded and healed up kept a warrior swinging at nothing.
   Once a second in combat, the bot now watches its target (`PlayerbotAI::CheckTargetProgress`):
   getting two yards closer than before, or the target losing health, is progress,
-  and so is any moment the target fights the bot, its pet or a group member.
-  After 20 seconds without progress, 60 without damage, when the target evades,
-  or when it heals a tenth of its health back, the bot gives up on it, drops out of combat if nothing else attacks it,
-  and leaves it alone for five minutes unless it attacks (`AttackersValue::IgnoreTarget`).
+  and so is any moment the target fights the bot, its pet or a group member from where it stands,
+  in melee reach or casting; a creature that cannot get at the bot still has it as its victim.
+  The bot gives up on it after 20 seconds without progress, or 8 when the bot has not moved either,
+  as a hunter did with its shots impossible against creatures on the shore,
+  after 60 without damage, when the target evades, when it heals a tenth of its health back,
+  and when it has been an invalid target for 3 seconds with nothing attacking the bot.
+  The clock belongs to the creature, so a target dropped and picked again keeps it;
+  restarting it each time kept a warrior on a Vile Sprite on a ledge for good.
+  The bot then drops out of combat if nothing else attacks it,
+  and leaves the creature alone for five minutes unless it attacks (`AttackersValue::IgnoreTarget`).
   The server log says `Playerbot <name> gives up on <creature> (<guid>) at <distance> yards: <reason>.`,
   and `debug why` counts the creatures given up on, `gave-up=N` on the combat line.
 
