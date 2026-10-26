@@ -498,6 +498,21 @@ the third to every free bot without a real player master.
   once a creature in three minutes,
   and `debug why` counts the creatures given up on, `gave-up=N` on the combat line.
 
+Fleeing, for a bot without a real player master, was a hold:
+the bot kept twice the flee range from its target and called that a success,
+and against a creature that did not close in it held for good,
+a level 4 warrior 18 yards from a Nightsaber until the watchdog came.
+Only a ranged bot stepping back from a target moving in on it now kites that way (`FleeAction::Execute`).
+A panic, being outnumbered, an area attack or a melee bot moves away for real, to a point the flee manager picks,
+and does not flee at all when nothing is within reach of it.
+That holds for every free bot.
+
+A player's character levelling alone is outnumbered only when the odds are half again against it,
+three creatures of its level at full health, where two a level above it, or two once it was hurt, were enough.
+They chase as fast as it runs and hit its back, and running drops a fight half won.
+Each of its deaths is in the server log, `Playerbot <name> died, level <n>, to <creature> with <n> attackers.`,
+to weigh against its give-ups.
+
 ### Trips across the sea
 
 The travel system ranks a destination on another map by the way to the dock, the crossing and the way from the dock.

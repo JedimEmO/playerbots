@@ -143,6 +143,12 @@ bool OutNumberedTrigger::IsActive()
             friendPower += std::max(200 + 20 * dLevel, dLevel * 200)* healthMod;
     }
 
+    // wow-playground: a player's character levelling alone fights two creatures of its level rather than run from
+    // them: they chase as fast as it runs and hit its back, and a flight drops the fight it had half won. Two a level
+    // above it, or two at all once it was hurt, were enough before. It runs when the odds are half again against it.
+    if (sRandomPlayerbotMgr.IsAutonomousBot(bot) && !bot->GetGroup())
+        return friendPower * 3 < foePower * 2;
+
     return friendPower < foePower;
 }
 

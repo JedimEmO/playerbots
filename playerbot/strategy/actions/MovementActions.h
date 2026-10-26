@@ -69,7 +69,8 @@ namespace ai
 
         bool IsMovingAllowed(Unit* target);
         bool IsMovingAllowed(uint32 mapId, float x, float y, float z);
-        bool Flee(Unit *target);
+        // wow-playground: kite false takes a bot without a real player master away for real, see FleeAction::Execute.
+        bool Flee(Unit *target, bool kite = true);
         void ClearIdleState();
         void UpdateMovementState();
 

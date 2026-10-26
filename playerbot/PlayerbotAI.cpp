@@ -1322,6 +1322,14 @@ void PlayerbotAI::OnDeath()
         AiObjectContext* context = aiObjectContext;
         if (!HasActivePlayerMaster() && !bot->InBattleGround())
         {
+            // wow-playground: a player's character's deaths in the server log, to weigh against its flights and
+            // give-ups (OutNumberedTrigger, CheckTargetProgress).
+            if (sRandomPlayerbotMgr.IsAutonomousBot(bot))
+            {
+                Unit* killer = bot->getAttackers().empty() ? nullptr : *bot->getAttackers().begin();
+                sLog.outString("Playerbot %s died, level %u, to %s with %u attackers.", bot->GetName(), bot->GetLevel(),
+                    killer ? killer->GetName() : "nothing", (uint32)bot->getAttackers().size());
+            }
 
             SET_AI_VALUE(uint32, "death count", AI_VALUE(uint32, "death count") + 1);
 

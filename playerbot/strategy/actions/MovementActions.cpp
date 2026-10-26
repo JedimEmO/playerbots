@@ -2847,7 +2847,7 @@ void MovementAction::WaitForReach(const Movement::PointsArray& path)
     WaitForReach(distance);
 }
 
-bool MovementAction::Flee(Unit *target)
+bool MovementAction::Flee(Unit *target, bool kite)
 {
     Player* master = GetMaster();
     if (!target)
@@ -2996,7 +2996,7 @@ bool MovementAction::Flee(Unit *target)
         succeeded = MoveNear(fleeTarget);
     }
 
-    if (!ai->HasRealPlayerMaster() && !ai->IsRealPlayer(target))
+    if (kite && !ai->HasRealPlayerMaster() && !ai->IsRealPlayer(target))
     {
         bool fullDistance = false;
         if (target->IsPlayer())
@@ -3246,7 +3246,21 @@ bool MovementAction::GeneratePathAvoidingHazards(std::vector<WorldPosition>& mov
 
 bool FleeAction::Execute(Event& event)
 {
-    return Flee(ai->GetUnit(AI_VALUE(ObjectGuid, "current target")));
+    Unit* target = ai->GetUnit(AI_VALUE(ObjectGuid, "current target"));
+
+    // wow-playground: for a bot without a real player master, fleeing meant holding twice the flee range from the
+    // target, a chase at an offset, and reporting success; against a creature that did not close in, it held for good,
+    // a level 4 warrior 18 yards from a Nightsaber until the watchdog came. That hold is kiting, and only a ranged bot
+    // stepping back from a target moving in on it kites. A panic, being outnumbered, or a melee bot moves away for
+    // real (FleeManager), or does not flee when nothing is in reach of it.
+    bool kite = true;
+    if (target && !ai->HasRealPlayerMaster())
+    {
+        bool closingIn = target->GetVictim() == bot && sServerFacade.isMoving(target);
+        kite = ai->IsRanged(bot) && event.getSource() == "enemy too close for spell" && closingIn;
+    }
+
+    return Flee(target, kite);
 }
 
 bool FleeWithPetAction::Execute(Event& event)
