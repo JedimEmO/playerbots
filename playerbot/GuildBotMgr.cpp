@@ -172,7 +172,7 @@ void GuildBotMgr::Tick(uint32 elapsed)
 void GuildBotMgr::EnsureTables()
 {
     CharacterDatabase.DirectExecute(
-        "CREATE TABLE IF NOT EXISTS guild_character ("
+        "CREATE TABLE IF NOT EXISTS guildbot_character ("
         " guid INT UNSIGNED NOT NULL PRIMARY KEY,"
         " enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
         " job VARCHAR(32) NOT NULL DEFAULT 'idle',"
@@ -182,7 +182,7 @@ void GuildBotMgr::EnsureTables()
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
     CharacterDatabase.DirectExecute(
-        "CREATE TABLE IF NOT EXISTS guild_character_state ("
+        "CREATE TABLE IF NOT EXISTS guildbot_state ("
         " guid INT UNSIGNED NOT NULL PRIMARY KEY,"
         " name VARCHAR(12) NOT NULL,"
         " controller VARCHAR(8) NOT NULL,"
@@ -205,7 +205,7 @@ void GuildBotMgr::EnsureTables()
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
     CharacterDatabase.DirectExecute(
-        "CREATE TABLE IF NOT EXISTS guild_event ("
+        "CREATE TABLE IF NOT EXISTS guildbot_event ("
         " id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,"
         " guid INT UNSIGNED NOT NULL,"
         " at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
@@ -221,7 +221,7 @@ void GuildBotMgr::LoadOrders()
 {
     auto result = CharacterDatabase.PQuery(
         "SELECT g.guid, c.account, c.name, g.enabled, g.job, g.job_args, g.job_seq "
-        "FROM guild_character g JOIN characters c ON c.guid = g.guid");
+        "FROM guildbot_character g JOIN characters c ON c.guid = g.guid");
 
     std::set<uint32> seen;
     if (result)
@@ -406,7 +406,7 @@ void GuildBotMgr::WriteState(const Character& c, Player* bot)
     if (!bot)
     {
         CharacterDatabase.PExecute(
-            "INSERT INTO guild_character_state (guid, name, controller, level, xp, xp_next, money, map, zone, x, y, z, "
+            "INSERT INTO guildbot_state (guid, name, controller, level, xp, xp_next, money, map, zone, x, y, z, "
             "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason) "
             "SELECT c.guid, c.name, 'offline', c.level, c.xp, 0, c.money, c.map, c.zone, c.position_x, c.position_y, c.position_z, "
             "0, 0, 0, 0, '%s', %u, '%s', '%s' FROM characters c WHERE c.guid = %u "
@@ -418,7 +418,7 @@ void GuildBotMgr::WriteState(const Character& c, Player* bot)
     }
 
     CharacterDatabase.PExecute(
-        "REPLACE INTO guild_character_state (guid, name, controller, level, xp, xp_next, money, map, zone, x, y, z, "
+        "REPLACE INTO guildbot_state (guid, name, controller, level, xp, xp_next, money, map, zone, x, y, z, "
         "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason) "
         "VALUES (%u, '%s', '%s', %u, %u, %u, %u, %u, %u, %f, %f, %f, %u, %u, %u, %u, '%s', %u, '%s', '%s')",
         c.guid, Escape(c.name).c_str(), controller.c_str(), bot->GetLevel(), bot->GetUInt32Value(PLAYER_XP),
@@ -430,7 +430,7 @@ void GuildBotMgr::WriteState(const Character& c, Player* bot)
 
 void GuildBotMgr::Event(uint32 guid, const std::string& kind, const std::string& detail)
 {
-    CharacterDatabase.PExecute("INSERT INTO guild_event (guid, kind, detail) VALUES (%u, '%s', '%s')",
+    CharacterDatabase.PExecute("INSERT INTO guildbot_event (guid, kind, detail) VALUES (%u, '%s', '%s')",
         guid, Escape(kind).c_str(), Escape(detail.substr(0, 255)).c_str());
 }
 
@@ -537,7 +537,7 @@ std::list<std::string> GuildBotMgr::HandleAdd(const std::string& args)
         return { normalized + " is a random bot" };
 
     CharacterDatabase.DirectPExecute(
-        "INSERT INTO guild_character (guid, enabled, job, job_args, job_seq) VALUES (%u, 1, '%s', '%s', 1) "
+        "INSERT INTO guildbot_character (guid, enabled, job, job_args, job_seq) VALUES (%u, 1, '%s', '%s', 1) "
         "ON DUPLICATE KEY UPDATE enabled = 1, job = VALUES(job), job_args = VALUES(job_args), job_seq = job_seq + 1",
         guid.GetCounter(), Escape(job).c_str(), Escape(rest).c_str());
     sinceOrders = ORDERS_MS;
@@ -557,16 +557,16 @@ std::list<std::string> GuildBotMgr::HandleOrder(const std::string& sub, const st
 
     uint32 low = guid.GetCounter();
     if (sub == "on" || sub == "off")
-        CharacterDatabase.DirectPExecute("UPDATE guild_character SET enabled = %u WHERE guid = %u", sub == "on" ? 1 : 0, low);
+        CharacterDatabase.DirectPExecute("UPDATE guildbot_character SET enabled = %u WHERE guid = %u", sub == "on" ? 1 : 0, low);
     else if (sub == "remove")
-        CharacterDatabase.DirectPExecute("DELETE FROM guild_character WHERE guid = %u", low);
+        CharacterDatabase.DirectPExecute("DELETE FROM guildbot_character WHERE guid = %u", low);
     else
     {
         auto [job, jobArgs] = SplitWord(rest);
         if (job.empty())
             return { "usage: guildbot job <name> <job> [args]" };
         CharacterDatabase.DirectPExecute(
-            "UPDATE guild_character SET job = '%s', job_args = '%s', job_seq = job_seq + 1 WHERE guid = %u",
+            "UPDATE guildbot_character SET job = '%s', job_args = '%s', job_seq = job_seq + 1 WHERE guid = %u",
             Escape(job).c_str(), Escape(jobArgs).c_str(), low);
     }
 

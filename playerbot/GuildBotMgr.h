@@ -14,10 +14,10 @@ namespace ai { class Engine; }
 //
 // The guild service talks to the engine through three tables in the characters database, which this
 // manager creates:
-//   guild_character        the orders: which characters are guild characters, whether they are switched on,
+//   guildbot_character     the orders: which characters are guild characters, whether they are switched on,
 //                          and their job. A new order is a new job_seq.
-//   guild_character_state  what each one is doing now, written every few seconds.
-//   guild_event            things that happened, appended: logins, takeovers, levels, deaths, jobs done.
+//   guildbot_state         what each one is doing now, written every few seconds.
+//   guildbot_event         things that happened, appended: logins, takeovers, levels, deaths, jobs done.
 class GuildBotMgr : public PlayerbotHolder
 {
 public:
