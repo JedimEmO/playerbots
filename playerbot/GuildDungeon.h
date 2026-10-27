@@ -52,6 +52,9 @@ public:
     // can crash the server on the group bind, so a guild character in a group enters a dungeon only first,
     // as the group's leader, or after the leader is inside and the group is bound, and one at a time.
     static bool MayEnter(Player* bot, uint32 triggerId);
+    // True while a guild character outside walks to the entrance of the dungeon its group's leader is in;
+    // its follow action stands down meanwhile, since the leader is out of reach on another map.
+    static bool IsWalkingIn(Player* bot);
 
 private:
     GuildDungeon() = default;

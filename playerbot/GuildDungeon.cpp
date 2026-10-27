@@ -327,6 +327,25 @@ void GuildDungeon::BringToEntrance(Player* member, uint32 triggerId)
         mm.MovePoint(atEntry->mapid, atEntry->x, atEntry->y, atEntry->z, FORCED_MOVEMENT_RUN);
 }
 
+bool GuildDungeon::IsWalkingIn(Player* bot)
+{
+    Group* group = bot->GetGroup();
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!group || !ai || !sGuildBotMgr.IsGuildBot(bot))
+        return false;
+
+    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+    if (!leader || leader == bot || leader->GetMapId() == bot->GetMapId())
+        return false;
+    MapEntry const* map = sMapStore.LookupEntry(leader->GetMapId());
+    if (!map || !map->IsDungeon())
+        return false;
+
+    uint32 triggerId = ai->GetAiObjectContext()->GetValue<LastMovement&>("last area trigger")->Get().lastAreaTrigger;
+    AreaTrigger const* at = triggerId ? sObjectMgr.GetAreaTrigger(triggerId) : nullptr;
+    return at && at->target_mapId == leader->GetMapId();
+}
+
 void GuildDungeon::Stop(uint32 leaderGuid)
 {
     std::lock_guard<std::mutex> guard(lock);

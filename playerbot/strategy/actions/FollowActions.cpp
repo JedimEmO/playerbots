@@ -7,6 +7,7 @@
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/LootObjectStack.h"
+#include "playerbot/GuildDungeon.h"
 
 using namespace ai;
 
@@ -36,6 +37,10 @@ bool FollowAction::Execute(Event& event)
 bool FollowAction::isUseful()
 {
     if (!ai->CanMove())
+        return false;
+
+    // A guild character walking into the dungeon its leader is in: following would pull it back to where it was.
+    if (GuildDungeon::IsWalkingIn(bot))
         return false;
 
     float distance = 0;
