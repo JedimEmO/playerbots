@@ -3,6 +3,7 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/ServerFacade.h"
+#include "playerbot/strategy/values/LastMovementValue.h"
 
 #include <algorithm>
 #include <cctype>
@@ -22,6 +23,8 @@ namespace
     constexpr uint32 BOSS_LEVELS_ABOVE = 3;
     // Members take the entrance at least this far apart, so the core binds the group to the instance once.
     constexpr uint32 ENTRY_GAP_MS = 3 * IN_MILLISECONDS;
+    // Members this far from the entrance are walked to it once the leader is inside.
+    constexpr float BRING_DISTANCE = 250.0f;
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
@@ -88,6 +91,9 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     dungeon.mapId = FindMap(name);
     dungeon.name = sMapStore.LookupEntry(dungeon.mapId)->name[0];
     dungeon.entrance = sObjectMgr.GetMapEntranceTrigger(dungeon.mapId);
+    for (uint32 i = 0; i < sAreaTriggerStore.GetNumRows() && !dungeon.entranceTrigger; ++i)
+        if (sAreaTriggerStore.LookupEntry(i) && sObjectMgr.GetAreaTrigger(i) == dungeon.entrance)
+            dungeon.entranceTrigger = i;
 
     // The bosses are the boss travel destinations on the dungeon's map: its elites with one spawn.
     // Nearest the arrival point first; the boss step will order them by route.
@@ -253,6 +259,12 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
         else
             inside = 1;
 
+        if (group && dungeon.entranceTrigger)
+            for (auto& slot : group->GetMemberSlots())
+                if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                    if (member != leader && member->GetMapId() != dungeon.mapId)
+                        BringToEntrance(member, dungeon.entranceTrigger);
+
         if (!run.entered && inside == members && members >= PARTY_SIZE)
         {
             run.entered = true;
@@ -293,6 +305,26 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     else
         update.reason = why;
     return update;
+}
+
+void GuildDungeon::BringToEntrance(Player* member, uint32 triggerId)
+{
+    AreaTriggerEntry const* atEntry = sAreaTriggerStore.LookupEntry(triggerId);
+    PlayerbotAI* ai = member->GetPlayerbotAI();
+    if (!atEntry || !ai || !sGuildBotMgr.IsGuildBot(member))
+        return;
+    // A dead member's way back is the corpse run; a fighting one finishes its fight first.
+    if (!member->IsInWorld() || member->IsBeingTeleported() || !member->IsAlive() || member->IsInCombat())
+        return;
+    if (member->GetMapId() != atEntry->mapid || member->GetDistance(atEntry->x, atEntry->y, atEntry->z) > BRING_DISTANCE)
+        return;
+
+    // As upstream's reach area trigger action does: remember the trigger, which the within area trigger
+    // check takes once the member stands in it, and run to it.
+    ai->GetAiObjectContext()->GetValue<LastMovement&>("last area trigger")->Get().lastAreaTrigger = triggerId;
+    MotionMaster& mm = *member->GetMotionMaster();
+    if (mm.GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+        mm.MovePoint(atEntry->mapid, atEntry->x, atEntry->y, atEntry->z, FORCED_MOVEMENT_RUN);
 }
 
 void GuildDungeon::Stop(uint32 leaderGuid)
