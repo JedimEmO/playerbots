@@ -4,10 +4,12 @@
 
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
+class Map;
 class Player;
 struct AreaTrigger;
 
@@ -16,7 +18,8 @@ struct AreaTrigger;
 //
 // Built so far: Resolve (the name to a map, its entrance and its bosses), Check (a full party that fits
 // the dungeon and may enter it), Go (a forced travel target at the first boss, whose route passes the
-// entrance) and Enter (the leader goes in first, the others one at a time, then the party holds inside).
+// entrance), Enter (the leader goes in first, the others one at a time, and it holds until all are in)
+// and Bosses (a forced travel target at the first boss still alive; done when the last boss dies).
 class GuildDungeon
 {
 public:
@@ -28,7 +31,7 @@ public:
 
     struct Update
     {
-        std::string status = "working";  // working or failed
+        std::string status = "working";  // working, done or failed
         std::string reason;
         std::vector<std::pair<std::string, std::string>> events;  // kind, detail
         bool strategiesChanged = false;   // the leader's non-combat strategies must be rebuilt
@@ -60,7 +63,7 @@ public:
 private:
     GuildDungeon() = default;
 
-    enum class Phase { Check, Go, Hold };
+    enum class Phase { Check, Go, Hold, Bosses };
 
     struct Dungeon
     {
@@ -68,6 +71,8 @@ private:
         uint32 mapId = 0;
         AreaTrigger const* entrance = nullptr;
         std::vector<int32> bosses;     // boss entries, nearest the entrance first
+        std::vector<uint32> spawns;    // each boss's spawn on the map, by database guid; 0 if none is known
+        int32 lastBoss = 0;            // the boss whose death ends the run
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
     };
 
@@ -77,12 +82,18 @@ private:
         Phase phase = Phase::Check;
         bool resolved = false;
         bool entered = false;          // the whole party has been inside
+        int32 nextBoss = 0;            // the boss the party is on its way to
+        std::set<int32> killed;        // bosses reported dead
     };
 
     static bool Resolve(const std::string& name, Player* leader, Dungeon& dungeon, std::string& error);
     static uint32 FindMap(const std::string& name);
     // Why the party cannot set out yet, or empty. Sets failed when waiting would not help.
     static std::string CheckParty(Player* leader, const Dungeon& dungeon, bool& failed);
+    // The boss's spawn in this instance is dead: killed, with its respawn time saved, or a corpse now.
+    static bool BossDead(Map* map, uint32 spawn);
+    // The bosses step, inside with the whole party.
+    void TickBosses(Player* leader, Run& run, Update& update);
 
     mutable std::mutex lock;
     std::map<uint32, Run> runs;                 // by leader guid

@@ -40,6 +40,12 @@ namespace
         return out;
     }
 
+    std::string BossName(int32 entry)
+    {
+        CreatureInfo const* info = entry > 0 ? ObjectMgr::GetCreatureTemplate(entry) : nullptr;
+        return info ? std::string(info->Name) : std::to_string(entry);
+    }
+
     std::string MemberName(Group const* group, ObjectGuid guid)
     {
         for (auto& slot : group->GetMemberSlots())
@@ -107,7 +113,23 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     }
     std::sort(bosses.begin(), bosses.end());
     for (auto& [distance, entry] : bosses)
+    {
+        // Its spawn on the map tells whether it is dead in an instance; a boss with no spawn of its own,
+        // one a script summons, cannot be told apart and is left out.
+        uint32 spawn = 0;
+        auto findSpawn = [&](auto const& pair)
+        {
+            if (pair.second.id != uint32(entry) || pair.second.mapid != dungeon.mapId)
+                return false;
+            spawn = pair.first;
+            return true;
+        };
+        sObjectMgr.DoCreatureData(findSpawn);
+        if (!spawn)
+            continue;
         dungeon.bosses.push_back(entry);
+        dungeon.spawns.push_back(spawn);
+    }
 
     if (dungeon.bosses.empty())
     {
@@ -125,10 +147,16 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
             continue;
         highest = std::max(highest, info->MaxLevel);
         if (last != LAST_BOSS.end() && entry == last->second)
+        {
             dungeon.bossLevel = info->MaxLevel;
+            dungeon.lastBoss = entry;
+        }
     }
     if (!dungeon.bossLevel)
         dungeon.bossLevel = highest;
+    // Without a table entry, the boss farthest from the entrance ends the run.
+    if (!dungeon.lastBoss)
+        dungeon.lastBoss = dungeon.bosses.back();
 
     return true;
 }
@@ -231,15 +259,6 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
 
     if (leader->GetMapId() == dungeon.mapId)
     {
-        // The leader is in: it holds by the entrance while the others follow it in, one at a time.
-        if (run.phase != Phase::Hold)
-        {
-            run.phase = Phase::Hold;
-            update.strategiesChanged = true;
-            if (PlayerbotAI* ai = leader->GetPlayerbotAI())
-                sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
-        }
-
         uint32 members = group ? group->GetMembersCount() : 1, inside = 0;
         if (group)
         {
@@ -252,17 +271,38 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
         }
         else
             inside = 1;
+        const bool all = inside == members && members >= PARTY_SIZE;
 
-        if (!run.entered && inside == members && members >= PARTY_SIZE)
+        if (!run.entered && all)
         {
             run.entered = true;
             update.events.push_back({ "dungeon_entered", dungeon.name });
         }
 
-        // The boss step comes next; until then the party waits inside.
-        update.reason = run.entered && inside == members
-            ? "inside " + dungeon.name + " with the party"
-            : "entering " + dungeon.name + ", " + std::to_string(inside) + " of " + std::to_string(members) + " inside";
+        // The whole party is in: on to the bosses.
+        if (run.entered && all)
+        {
+            if (run.phase != Phase::Bosses)
+            {
+                run.phase = Phase::Bosses;
+                run.nextBoss = 0;
+                update.strategiesChanged = true;
+            }
+            TickBosses(leader, run, update);
+            if (update.status == "done")
+                runs.erase(leader->GetGUIDLow());
+            return update;
+        }
+
+        // Not all of it: the leader holds where it is while the others come in, one at a time.
+        if (run.phase != Phase::Hold)
+        {
+            run.phase = Phase::Hold;
+            update.strategiesChanged = true;
+            if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+                sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+        }
+        update.reason = "entering " + dungeon.name + ", " + std::to_string(inside) + " of " + std::to_string(members) + " inside";
         return update;
     }
 
@@ -295,6 +335,58 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     return update;
 }
 
+bool GuildDungeon::BossDead(Map* map, uint32 spawn)
+{
+    if (!map || !spawn)
+        return false;
+    // Loaded: the creature itself. Its grid unloaded: the respawn time the core saved at its death.
+    if (Creature* creature = map->GetCreature(spawn))
+        return !creature->IsAlive();
+    MapPersistentState* state = map->GetPersistentState();
+    return state && state->GetCreatureRespawnTime(spawn) > time(nullptr);
+}
+
+void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
+{
+    const Dungeon& dungeon = run.dungeon;
+    Map* map = leader->GetMap();
+
+    int32 next = 0;
+    for (size_t i = 0; i < dungeon.bosses.size(); ++i)
+    {
+        int32 entry = dungeon.bosses[i];
+        if (BossDead(map, dungeon.spawns[i]))
+        {
+            if (run.killed.insert(entry).second)
+                update.events.push_back({ "boss_killed", BossName(entry) });
+        }
+        else if (!next)
+            next = entry;
+    }
+
+    const std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(dungeon.bosses.size()) + " bosses down";
+    if (run.killed.count(dungeon.lastBoss) || !next)
+    {
+        update.status = "done";
+        update.reason = dungeon.name + " cleared to " + BossName(dungeon.lastBoss) + ", " + count;
+        update.events.push_back({ "dungeon_done", dungeon.name + ", " + count });
+        return;
+    }
+
+    // A new boss to go to: drop the travel target at the one that died, and the travel strategy asks for the next.
+    if (next != run.nextBoss)
+    {
+        run.nextBoss = next;
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+        {
+            TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+            if (target && target->GetEntry() && target->GetEntry() != next)
+                target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+        }
+    }
+    update.reason = "on the way to " + BossName(next) + " in " + dungeon.name + ", " + count;
+}
+
 bool GuildDungeon::LeaderInDungeon(Player* bot, WorldLocation& leaderPlace)
 {
     Group* group = bot->GetGroup();
@@ -322,7 +414,12 @@ bool GuildDungeon::ShouldTravel(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(bot->GetGUIDLow());
-    return it != runs.end() && it->second.phase == Phase::Go && bot->GetMapId() != it->second.dungeon.mapId;
+    if (it == runs.end())
+        return false;
+    const Run& run = it->second;
+    if (run.phase == Phase::Go)
+        return bot->GetMapId() != run.dungeon.mapId;
+    return run.phase == Phase::Bosses && run.nextBoss && bot->GetMapId() == run.dungeon.mapId;
 }
 
 bool GuildDungeon::IsHolding(Player* bot) const
@@ -338,6 +435,8 @@ int32 GuildDungeon::TravelEntry(Player* bot) const
     auto it = runs.find(bot->GetGUIDLow());
     if (it == runs.end() || it->second.dungeon.bosses.empty())
         return 0;
+    if (it->second.phase == Phase::Bosses)
+        return it->second.nextBoss;
     return it->second.dungeon.bosses.front();
 }
 

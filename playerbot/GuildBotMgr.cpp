@@ -306,7 +306,11 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
             return;
         }
         // On the way, a forced travel target takes it to the dungeon once it has sold and repaired; no grinding.
+        // Inside, the travel target is the next boss, and at the boss it fights: grind, which starts no fight
+        // on the way to a destination that is not a grind spot, only there.
         engine->addStrategies("collision", "travel", "rpg", "free", "guild level", NULL);
+        if (player->GetMap() && player->GetMap()->IsDungeon())
+            engine->addStrategy("grind");
         engine->removeStrategy("rpg quest");
         engine->removeStrategy("rpg explore");
         engine->removeStrategy("rpg player");
@@ -693,6 +697,11 @@ void GuildBotMgr::CheckJobs()
             {
                 c.status = "failed";
                 Event(guid, "job_failed", "dungeon " + c.reason);
+            }
+            else if (update.status == "done")
+            {
+                c.status = "done";
+                Event(guid, "job_done", "dungeon " + c.reason);
             }
             if ((update.strategiesChanged || c.status != "working") && bot->GetPlayerbotAI())
                 bot->GetPlayerbotAI()->ResetStrategies(false);
