@@ -68,7 +68,9 @@ bool LoseAggroTrigger::IsActive()
                 if(targetsTarget && targetsTarget->IsPlayer())
                 {
                     Player* targetsPlayerTarget = (Player*)targetsTarget;
-                    return !ai->IsTank(targetsPlayerTarget);
+                    // Another tank holds it. The assigned main tank takes back its target, as in AzerothCore;
+                    // any other tank leaves it.
+                    return !ai->IsTank(targetsPlayerTarget) || PlayerbotAI::IsExplicitMainTank(bot);
                 }
             }
         }
