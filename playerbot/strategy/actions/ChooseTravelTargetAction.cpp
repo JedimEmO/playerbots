@@ -7,6 +7,7 @@
 #include "playerbot/strategy/values/SharedValueContext.h"
 #include "playerbot/strategy/values/GuildValues.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
+#include "playerbot/GuildDungeon.h"
 #include "Guilds/GuildMgr.h"
 #include <iomanip>
 
@@ -62,7 +63,8 @@ bool ChooseTravelTargetAction::Execute(Event& event)
         newTarget.SetForced(true);
         newTarget.SetRelevance(std::max<uint32>(targetRelevance, 199u));
     }
-    else if (AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::guild order")
+    else if (AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::guild order" ||
+        AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::dungeon")
     {
         newTarget.SetForced(true);
         newTarget.SetRelevance(std::max<uint32>(targetRelevance, 198u));
@@ -919,6 +921,30 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
             }
         );
     }
+    else if (travelName == "dungeon")
+    {
+        // A dungeon run: the first boss, inside, so the route passes the entrance.
+        int32 entry = sGuildDungeon.TravelEntry(bot);
+        if (!entry)
+            return false;
+
+        DestinationList dests = sTravelMgr.GetDestinations(PlayerTravelInfo(bot), (uint32)TravelDestinationPurpose::Boss, { entry }, false, 0);
+        if (dests.empty())
+            return false;
+
+        TravelDestination* dest = dests.front();
+        *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [dest, center]()
+            {
+                PartitionedTravelList list;
+                std::list<uint8> chancesToGoFar = { 10,50,90 };
+                if (WorldPosition* point = dest->GetNextPoint(center, chancesToGoFar))
+                    list[0].push_back(TravelPoint(dest, point, point->distance(center)));
+                return list;
+            });
+
+        if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry))
+            SET_AI_VALUE2(std::string, "manual string", "future travel detail", std::string(info->Name));
+    }
     else if (travelName == "guild order")
     {
         GuildOrder order = AI_VALUE(GuildOrder, "guild order");
@@ -1342,6 +1368,7 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
     SET_AI_VALUE2(std::string, "manual string", "future travel condition",
         travelName == "guild meeting" ? "should travel named::guild meeting" :
         travelName == "guild order" ? "should travel named::guild order" :
+        travelName == "dungeon" ? "should travel named::dungeon" :
         event.getSource());
     SET_AI_VALUE2(int, "manual int", "future travel relevance", relevance * 100);
 
@@ -1368,6 +1395,8 @@ bool RequestNamedTravelTargetAction::isAllowed() const
     else if (name == "reagent vendor")
         return true;
     else if (name == "guild order")
+        return true;
+    else if (name == "dungeon")
         return true;
     else if (name == "mount")
     {

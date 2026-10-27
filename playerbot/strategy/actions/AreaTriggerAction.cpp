@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "AreaTriggerAction.h"
 #include "playerbot/PlayerbotAIConfig.h"
+#include "playerbot/GuildDungeon.h"
 
 using namespace ai;
 
@@ -65,6 +66,13 @@ bool AreaTriggerAction::Execute(Event& event)
     AreaTrigger const* at = sObjectMgr.GetAreaTrigger(triggerId);
     if (!at)
         return true;
+
+    // Into a dungeon a guild character goes after its leader, one at a time; until then it waits in the trigger.
+    if (!GuildDungeon::MayEnter(bot, triggerId))
+    {
+        movement.lastAreaTrigger = triggerId;
+        return false;
+    }
 
     WorldPacket p(CMSG_AREATRIGGER);
     p << triggerId;

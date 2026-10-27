@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildBench.h"
+#include "playerbot/GuildDungeon.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/Engine.h"
@@ -89,7 +90,7 @@ namespace
     // The jobs the engine knows. Anything else fails with "unknown job".
     bool IsKnownJob(const std::string& job)
     {
-        return job == "idle" || job == "level" || job == "party" || job == "farm" || job == "learn";
+        return job == "idle" || job == "level" || job == "party" || job == "farm" || job == "learn" || job == "dungeon";
     }
 }
 
@@ -289,6 +290,24 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     }
 
     const std::string job = GetActiveJob(player->GetGUIDLow());
+
+    if (job == "dungeon")
+    {
+        // Inside, the leader holds by the entrance while the party follows it in.
+        if (sGuildDungeon.IsHolding(player))
+        {
+            engine->addStrategy("stay");
+            return;
+        }
+        // On the way, a forced travel target takes it to the dungeon once it has sold and repaired; no grinding.
+        engine->addStrategies("collision", "travel", "rpg", "free", "guild level", NULL);
+        engine->removeStrategy("rpg quest");
+        engine->removeStrategy("rpg explore");
+        engine->removeStrategy("rpg player");
+        engine->removeStrategy("rpg bg");
+        engine->removeStrategy("rpg guild");
+        return;
+    }
 
     if (job == "learn")
     {
@@ -562,11 +581,19 @@ void GuildBotMgr::ApplyOrders()
 
         c.appliedSeq = c.jobSeq;
         c.reason.clear();
+        sGuildDungeon.Stop(guid);
         c.progressAt = 0;
         c.stalled = false;
         uint32 farmItem = uint32(atoi(ArgValue(c, "item").c_str()));
         uint32 learnSkill = ProfessionSkill(ArgValue(c, "profession"));
-        if (c.job == "farm" && (!farmItem || !sObjectMgr.GetItemPrototype(farmItem)))
+        std::string dungeonError = c.job == "dungeon" ? GuildDungeon::Validate(ArgValue(c, "name")) : "";
+        if (!dungeonError.empty())
+        {
+            c.status = "failed";
+            c.reason = dungeonError;
+            Event(guid, "job_failed", c.reason);
+        }
+        else if (c.job == "farm" && (!farmItem || !sObjectMgr.GetItemPrototype(farmItem)))
         {
             c.status = "failed";
             c.reason = "farm needs item=<item id> of an item that exists";
@@ -647,6 +674,22 @@ void GuildBotMgr::CheckJobs()
             c.reason = KeepParty(c, bot);
             if (!wasJoined && !c.partyLeader.empty())
                 Event(guid, "party", "joined " + c.partyLeader);
+            continue;
+        }
+
+        if (c.job == "dungeon")
+        {
+            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"));
+            for (auto& [kind, detail] : update.events)
+                Event(guid, kind, detail);
+            c.reason = update.reason;
+            if (update.status == "failed")
+            {
+                c.status = "failed";
+                Event(guid, "job_failed", "dungeon " + c.reason);
+            }
+            if ((update.strategiesChanged || c.status != "working") && bot->GetPlayerbotAI())
+                bot->GetPlayerbotAI()->ResetStrategies(false);
             continue;
         }
 
@@ -996,7 +1039,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
     return {
         "guildbot add <name> [job [args]]       make a character a guild character",
         "guildbot create <account> <name> <race> <class> [male|female]   create a level 1 character on an account",
-        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>, farm item=<id> [amount=<n>], learn profession=<name>",
+        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>, farm item=<id> [amount=<n>], learn profession=<name>, dungeon name=<dungeon>",
         "guildbot role <name> tank|healer|dps|none   the role its talents follow",
         "guildbot tank <name> <order>|none      tank order in its group: 1 main tank, 2 the first assist tank, ...",
         "guildbot on|off <name>                 switch the engine's play on or off",

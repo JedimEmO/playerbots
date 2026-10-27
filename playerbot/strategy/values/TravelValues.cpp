@@ -1,5 +1,6 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 #include "TravelValues.h"
 #include "QuestValues.h"
 #include "SharedValueContext.h"
@@ -445,6 +446,17 @@ bool ShouldTravelNamedValue::Calculate()
     else if (name == "guild order")
     {
         return AI_VALUE(bool, "has guild travel order");
+    }
+    else if (name == "dungeon")
+    {
+        // A guild character leading a dungeon run sets out once it has sold and repaired.
+        if (!sGuildDungeon.ShouldTravel(bot))
+            return false;
+        if (AI_VALUE(bool, "should sell") && AI_VALUE(bool, "can sell"))
+            return false;
+        if (AI_VALUE(bool, "should repair") && AI_VALUE(bool, "can repair"))
+            return false;
+        return true;
     }
     else if (name == "reagent vendor")
     {

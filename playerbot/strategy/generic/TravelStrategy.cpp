@@ -20,6 +20,8 @@ float TravelActionMultiplier::GetValue(Action* action)
             return 1.0f;
         if (name.find("guild order") != std::string::npos)
             return 1.0f;
+        if (name.find("dungeon") != std::string::npos)
+            return 1.0f;
 
         return 0.0f;
     }
@@ -88,6 +90,7 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
         {"val::should travel named::guild meeting","request named travel target::guild meeting", 6.96f},      //100%
         {"val::should travel named::reagent vendor","request named travel target::reagent vendor", 6.955f},   //100%
         {"val::should travel named::guild order","request named travel target::guild order", 6.95f},          //100%
+        {"val::should travel named::dungeon","request named travel target::dungeon", 6.957f},                 //100%
         {"val::and::{has strategy::rpg quest,should get money}", "request quest travel target", 6.78f},       // 90%
         {"val::not::travel target active","refresh travel target", 6.7f},                                     // 90%
         {"val::not::travel target active","choose group travel target", 6.65f},                               // 50%
