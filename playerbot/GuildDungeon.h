@@ -69,7 +69,12 @@ public:
     // after the entrance's own checks (level, key, quest, the hourly limit) and one member of a group at a time.
     // Selecting a member keeps the stone's summoning. The core calls UseStone from the stone's use.
     static void UseStone(Player* player, uint32 areaId);
-    static bool EnterByStone(Player* player, uint32 mapId, std::string& why);
+    // Through this entrance, or the map's default when none is given.
+    static bool EnterByStone(Player* player, uint32 mapId, std::string& why, AreaTrigger const* entrance = nullptr);
+    // The entrances into a dungeon map from outside it: one, or one per wing, as Scarlet Monastery has four.
+    static std::vector<AreaTrigger const*> Entrances(uint32 mapId);
+    // The entrance whose arrival is nearest a place on the dungeon map: the wing it is in.
+    static AreaTrigger const* EntranceNear(uint32 mapId, float x, float y, float z);
     // The dungeon a stone's area names, or 0.
     static uint32 StoneMap(uint32 areaId);
     // Where the dungeon's stone stands; false when it has none.
@@ -106,6 +111,7 @@ private:
         AreaTrigger const* entrance = nullptr;
         std::vector<int32> bosses;     // boss entries, nearest the entrance first
         std::vector<uint32> spawns;    // each boss's spawn on the map, by database guid; 0 if none is known
+        std::map<int32, uint32> talks; // steps that are friendly creatures to speak to, by entry: the gossip action to pick
         int32 lastBoss = 0;            // the boss whose death ends the run
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
         ai::PlaceTravelDestination* exit = nullptr;  // outside, where the way out leads; kept in exits
@@ -121,6 +127,7 @@ private:
         int32 nextBoss = 0;            // the boss the party is on its way to
         uint32 nextSpawn = 0;          // its spawn
         std::set<int32> killed;        // bosses reported dead
+        std::set<int32> talked;        // talk steps done
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside

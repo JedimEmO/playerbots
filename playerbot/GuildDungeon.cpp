@@ -5,6 +5,8 @@
 #include "playerbot/TravelMgr.h"
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
+#include "AI/ScriptDevAI/ScriptDevAIMgr.h"
+#include "AI/ScriptDevAI/include/sc_gossip.h"
 
 #include <algorithm>
 #include <cctype>
@@ -60,6 +62,27 @@ namespace
         { 349, 12201 },  // Maraudon: Princess Theradras
     };
 
+    // A dungeon with wings, each its own entrance on one map, is run a wing at a time, by the wing's name.
+    // Its bosses are those nearest the wing's arrival; the table names the wing's entrance and last boss.
+    struct Wing { const char* name; const char* title; uint32 trigger; int32 lastBoss; };
+    const Wing WINGS[] = {
+        { "scarlet_monastery_graveyard", "Scarlet Monastery Graveyard", 45, 4543 },   // Bloodmage Thalnos
+        { "scarlet_monastery_library", "Scarlet Monastery Library", 614, 6487 },      // Arcanist Doan
+        { "scarlet_monastery_armory", "Scarlet Monastery Armory", 612, 3975 },        // Herod
+        { "scarlet_monastery_cathedral", "Scarlet Monastery Cathedral", 610, 3977 },  // High Inquisitor Whitemane
+    };
+
+    // Friendly creatures a party has to speak to on its way, as a player would, with the gossip action to pick.
+    // Each is a step among the bosses, in route order; the party takes the one friendly to it.
+    struct Talk { uint32 map; int32 entry; uint32 action; };
+    const Talk TALKS[] = {
+        // Shadowfang Keep: the prisoner, freed, unlocks the courtyard door. Horde and Alliance have one each.
+        { 33, 3849, GOSSIP_ACTION_INFO_DEF + 1 },   // Deathstalker Adamant
+        { 33, 3850, GOSSIP_ACTION_INFO_DEF + 1 },   // Sorcerer Ashcrombe
+    };
+    // A talk step is done once the leader is this near and has spoken.
+    constexpr float TALK_DISTANCE = 6.0f;
+
     // Letters only, in lower case, without a leading "the": "The Deadmines" and "deadmines" are one name.
     std::string Normalize(const std::string& name)
     {
@@ -87,8 +110,56 @@ namespace
     }
 }
 
+namespace
+{
+    const Wing* FindWing(const std::string& name)
+    {
+        const std::string wanted = Normalize(name);
+        for (const Wing& wing : WINGS)
+            if (Normalize(wing.name) == wanted)
+                return &wing;
+        return nullptr;
+    }
+}
+
+std::vector<AreaTrigger const*> GuildDungeon::Entrances(uint32 mapId)
+{
+    std::vector<AreaTrigger const*> entrances;
+    for (uint32 i = 0; i < sAreaTriggerStore.GetNumRows(); ++i)
+    {
+        AreaTriggerEntry const* entry = sAreaTriggerStore.LookupEntry(i);
+        if (!entry || entry->mapid == mapId)
+            continue;
+        AreaTrigger const* at = sObjectMgr.GetAreaTrigger(entry->id);
+        if (at && at->target_mapId == mapId)
+            entrances.push_back(at);
+    }
+    return entrances;
+}
+
+AreaTrigger const* GuildDungeon::EntranceNear(uint32 mapId, float x, float y, float z)
+{
+    AreaTrigger const* nearest = nullptr;
+    float best = 0.0f;
+    for (AreaTrigger const* at : Entrances(mapId))
+    {
+        const float dx = at->target_X - x, dy = at->target_Y - y, dz = at->target_Z - z;
+        const float distance = dx * dx + dy * dy + dz * dz;
+        if (!nearest || distance < best)
+        {
+            nearest = at;
+            best = distance;
+        }
+    }
+    return nearest ? nearest : sObjectMgr.GetMapEntranceTrigger(mapId);
+}
+
 uint32 GuildDungeon::FindMap(const std::string& name)
 {
+    if (const Wing* wing = FindWing(name))
+        if (AreaTrigger const* at = sObjectMgr.GetAreaTrigger(wing->trigger))
+            return at->target_mapId;
+
     const std::string wanted = Normalize(name);
     if (wanted.empty())
         return 0;
@@ -124,8 +195,10 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         return false;
 
     dungeon.mapId = FindMap(name);
-    dungeon.name = sMapStore.LookupEntry(dungeon.mapId)->name[0];
-    dungeon.entrance = sObjectMgr.GetMapEntranceTrigger(dungeon.mapId);
+    const Wing* wing = FindWing(name);
+    dungeon.name = wing ? wing->title : sMapStore.LookupEntry(dungeon.mapId)->name[0];
+    dungeon.entrance = wing ? sObjectMgr.GetAreaTrigger(wing->trigger) : sObjectMgr.GetMapEntranceTrigger(dungeon.mapId);
+    const bool wings = Entrances(dungeon.mapId).size() > 1;
 
     // The bosses are the boss travel destinations on the dungeon's map: its elites with one spawn.
     // Nearest the arrival point first; the boss step will order them by route.
@@ -141,12 +214,23 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         CreatureInfo const* bossInfo = ObjectMgr::GetCreatureTemplate(dest->GetEntry());
         FactionTemplateEntry const* bossFaction = bossInfo ? sFactionTemplateStore.LookupEntry(bossInfo->Faction) : nullptr;
         FactionTemplateEntry const* ownFaction = leader->GetFactionTemplateEntry();
-        if (!bossFaction || !ownFaction || !(bossFaction->IsHostileTo(*ownFaction) || bossFaction->IsHostileToPlayers()))
+        const bool hostile = bossFaction && ownFaction && (bossFaction->IsHostileTo(*ownFaction) || bossFaction->IsHostileToPlayers());
+        const Talk* talk = nullptr;
+        for (const Talk& t : TALKS)
+            if (t.map == dungeon.mapId && t.entry == dest->GetEntry())
+                talk = &t;
+        // A talk step only for the party it is friendly to; any other friendly creature is no step at all.
+        if (talk ? hostile : !hostile)
             continue;
+        if (talk)
+            dungeon.talks[talk->entry] = talk->action;
         // The destination's point nearest the arrival: on the dungeon's map if it has one there.
         std::list<uint8> nearest = { 0, 0, 0 };
         WorldPosition* point = dest->GetNextPoint(arrival, nearest);
         if (!point || point->getMapId() != dungeon.mapId)
+            continue;
+        // In a dungeon with wings, only the bosses of this run's wing: nearest its arrival of all the entrances'.
+        if (wings && EntranceNear(dungeon.mapId, point->getX(), point->getY(), point->getZ()) != dungeon.entrance)
             continue;
         bosses.push_back({ point->distance(arrival), dest->GetEntry() });
     }
@@ -206,6 +290,7 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
 
     // The party must be near the last boss's level: the one the table names, or else the highest.
     auto last = LAST_BOSS.find(dungeon.mapId);
+    const int32 wingLast = wing ? wing->lastBoss : 0;
     uint32 highest = 0;
     for (int32 entry : dungeon.bosses)
     {
@@ -213,7 +298,7 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         if (!info)
             continue;
         highest = std::max(highest, info->MaxLevel);
-        if (last != LAST_BOSS.end() && entry == last->second)
+        if (wingLast ? entry == wingLast : last != LAST_BOSS.end() && entry == last->second)
         {
             dungeon.bossLevel = info->MaxLevel;
             dungeon.lastBoss = entry;
@@ -446,7 +531,7 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     if (run.phase == Phase::Go && dungeon.stone && why.empty() && dungeon.stone->DistanceTo(WorldPosition(leader)) <= AT_STONE)
     {
         std::string refused;
-        if (!EnterByStone(leader, dungeon.mapId, refused) && !refused.empty())
+        if (!EnterByStone(leader, dungeon.mapId, refused, dungeon.entrance) && !refused.empty())
             why = refused;
     }
 
@@ -504,6 +589,32 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     for (size_t i = 0; i < dungeon.bosses.size(); ++i)
     {
         int32 entry = dungeon.bosses[i];
+        // A creature to speak to: a step until the leader has, and not a boss to count.
+        if (auto talk = dungeon.talks.find(entry); talk != dungeon.talks.end())
+        {
+            if (run.talked.count(entry))
+                continue;
+            Creature* creature = map->GetCreature(dungeon.spawns[i]);
+            if (!creature || !creature->IsAlive())
+            {
+                run.talked.insert(entry);
+                continue;
+            }
+            if (!next && leader->GetDistance(creature) <= TALK_DISTANCE)
+            {
+                // As a player picks the option in its gossip: the script does the rest, such as an escort to a door.
+                sScriptDevAIMgr.OnGossipSelect(leader, creature, GOSSIP_SENDER_MAIN, talk->second, nullptr);
+                run.talked.insert(entry);
+                update.events.push_back({ "talked", BossName(entry) });
+                continue;
+            }
+            if (!next)
+            {
+                next = entry;
+                run.nextSpawn = dungeon.spawns[i];
+            }
+            continue;
+        }
         if (BossDead(map, dungeon.spawns[i]))
         {
             present++;
@@ -548,7 +659,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (target && target->IsActive() && target->GetEntry() != next)
             target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
     }
-    update.reason = "on the way to " + BossName(next) + " in " + dungeon.name + ", " + count;
+    update.reason = (dungeon.talks.count(next) ? "on the way to speak to " : "on the way to ") + BossName(next) + " in " + dungeon.name + ", " + count;
 }
 
 void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
@@ -758,12 +869,12 @@ void GuildDungeon::UseStone(Player* player, uint32 areaId)
         ChatHandler(player).SendSysMessage(why.c_str());
 }
 
-bool GuildDungeon::EnterByStone(Player* player, uint32 mapId, std::string& why)
+bool GuildDungeon::EnterByStone(Player* player, uint32 mapId, std::string& why, AreaTrigger const* entrance)
 {
     why.clear();
     if (!player->IsAlive() || player->IsInCombat() || player->IsBeingTeleported() || player->GetMapId() == mapId)
         return false;
-    AreaTrigger const* at = sObjectMgr.GetMapEntranceTrigger(mapId);
+    AreaTrigger const* at = entrance ? entrance : sObjectMgr.GetMapEntranceTrigger(mapId);
     MapEntry const* map = sMapStore.LookupEntry(mapId);
     if (!at || !map)
     {
@@ -823,8 +934,10 @@ void GuildDungeon::FollowByStone(Player* member)
     WorldPosition stone;
     if (!StonePlace(leader->GetMapId(), stone) || stone.getMapId() != member->GetMapId() || stone.distance(WorldPosition(member)) > NEAR_STONE)
         return;
+    // In by the entrance of the wing the leader is in.
     std::string why;
-    EnterByStone(member, leader->GetMapId(), why);
+    EnterByStone(member, leader->GetMapId(), why,
+        EntranceNear(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ()));
 }
 
 TravelDestination* GuildDungeon::ExitDestination(Player* bot) const
