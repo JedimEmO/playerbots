@@ -13,6 +13,11 @@ using namespace ai;
 
 bool FollowAction::Execute(Event& event)
 {
+    // A guild character whose leader is inside a dungeon: the travel map's route to it runs through the entrance.
+    WorldLocation leaderPlace;
+    if (GuildDungeon::LeaderInDungeon(bot, leaderPlace))
+        return MoveTo(leaderPlace);
+
     bool moved = false;
     Unit* followTarget = ai->GetUnit(AI_VALUE(ObjectGuid, "follow target"));
     Formation* formation = AI_VALUE(Formation*, "formation");
@@ -39,9 +44,10 @@ bool FollowAction::isUseful()
     if (!ai->CanMove())
         return false;
 
-    // A guild character walking into the dungeon its leader is in: following would pull it back to where it was.
-    if (GuildDungeon::IsWalkingIn(bot))
-        return false;
+    // A guild character whose leader is inside a dungeon walks in after it.
+    WorldLocation leaderPlace;
+    if (GuildDungeon::LeaderInDungeon(bot, leaderPlace))
+        return true;
 
     float distance = 0;
     Unit* followTarget = ai->GetUnit(AI_VALUE(ObjectGuid, "follow target"));

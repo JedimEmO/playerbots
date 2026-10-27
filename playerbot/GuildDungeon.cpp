@@ -3,7 +3,6 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/ServerFacade.h"
-#include "playerbot/strategy/values/LastMovementValue.h"
 
 #include <algorithm>
 #include <cctype>
@@ -23,8 +22,6 @@ namespace
     constexpr uint32 BOSS_LEVELS_ABOVE = 3;
     // Members take the entrance at least this far apart, so the core binds the group to the instance once.
     constexpr uint32 ENTRY_GAP_MS = 3 * IN_MILLISECONDS;
-    // Members this far from the entrance are walked to it once the leader is inside.
-    constexpr float BRING_DISTANCE = 250.0f;
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
@@ -91,30 +88,6 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     dungeon.mapId = FindMap(name);
     dungeon.name = sMapStore.LookupEntry(dungeon.mapId)->name[0];
     dungeon.entrance = sObjectMgr.GetMapEntranceTrigger(dungeon.mapId);
-    for (uint32 i = 0; i < sAreaTriggerStore.GetNumRows() && !dungeon.entranceTrigger; ++i)
-        if (sAreaTriggerStore.LookupEntry(i) && sObjectMgr.GetAreaTrigger(i) == dungeon.entrance)
-            dungeon.entranceTrigger = i;
-
-    // The approach: the exit arrival on the entrance's map nearest the entrance trigger, within a short walk.
-    if (AreaTriggerEntry const* outside = sAreaTriggerStore.LookupEntry(dungeon.entranceTrigger))
-    {
-        float best = 40.0f;
-        for (uint32 i = 0; i < sAreaTriggerStore.GetNumRows(); ++i)
-        {
-            AreaTrigger const* exit = sAreaTriggerStore.LookupEntry(i) ? sObjectMgr.GetAreaTrigger(i) : nullptr;
-            if (!exit || exit->target_mapId != outside->mapid)
-                continue;
-            float dx = exit->target_X - outside->x, dy = exit->target_Y - outside->y, dz = exit->target_Z - outside->z;
-            float distance = sqrt(dx * dx + dy * dy + dz * dz);
-            if (distance < best)
-            {
-                best = distance;
-                dungeon.approachX = exit->target_X;
-                dungeon.approachY = exit->target_Y;
-                dungeon.approachZ = exit->target_Z;
-            }
-        }
-    }
 
     // The bosses are the boss travel destinations on the dungeon's map: its elites with one spawn.
     // Nearest the arrival point first; the boss step will order them by route.
@@ -280,12 +253,6 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
         else
             inside = 1;
 
-        if (group && dungeon.entranceTrigger)
-            for (auto& slot : group->GetMemberSlots())
-                if (Player* member = sObjectMgr.GetPlayer(slot.guid))
-                    if (member != leader && member->GetMapId() != dungeon.mapId)
-                        BringToEntrance(member, dungeon);
-
         if (!run.entered && inside == members && members >= PARTY_SIZE)
         {
             run.entered = true;
@@ -328,50 +295,21 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     return update;
 }
 
-void GuildDungeon::BringToEntrance(Player* member, const Dungeon& dungeon)
-{
-    const uint32 triggerId = dungeon.entranceTrigger;
-    AreaTriggerEntry const* atEntry = sAreaTriggerStore.LookupEntry(triggerId);
-    PlayerbotAI* ai = member->GetPlayerbotAI();
-    if (!atEntry || !ai || !sGuildBotMgr.IsGuildBot(member))
-        return;
-    // A dead member's way back is the corpse run; a fighting one finishes its fight first.
-    if (!member->IsInWorld() || member->IsBeingTeleported() || !member->IsAlive() || member->IsInCombat())
-        return;
-    if (member->GetMapId() != atEntry->mapid || member->GetDistance(atEntry->x, atEntry->y, atEntry->z) > BRING_DISTANCE)
-        return;
-
-    // As upstream's reach area trigger action does: remember the trigger, which the within area trigger
-    // check takes once the member stands in it, and run to it.
-    ai->GetAiObjectContext()->GetValue<LastMovement&>("last area trigger")->Get().lastAreaTrigger = triggerId;
-    MotionMaster& mm = *member->GetMotionMaster();
-    if (mm.GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE)
-        return;
-    // First to the approach, which a path can reach; from there a straight step into the trigger.
-    const bool approached = !dungeon.approachX || member->GetDistance(dungeon.approachX, dungeon.approachY, dungeon.approachZ) < 3.0f;
-    if (approached)
-        mm.MovePoint(atEntry->mapid, atEntry->x, atEntry->y, atEntry->z, FORCED_MOVEMENT_RUN, !dungeon.approachX);
-    else
-        mm.MovePoint(atEntry->mapid, dungeon.approachX, dungeon.approachY, dungeon.approachZ, FORCED_MOVEMENT_RUN);
-}
-
-bool GuildDungeon::IsWalkingIn(Player* bot)
+bool GuildDungeon::LeaderInDungeon(Player* bot, WorldLocation& leaderPlace)
 {
     Group* group = bot->GetGroup();
-    PlayerbotAI* ai = bot->GetPlayerbotAI();
-    if (!group || !ai || !sGuildBotMgr.IsGuildBot(bot))
+    if (!group || !sGuildBotMgr.IsGuildBot(bot) || !bot->IsAlive())
         return false;
 
     Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
-    if (!leader || leader == bot || leader->GetMapId() == bot->GetMapId())
+    if (!leader || leader == bot || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->GetMapId() == bot->GetMapId())
         return false;
     MapEntry const* map = sMapStore.LookupEntry(leader->GetMapId());
     if (!map || !map->IsDungeon())
         return false;
 
-    uint32 triggerId = ai->GetAiObjectContext()->GetValue<LastMovement&>("last area trigger")->Get().lastAreaTrigger;
-    AreaTrigger const* at = triggerId ? sObjectMgr.GetAreaTrigger(triggerId) : nullptr;
-    return at && at->target_mapId == leader->GetMapId();
+    leader->GetPosition(leaderPlace);
+    return true;
 }
 
 void GuildDungeon::Stop(uint32 leaderGuid)

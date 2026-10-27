@@ -52,9 +52,10 @@ public:
     // can crash the server on the group bind, so a guild character in a group enters a dungeon only first,
     // as the group's leader, or after the leader is inside and the group is bound, and one at a time.
     static bool MayEnter(Player* bot, uint32 triggerId);
-    // True while a guild character outside walks to the entrance of the dungeon its group's leader is in;
-    // its follow action stands down meanwhile, since the leader is out of reach on another map.
-    static bool IsWalkingIn(Player* bot);
+    // Where a guild character outside should go when its group's leader is inside a dungeon: the leader's place.
+    // Its follow target is out of reach on another map, so follow moves there instead, and the route the travel
+    // map gives runs through the entrance trigger. False when it is not in that position.
+    static bool LeaderInDungeon(Player* bot, WorldLocation& leaderPlace);
 
 private:
     GuildDungeon() = default;
@@ -66,10 +67,6 @@ private:
         std::string name;
         uint32 mapId = 0;
         AreaTrigger const* entrance = nullptr;
-        uint32 entranceTrigger = 0;    // the area trigger outside that takes a player in
-        // Where the dungeon's exit puts a player down outside: walkable ground beside the entrance, which the
-        // trigger itself, often inside the portal, is not. Zero when no exit lands near the entrance.
-        float approachX = 0, approachY = 0, approachZ = 0;
         std::vector<int32> bosses;     // boss entries, nearest the entrance first
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
     };
@@ -86,9 +83,6 @@ private:
     static uint32 FindMap(const std::string& name);
     // Why the party cannot set out yet, or empty. Sets failed when waiting would not help.
     static std::string CheckParty(Player* leader, const Dungeon& dungeon, bool& failed);
-    // Walks a member outside to the entrance trigger, where the entry guard lets it in after the leader.
-    // A follower's follow target is out of reach once the leader is on the dungeon's map.
-    static void BringToEntrance(Player* member, const Dungeon& dungeon);
 
     mutable std::mutex lock;
     std::map<uint32, Run> runs;                 // by leader guid
