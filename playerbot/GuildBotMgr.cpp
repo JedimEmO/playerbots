@@ -1,5 +1,6 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildBench.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/Engine.h"
@@ -987,6 +988,8 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         return HandleState(rest);
     if (sub == "tank")
         return HandleTank(rest);
+    if (sub == "bench")
+        return GuildBench::HandleCommand(rest);
     if (sub == "on" || sub == "off" || sub == "job" || sub == "remove" || sub == "role")
         return HandleOrder(sub, rest);
 
@@ -999,6 +1002,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         "guildbot on|off <name>                 switch the engine's play on or off",
         "guildbot remove <name>                 stop treating it as a guild character",
         "guildbot list                          every guild character, one line each",
+        "guildbot bench ...                     GM test benches only: level, gear, consumables (guildbot bench help)",
         "guildbot state <name>                  what it is doing, as the state table holds it",
     };
 }
