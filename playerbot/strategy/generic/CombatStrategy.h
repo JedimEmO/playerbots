@@ -158,4 +158,26 @@ namespace ai
         }
 #endif
     };
+
+    // Keeps a tank turning its target away from the group; see the tank face action. Added by hand or by a raid strategy.
+    class TankFaceStrategy : public Strategy
+    {
+    public:
+        TankFaceStrategy(PlayerbotAI* ai) : Strategy(ai) {}
+        std::string getName() override { return "tank face"; }
+
+    private:
+        NextAction** GetDefaultCombatActions() override;
+    };
+
+    // Keeps melee at the current target's rear flank; see the rear flank action. Added by hand or by a raid strategy.
+    class RearFlankStrategy : public Strategy
+    {
+    public:
+        RearFlankStrategy(PlayerbotAI* ai) : Strategy(ai) {}
+        std::string getName() override { return "rear flank"; }
+
+    private:
+        NextAction** GetDefaultCombatActions() override;
+    };
 }

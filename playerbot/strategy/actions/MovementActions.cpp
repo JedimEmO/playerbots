@@ -2813,6 +2813,46 @@ bool MovementAction::FollowOnTransport(Unit* target)
 }
 
 
+bool MovementAction::MoveFromGroup(float distance)
+{
+    Group* group = bot->GetGroup();
+    if (!group)
+        return false;
+
+    float closest = FLT_MAX;
+    float x = 0.0f;
+    float y = 0.0f;
+    uint32 count = 0;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->getSource();
+        if (!member || member == bot || !member->IsAlive() || member->GetMapId() != bot->GetMapId())
+            continue;
+
+        closest = std::min(closest, bot->GetDistance2d(member->GetPositionX(), member->GetPositionY()));
+        x += member->GetPositionX();
+        y += member->GetPositionY();
+        ++count;
+    }
+
+    if (!count || closest >= distance)
+        return false;
+
+    // Away from the group's average position.
+    float angle = bot->GetAngle(x / count, y / count) + M_PI_F;
+    return Move(angle, distance - closest);
+}
+
+bool MovementAction::Move(float angle, float distance)
+{
+    float x = bot->GetPositionX() + cos(angle) * distance;
+    float y = bot->GetPositionY() + sin(angle) * distance;
+    float z = bot->GetPositionZ();
+    bot->UpdateGroundPositionZ(x, y, z);
+
+    return MoveTo(bot->GetMapId(), x, y, z);
+}
+
 void MovementAction::WaitForReach(float distance)
 {
     float duration = 1000.0f * MoveDelay(distance) + sPlayerbotAIConfig.reactDelay;
@@ -3345,6 +3385,129 @@ bool SetFacingTargetAction::isPossible()
         return false;
 
     return true;
+}
+
+bool TankFaceAction::isUseful()
+{
+    Unit* target = ai->GetUnit(AI_VALUE(ObjectGuid, "current target"));
+    return target && bot->GetGroup() && !target->IsMoving() && bot->CanReachWithMeleeAttack(target) &&
+        AI_VALUE2(bool, "has aggro", "current target");
+}
+
+bool TankFaceAction::Execute(Event& event)
+{
+    Unit* target = ai->GetUnit(AI_VALUE(ObjectGuid, "current target"));
+    Group* group = bot->GetGroup();
+    if (!target || !group)
+        return false;
+
+    // The direction from the target to the group's ranged members, the bot left out.
+    float sumX = 0.0f;
+    float sumY = 0.0f;
+    uint32 count = 0;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->getSource();
+        if (!member || member == bot || !member->IsAlive() || member->GetMapId() != bot->GetMapId() || !ai->IsRanged(member) ||
+            sServerFacade.GetDistance2d(bot, member) > sPlayerbotAIConfig.sightDistance)
+            continue;
+
+        sumX += member->GetPositionX() - target->GetPositionX();
+        sumY += member->GetPositionY() - target->GetPositionY();
+        ++count;
+    }
+
+    if (!count)
+        return false;
+
+    float groupAngle = atan2(sumY, sumX);
+
+    // Only while the target faces the group: the bot, which it faces, is within 90 degrees of the group's direction.
+    float delta = MapManager::NormalizeOrientation(groupAngle - target->GetAngle(bot));
+    if (delta > M_PI_F)
+        delta -= 2.0f * M_PI_F;
+    if (fabs(delta) > M_PI_F / 2.0f)
+        return false;
+
+    // At the bot's distance, though not so close that the target backs away.
+    float distance = std::max(bot->GetDistance2d(target->GetPositionX(), target->GetPositionY(), DIST_CALC_NONE),
+        bot->GetCombinedCombatReach(target, true) / 2.0f);
+
+    float ox, oy, oz;
+    target->GetPosition(ox, oy, oz);
+    float bestX = 0.0f, bestY = 0.0f, bestZ = 0.0f;
+    bool found = false;
+    for (float side : { 1.0f, -1.0f })
+    {
+        float angle = MapManager::NormalizeOrientation(groupAngle + side * M_PI_F * 3.0f / 5.0f);
+        float x = ox + cos(angle) * distance;
+        float y = oy + sin(angle) * distance;
+        float z = oz;
+        bot->UpdateGroundPositionZ(x, y, z);
+
+        // Not through a wall.
+#ifdef MANGOSBOT_TWO
+        target->GetMap()->GetHitPosition(ox, oy, oz + bot->GetCollisionHeight(), x, y, z, bot->GetPhaseMask(), -0.5f);
+#else
+        target->GetMap()->GetHitPosition(ox, oy, oz + bot->GetCollisionHeight(), x, y, z, -0.5f);
+#endif
+
+        if (!found || bot->GetDistance2d(x, y, DIST_CALC_NONE) < bot->GetDistance2d(bestX, bestY, DIST_CALC_NONE))
+        {
+            bestX = x;
+            bestY = y;
+            bestZ = z;
+            found = true;
+        }
+    }
+
+    return MoveTo(bot->GetMapId(), bestX, bestY, bestZ);
+}
+
+Unit* RearFlankAction::GetFlankTarget()
+{
+    return ai->GetUnit(AI_VALUE(ObjectGuid, "current target"));
+}
+
+bool RearFlankAction::isUseful()
+{
+    Unit* target = GetFlankTarget();
+    if (!target)
+        return false;
+
+    // In front, within the minimum angle either side of the nose; or in the cone behind the maximum angle.
+    bool inFront = target->HasInArc(bot, 2.0f * minAngle);
+    bool inRear = !target->HasInArc(bot, 2.0f * M_PI_F - maxAngle);
+    return inFront || inRear;
+}
+
+bool RearFlankAction::Execute(Event& event)
+{
+    Unit* target = GetFlankTarget();
+    if (!target)
+        return false;
+
+    float angle = frand(minAngle, maxAngle);
+    float reach = bot->GetCombinedCombatReach(target, true) * 0.5f + distance;
+
+    float bestX = 0.0f, bestY = 0.0f;
+    bool found = false;
+    for (float side : { 1.0f, -1.0f })
+    {
+        float flank = target->GetOrientation() + side * angle;
+        float x = target->GetPositionX() + cos(flank) * reach;
+        float y = target->GetPositionY() + sin(flank) * reach;
+        if (!found || bot->GetDistance2d(x, y, DIST_CALC_NONE) < bot->GetDistance2d(bestX, bestY, DIST_CALC_NONE))
+        {
+            bestX = x;
+            bestY = y;
+            found = true;
+        }
+    }
+
+    float z = target->GetPositionZ();
+    bot->UpdateGroundPositionZ(bestX, bestY, z);
+    return MoveTo(bot->GetMapId(), bestX, bestY, z);
 }
 
 bool SetBehindTargetAction::Execute(Event& event)

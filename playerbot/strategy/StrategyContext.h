@@ -155,6 +155,8 @@ namespace ai
             creators["guild"] = [](PlayerbotAI* ai) { return new GuildStrategy(ai); };
             creators["grind"] = [](PlayerbotAI* ai) { return new GrindingStrategy(ai); };
             creators["avoid aoe"] = [](PlayerbotAI* ai) { return new AvoidAoeStrategy(ai); };
+            creators["tank face"] = [](PlayerbotAI* ai) { return new TankFaceStrategy(ai); };
+            creators["rear flank"] = [](PlayerbotAI* ai) { return new RearFlankStrategy(ai); };
             creators["avoid specific creatures"] = [](PlayerbotAI* ai) { return new AvoidSpecificCreaturesStrategy(ai); };
             creators["wait for attack"] = [](PlayerbotAI* ai) { return new WaitForAttackStrategy(ai); };
             creators["pull back"] = [](PlayerbotAI* ai) { return new PullBackStrategy(ai); };

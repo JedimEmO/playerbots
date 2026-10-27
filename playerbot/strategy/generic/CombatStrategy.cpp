@@ -198,3 +198,13 @@ void HealInterruptStrategy::InitReactionTriggers(std::list<TriggerNode*>& trigge
 {
     InitCombatTriggers(triggers);
 }
+
+NextAction** TankFaceStrategy::GetDefaultCombatActions()
+{
+    return NextAction::array(0, new NextAction("tank face", ACTION_MOVE), NULL);
+}
+
+NextAction** RearFlankStrategy::GetDefaultCombatActions()
+{
+    return NextAction::array(0, new NextAction("rear flank", ACTION_MOVE), NULL);
+}

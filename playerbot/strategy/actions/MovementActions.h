@@ -67,6 +67,12 @@ namespace ai
         void WaitForReach(float distance);
         void WaitForReach(const Movement::PointsArray& path);
 
+        // Moves straight away from the group's average position until no living member is within the distance.
+        // From cmangos/playerbots pull request 390.
+        bool MoveFromGroup(float distance);
+        // Moves this far in this direction, on the ground.
+        bool Move(float angle, float distance);
+
         bool IsMovingAllowed(Unit* target);
         bool IsMovingAllowed(uint32 mapId, float x, float y, float z);
         bool Flee(Unit *target);
@@ -135,6 +141,33 @@ namespace ai
         virtual bool Execute(Event& event) override;
         virtual bool isUseful() override;
         virtual bool isPossible() override;
+    };
+
+    // AzerothCore's tank face. A tank holding a target that stands still in melee range turns it away from
+    // the group: when the target faces the group, the tank steps to the nearer point 108 degrees either side of
+    // the group's direction from the target, so the group stands at its flank, out of a breath or a cleave.
+    class TankFaceAction : public MovementAction
+    {
+    public:
+        TankFaceAction(PlayerbotAI* ai) : MovementAction(ai, "tank face") {}
+        bool Execute(Event& event) override;
+        bool isUseful() override;
+    };
+
+    // AzerothCore's rear flank. Melee stand between 90 and 120 degrees off the current target's nose:
+    // out of a frontal breath or cleave, out of the tail swipe behind, and not in front where attacks are parried.
+    class RearFlankAction : public MovementAction
+    {
+    public:
+        RearFlankAction(PlayerbotAI* ai, float distance = 0.0f, float minAngle = M_PI_F / 2.0f, float maxAngle = 2.0f * M_PI_F / 3.0f,
+            std::string name = "rear flank") : MovementAction(ai, name), distance(distance), minAngle(minAngle), maxAngle(maxAngle) {}
+        bool Execute(Event& event) override;
+        bool isUseful() override;
+
+    protected:
+        virtual Unit* GetFlankTarget();
+
+        float distance, minAngle, maxAngle;
     };
 
     class SetBehindTargetAction : public MovementAction
