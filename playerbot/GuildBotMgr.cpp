@@ -5,9 +5,11 @@
 #include "playerbot/strategy/Engine.h"
 #include "playerbot/strategy/actions/ChangeTalentsAction.h"
 #include "playerbot/Talentspec.h"
+#include "playerbot/TravelMgr.h"
 #include "Accounts/AccountMgr.h"
 #include "Chat/Chat.h"
 
+#include <algorithm>
 #include <set>
 #include <sstream>
 
@@ -28,6 +30,10 @@ namespace
     // A target the character has not hurt in this long is out of its reach; it is passed over for a while.
     constexpr time_t UNREACHED_TARGET_SECONDS = 45;
     constexpr time_t IGNORE_TARGET_SECONDS = 10 * MINUTE;
+    // This many give-ups this close together mean the spot itself is out of reach: leave it for a while.
+    constexpr size_t GIVE_UPS_TO_LEAVE = 3;
+    constexpr time_t GIVE_UP_WINDOW_SECONDS = 10 * MINUTE;
+    constexpr time_t LEAVE_DESTINATION_SECONDS = 30 * MINUTE;
 
     std::string Trim(const std::string& s)
     {
@@ -131,6 +137,19 @@ bool GuildBotMgr::IsIgnoredTarget(Player* bot, ObjectGuid target) const
     return t != it->second.end() && t->second > time(nullptr);
 }
 
+std::set<int32> GuildBotMgr::LeftDestinations(Player* bot) const
+{
+    std::set<int32> left;
+    auto it = leftDestinations.find(bot->GetGUIDLow());
+    if (it == leftDestinations.end())
+        return left;
+    const time_t now = time(nullptr);
+    for (auto& [entry, until] : it->second)
+        if (until > now)
+            left.insert(entry);
+    return left;
+}
+
 void GuildBotMgr::CheckChase(Character& c, Player* bot)
 {
     PlayerbotAI* ai = bot->GetPlayerbotAI();
@@ -171,6 +190,23 @@ void GuildBotMgr::CheckChase(Character& c, Player* bot)
 
     Event(c.guid, "gave_up", victim->GetName());
     chases.erase(c.guid);
+
+    // Several give-ups in a row: the spot it travelled to is out of reach, in a cave or behind a wall.
+    // Leave it, and let the next search pass over it, or the search finds it again.
+    auto& recent = giveUps[c.guid];
+    recent.erase(std::remove_if(recent.begin(), recent.end(), [&](time_t t) { return now - t > GIVE_UP_WINDOW_SECONDS; }), recent.end());
+    recent.push_back(now);
+    if (recent.size() < GIVE_UPS_TO_LEAVE)
+        return;
+    recent.clear();
+
+    ai::TravelTarget* travel = context->GetValue<ai::TravelTarget*>("travel target")->Get();
+    int32 entry = travel ? travel->GetEntry() : 0;
+    if (!entry)
+        return;
+    leftDestinations[c.guid][entry] = now + LEAVE_DESTINATION_SECONDS;
+    travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
+    Event(c.guid, "left_spot", travel->GetDestination() ? travel->GetDestination()->GetTitle() : std::to_string(entry));
 }
 
 uint8 GuildBotMgr::GetTankOrder(uint32 guid) const

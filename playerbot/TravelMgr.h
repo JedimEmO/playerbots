@@ -53,6 +53,8 @@ namespace ai
 		uint32 GetMoney() const { return money; }
 		// Guild characters walk everywhere, so they keep out of the other faction's zones.
 		bool AvoidsEnemyZones() const { return avoidEnemyZones; }
+		// A destination this character left lately because it could not work it.
+		bool HasLeft(int32 entry) const { return leftEntries.count(entry) > 0; }
 
 		bool HasFocusQuest() const {return !focusList.empty();}
 		bool IsFocusQuest(uint32 questId) const { return focusList.find(questId) != focusList.end(); }
@@ -71,6 +73,7 @@ namespace ai
 		uint8 groupSize = 0;
 		uint32 money = 0;
 		bool avoidEnemyZones = false;
+		std::set<int32> leftEntries;
 
 		focusQuestTravelList focusList = {};
 

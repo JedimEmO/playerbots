@@ -4,6 +4,8 @@
 #include "ChatHelper.h"
 
 #include <map>
+#include <set>
+#include <vector>
 #include <string>
 
 namespace ai { class Engine; }
@@ -52,6 +54,8 @@ public:
     uint8 GetTankOrder(uint32 guid) const;
     // A creature the character gave up on as out of its reach, for a while; target picking passes over it.
     bool IsIgnoredTarget(Player* bot, ObjectGuid target) const;
+    // Travel destinations, by entry, the character left because it could not work them; set aside for a while.
+    std::set<int32> LeftDestinations(Player* bot) const;
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;
@@ -136,6 +140,8 @@ private:
     struct Chase { ObjectGuid target; uint32 health = 0; time_t since = 0; };
     std::map<uint32, Chase> chases;                             // per character: the target it is after
     std::map<uint32, std::map<ObjectGuid, time_t>> ignoredTargets; // per character: given up, until
+    std::map<uint32, std::vector<time_t>> giveUps;              // per character: recent give-ups
+    std::map<uint32, std::map<int32, time_t>> leftDestinations;  // per character: destination entry, until
     bool assignmentsLoaded = false;   // the first load after a start reports nothing; it is not a change
     bool tablesReady = false;
     uint32 sinceOrders = 0;

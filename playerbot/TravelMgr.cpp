@@ -38,6 +38,8 @@ PlayerTravelInfo::PlayerTravelInfo(Player* player)
 
     money = player->GetMoney();
     avoidEnemyZones = sGuildBotMgr.IsGuildBot(player);
+    if (avoidEnemyZones)
+        leftEntries = sGuildBotMgr.LeftDestinations(player);
 
     if (player->GetGroup())
         groupSize = player->GetGroup()->GetMembersCount();
@@ -581,6 +583,9 @@ bool ExploreTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& inf
 
 bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
 {
+    if (info.HasLeft(GetEntry()))
+        return false;
+
     if (info.GetBoolValue("should sell") && (info.GetBoolValue("can sell") || info.GetBoolValue("can ah sell")))
         return false;
 
