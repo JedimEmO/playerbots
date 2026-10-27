@@ -348,7 +348,11 @@ uint32 FreeMoneyForValue::Calculate()
     if (ai->HasCheat(BotCheatMask::gold))
         return 10000000;
 
-    if (ai->HasActivePlayerMaster())
+    // As in HasAllMoneyForValue: a guild character ordered to learn a profession may spend all it has on it.
+    bool orderedTraining = getQualifier() == std::to_string((uint32)NeedMoneyFor::skilltraining) &&
+        sGuildBotMgr.IsGuildBot(bot) && sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) == "learn";
+
+    if (ai->HasActivePlayerMaster() || orderedTraining)
         return money;
 
     uint32 savedMoney = AI_VALUE2(uint32, "total money needed for", getQualifier()) - AI_VALUE2(uint32, "money needed for", getQualifier());
