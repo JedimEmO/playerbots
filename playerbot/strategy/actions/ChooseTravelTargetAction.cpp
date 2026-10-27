@@ -1095,12 +1095,25 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
                                 }
                             }
 
-                            // Fall back to mob drops only if no gather nodes were found or bot has no gathering skill.
-                            if (list.empty() && !mobEntries.empty() && !hasAnyGathering)
+                            // Fall back to mob drops if no gather nodes were found, also for a bot with a
+                            // gathering skill whose item drops only from creatures.
+                            if (list.empty() && !mobEntries.empty())
                             {
-                                uint32 mobPurpose = (uint32)TravelDestinationPurpose::Grind;
+                                // Only creatures that drop money get a grind destination, so beasts such as
+                                // boars have just a skinning one. Either leads to the creature. Farming is not
+                                // grinding: low and gray creatures are fine, but not ones the bot would not attack.
+                                std::vector<int32> farmEntries;
+                                for (int32 entry : mobEntries)
+                                {
+                                    CreatureInfo const* cInfo = ObjectMgr::GetCreatureTemplate(entry);
+                                    if (cInfo && (int32)cInfo->MinLevel <= (int32)travelInfo.GetLevel() + 4)
+                                        farmEntries.push_back(entry);
+                                }
 
-                                list = sTravelMgr.GetPartitions(center, partitions, travelInfo, mobPurpose, mobEntries, false);
+                                uint32 mobPurpose = (uint32)TravelDestinationPurpose::Grind | (uint32)TravelDestinationPurpose::GatherSkinning;
+
+                                if (!farmEntries.empty())
+                                    list = sTravelMgr.GetPartitions(center, partitions, travelInfo, mobPurpose, farmEntries, false);
                             }
                         }
                     }
