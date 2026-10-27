@@ -989,6 +989,13 @@ void GuildBotMgr::LoadAssignments()
         return order == 0 ? std::string("none") : order == 1 ? std::string("main") : "assist " + std::to_string(order - 2);
     };
 
+    if (!assignmentsLoaded)
+    {
+        assignmentsLoaded = true;
+        tankOrders = std::move(loaded);
+        return;
+    }
+
     // An event for every change, the player's own characters included.
     for (auto& [guid, order] : loaded)
         if (GetTankOrder(guid) != order)

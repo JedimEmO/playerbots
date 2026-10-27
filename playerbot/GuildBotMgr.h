@@ -130,6 +130,7 @@ private:
 
     std::map<uint32, Character> characters;
     std::map<uint32, uint8> tankOrders;
+    bool assignmentsLoaded = false;   // the first load after a start reports nothing; it is not a change
     bool tablesReady = false;
     uint32 sinceOrders = 0;
     uint32 sinceState = 0;
