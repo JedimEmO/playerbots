@@ -72,7 +72,8 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     bool travelTargetWorking = AI_VALUE(bool, "travel target working");
     bool travelTargetTraveling = AI_VALUE(bool, "travel target traveling");
     TravelTarget* travelTarget = AI_VALUE(TravelTarget*, "travel target");
-    bool isGrindTravelDest = travelTarget && typeid(travelTarget->GetDestination()) == typeid(GrindTravelDestination);
+    // The destination's own type, not the pointer's, which is always TravelDestination*.
+    bool isGrindTravelDest = travelTarget && travelTarget->GetDestination() && typeid(*travelTarget->GetDestination()) == typeid(GrindTravelDestination);
 
     // A guild character on its way somewhere other than a grind spot, such as a vendor or a trainer,
     // fights what attacks it (above) but starts no new fights, or a valley full of creatures keeps it there.
@@ -265,7 +266,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             else if (creature && !MaNGOS::XP::Gain(bot, creature) && urand(0, 50))
             {
                 if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
-                    if ((AI_VALUE(bool, "travel target traveling") && typeid(AI_VALUE(TravelTarget*, "travel target")->GetDestination()) != typeid(GrindTravelDestination)))
+                    if ((AI_VALUE(bool, "travel target traveling") && !isGrindTravelDest))
                         ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (not xp and not needed for quest).");
 
                 continue;
@@ -273,7 +274,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             else if (urand(0, 100) < 75)
             {
                 if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
-                    if (AI_VALUE(bool, "travel target traveling") && typeid(AI_VALUE(TravelTarget*, "travel target")->GetDestination()) != typeid(GrindTravelDestination))
+                    if (AI_VALUE(bool, "travel target traveling") && !isGrindTravelDest)
                         ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " increased distance (not needed for quest).");
 
                 newdistance += 20;
