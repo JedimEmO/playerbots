@@ -931,7 +931,10 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
     else if (travelName == "dungeon")
     {
         // On the way to a dungeon with a meeting stone: the stone, which takes the party in.
+        // Inside, an object to use before the next boss comes first.
         TravelDestination* stone = sGuildDungeon.StoneDestination(bot);
+        if (!stone)
+            stone = sGuildDungeon.UseDestination(bot);
         if (stone)
         {
             *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [stone, center]()

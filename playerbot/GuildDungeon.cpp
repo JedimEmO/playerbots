@@ -18,6 +18,7 @@ std::map<uint32, uint32> GuildDungeon::lastEntry;
 std::mutex GuildDungeon::exitLock;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::exits;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::stones;
+std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::usePlaces;
 namespace
 {
     // Where each dungeon's meeting stone stands, by dungeon map; built once from the spawns.
@@ -84,6 +85,21 @@ namespace
     };
     // A talk step is done once the leader is this near and has spoken.
     constexpr float TALK_DISTANCE = 6.0f;
+
+    // Objects a party uses before a boss, as players would: how many members use it, and the boss it is for.
+    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; };
+    const UseObject USES[] = {
+        // Blackfathom Deeps: the four Fires of Aku'mai, lit once Kelris is dead, open the way to Aku'mai.
+        { 48, 21118, 1, 4829 },
+        { 48, 21119, 1, 4829 },
+        { 48, 21120, 1, 4829 },
+        { 48, 21121, 1, 4829 },
+        // Uldaman: three at the Altar of Archaedas wake him.
+        { 70, 133234, 3, 2748 },
+    };
+    // The leader uses an object this near it, and members this near the leader join it.
+    constexpr float USE_DISTANCE = 5.0f;
+    constexpr float USE_JOIN_DISTANCE = 20.0f;
 
     // Letters only, in lower case, without a leading "the": "The Deadmines" and "deadmines" are one name.
     std::string Normalize(const std::string& name)
@@ -277,6 +293,38 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
                 WorldPosition(back->target_mapId, back->target_X, back->target_Y, back->target_Z, back->target_Orientation),
                 "out of " + dungeon.name);
         dungeon.exit = exit.get();
+    }
+
+    // Objects to use on the way, where the map has their spawns.
+    for (const UseObject& use : USES)
+    {
+        if (use.map != dungeon.mapId)
+            continue;
+        Dungeon::Use step;
+        step.entry = use.entry;
+        step.users = use.users;
+        step.before = use.before;
+        WorldPosition place;
+        auto findSpawn = [&](auto const& pair)
+        {
+            if (pair.second.id != use.entry || pair.second.mapid != dungeon.mapId)
+                return false;
+            step.spawn = pair.first;
+            place = WorldPosition(pair.second.mapid, pair.second.posX, pair.second.posY, pair.second.posZ, pair.second.orientation);
+            return true;
+        };
+        sObjectMgr.DoGOData(findSpawn);
+        if (!step.spawn)
+            continue;
+        std::lock_guard<std::mutex> guard(exitLock);
+        auto& destination = usePlaces[step.spawn];
+        if (!destination)
+        {
+            GameObjectInfo const* info = ObjectMgr::GetGameObjectInfo(use.entry);
+            destination = std::make_unique<PlaceTravelDestination>(place, std::string("the ") + (info ? info->name : "object") + " in " + dungeon.name);
+        }
+        step.place = destination.get();
+        dungeon.uses.push_back(step);
     }
 
     // The meeting stone; StonePlace takes the same lock, so this comes after it is let go.
@@ -663,9 +711,58 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         return;
     }
 
+    // An object to use before the next boss, such as an altar that wakes it: the leader goes to it first,
+    // and it and as many members as the object needs use it, as players would.
+    run.nextBoss = next;
+    run.useSpawn = 0;
+    for (const Dungeon::Use& use : dungeon.uses)
+    {
+        if (use.before != next || run.used.count(use.spawn))
+            continue;
+        GameObject* object = map->GetGameObject(use.spawn);
+        if (!object)
+        {
+            run.used.insert(use.spawn);
+            continue;
+        }
+        if (leader->GetDistance(object) <= USE_DISTANCE)
+        {
+            std::vector<Player*> users = { leader };
+            if (Group* group = leader->GetGroup())
+                for (auto& slot : group->GetMemberSlots())
+                    if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                        if (member != leader && users.size() < use.users && member->IsInWorld() && member->IsAlive()
+                            && member->GetMapId() == leader->GetMapId() && member->GetDistance(leader) <= USE_JOIN_DISTANCE)
+                            users.push_back(member);
+            if (users.size() < use.users)
+            {
+                update.reason = "at the " + std::string(object->GetGOInfo()->name) + " in " + dungeon.name + ", waiting for "
+                    + std::to_string(use.users) + " to use it";
+                return;
+            }
+            for (Player* user : users)
+            {
+                WorldPacket packet(CMSG_GAMEOBJ_USE);
+                packet << object->GetObjectGuid();
+                user->GetSession()->HandleGameObjectUseOpcode(packet);
+            }
+            run.used.insert(use.spawn);
+            update.events.push_back({ "used", object->GetGOInfo()->name });
+            continue;
+        }
+        run.useSpawn = use.spawn;
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+        {
+            TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+            if (target && target->IsActive() && target->GetDestination() != use.place)
+                target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+        }
+        update.reason = "on the way to use the " + std::string(object->GetGOInfo()->name) + " in " + dungeon.name + ", " + count;
+        return;
+    }
+
     // Any travel target but the next boss goes, at a boss that died or one that replaced it, such as a grind spot:
     // upstream asks for no travel target while one is active, so the dungeon's request could not take it back.
-    run.nextBoss = next;
     if (PlayerbotAI* ai = leader->GetPlayerbotAI())
     {
         TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
@@ -984,6 +1081,18 @@ void GuildDungeon::FollowByStone(Player* member)
     std::string why;
     EnterByStone(member, leader->GetMapId(), why,
         EntranceNear(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ()));
+}
+
+TravelDestination* GuildDungeon::UseDestination(Player* bot) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(bot->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Bosses || !it->second.useSpawn || bot->GetMapId() != it->second.dungeon.mapId)
+        return nullptr;
+    for (const Dungeon::Use& use : it->second.dungeon.uses)
+        if (use.spawn == it->second.useSpawn)
+            return use.place;
+    return nullptr;
 }
 
 TravelDestination* GuildDungeon::ExitDestination(Player* bot) const

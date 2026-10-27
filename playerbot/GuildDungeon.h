@@ -83,6 +83,8 @@ public:
     static void FollowByStone(Player* member);
     // The stone, for the leader on its way to the dungeon; null when the dungeon has none.
     ai::TravelDestination* StoneDestination(Player* bot) const;
+    // An object the leader has to go to and use before the next boss, such as an altar; null when there is none.
+    ai::TravelDestination* UseDestination(Player* bot) const;
     // Where a guild character should go when its group's leader is on the other side of a dungeon's entrance,
     // inside while it is outside or outside while it is inside: the leader's place. Its follow target is out of
     // reach on another map, so follow moves there instead, and the route the travel map gives runs through the
@@ -119,6 +121,9 @@ private:
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
         ai::PlaceTravelDestination* exit = nullptr;  // outside, where the way out leads; kept in exits
         ai::PlaceTravelDestination* stone = nullptr; // the dungeon's meeting stone, if it has one; kept in stones
+        // Objects to use before a boss, as a player would: the object's spawn, how many members use it, the boss.
+        struct Use { uint32 entry = 0; uint32 spawn = 0; uint32 users = 1; int32 before = 0; ai::PlaceTravelDestination* place = nullptr; };
+        std::vector<Use> uses;
     };
 
     struct Run
@@ -131,6 +136,8 @@ private:
         uint32 nextSpawn = 0;          // its spawn
         std::set<int32> killed;        // bosses reported dead
         std::set<int32> talked;        // talk steps done
+        std::set<uint32> used;         // use steps done, by the object's spawn
+        uint32 useSpawn = 0;           // the use step the leader is on its way to, or 0
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside
@@ -152,6 +159,7 @@ private:
     static std::mutex exitLock;
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> exits;  // by dungeon map, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> stones; // by dungeon map, never freed
+    static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> usePlaces; // by object spawn, never freed
 
     static std::mutex entryLock;
     static std::map<uint32, uint32> lastEntry;  // by group id: when a member last took the entrance, in ms
