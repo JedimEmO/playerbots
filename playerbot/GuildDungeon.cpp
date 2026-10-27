@@ -483,7 +483,8 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
         run.leaderOutAt = now;
     const bool stranded = leaderOut && now - run.leaderOutAt >= STRANDED_SECONDS && now - run.lastHearth >= HEARTH_RETRY_SECONDS;
 
-    uint32 inside = 0;
+    uint32 inside = 0, guildInside = 0;
+    std::string playerInside;
     if (group)
     {
         for (auto& slot : group->GetMemberSlots())
@@ -492,6 +493,10 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
             if (!member || !(member->GetMapId() == dungeon.mapId || (member->IsBeingTeleportedFar() && member->GetTeleportDest().mapid == dungeon.mapId)))
                 continue;
             inside++;
+            if (sGuildBotMgr.IsGuildBot(member))
+                guildInside++;
+            else
+                playerInside = member->GetName();
             // Left behind where no route leads out, such as caught on the Deadmines ship: home by hearthstone.
             PlayerbotAI* memberAi = member->GetPlayerbotAI();
             if (stranded && memberAi && sGuildBotMgr.IsGuildBot(member) && member->IsAlive() && !member->IsBeingTeleported())
@@ -508,6 +513,12 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
 
     if (inside)
     {
+        // A player still inside takes the time they want: the leader waits outside, and the reset follows.
+        if (!guildInside && !playerInside.empty())
+        {
+            update.reason = "waiting for " + playerInside + " to come out of " + dungeon.name + "; " + run.cleared;
+            return;
+        }
         if (now - run.leaveStarted > LEAVE_SECONDS)
         {
             update.status = "failed";

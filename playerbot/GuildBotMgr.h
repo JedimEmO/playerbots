@@ -129,6 +129,7 @@ private:
         bool dead = false;
         bool alone = false;         // in a group but with no member near, as its strategies were last built
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
+        time_t invitedAt = 0;       // when the dungeon leader last invited its companion
 
         // The hourly measure, counted every check and written every few minutes; see guildbot_metric.
         uint32 xpLevel = 0, xpValue = 0;  // level and experience at the last check
@@ -162,6 +163,9 @@ private:
     std::list<std::string> HandleSpots(const std::string& args);
     // The party job: be in the leader's group. Returns why not, or empty when it is.
     std::string KeepParty(Character& c, Player* bot);
+    // The dungeon leader's companion, `with=<name>`: one of the player's characters, often the player's own,
+    // whom it invites to its group the way a client does. Empty, or why it is not in the group yet.
+    std::string InviteCompanion(Character& c, Player* bot);
     void LeaveParty(Character& c, Player* bot);
 
     void Event(uint32 guid, const std::string& kind, const std::string& detail = "");

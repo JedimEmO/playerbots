@@ -1036,7 +1036,20 @@ void GuildBotMgr::CheckJobs()
 
         if (c.job == "dungeon")
         {
+            // A dungeon leader leads: a master taken from an invite it accepted, such as the player's
+            // before promoting it, would have it follow instead of running the job.
+            PlayerbotAI* leaderAi = bot->GetPlayerbotAI();
+            Group* ownGroup = bot->GetGroup();
+            if (leaderAi && leaderAi->GetMaster() && leaderAi->GetMaster() != bot && ownGroup && ownGroup->IsLeader(bot->GetObjectGuid()))
+            {
+                leaderAi->SetMaster(nullptr);
+                leaderAi->ResetStrategies(false);
+            }
+            std::string waiting = InviteCompanion(c, bot);
+
             GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"));
+            if (!waiting.empty() && update.status == "working" && update.reason.rfind("waiting", 0) == 0)
+                update.reason = waiting;
             for (auto& [kind, detail] : update.events)
                 Event(guid, kind, detail);
             c.reason = update.reason;
@@ -1177,6 +1190,41 @@ void GuildBotMgr::ApplyRole(Character& c, Player* bot)
         if (!status.empty())
             Event(c.guid, "respec_needed", c.role);
     }
+}
+
+std::string GuildBotMgr::InviteCompanion(Character& c, Player* bot)
+{
+    std::string name = ArgValue(c, "with");
+    if (name.empty() || !normalizePlayerName(name) || name == c.name)
+        return "";
+
+    Player* companion = ObjectAccessor::FindPlayerByName(name.c_str());
+    if (!companion || !companion->IsInWorld())
+        return "waiting for " + name + " to be online";
+    // The player's own characters only, as the party job has it.
+    if (companion->GetSession()->GetAccountId() != bot->GetSession()->GetAccountId())
+        return name + " is not on the same account";
+
+    Group* group = bot->GetGroup();
+    if (group && group->IsMember(companion->GetObjectGuid()))
+        return "";
+    if (group && !group->IsLeader(bot->GetObjectGuid()))
+        return "";
+    if (companion->GetGroup())
+        return "waiting for " + name + " to leave their group";
+    if (group && group->IsFull())
+        return "no room in the group for " + name;
+
+    // Once a minute, as a player would ask again; the client shows the invite, and the player accepts it.
+    const time_t now = time(nullptr);
+    if (!companion->GetGroupInvite() && now - c.invitedAt >= MINUTE)
+    {
+        c.invitedAt = now;
+        WorldPacket invite(CMSG_GROUP_INVITE);
+        invite << name;
+        bot->GetSession()->HandleGroupInviteOpcode(invite);
+    }
+    return "waiting for " + name + " to accept the invite";
 }
 
 std::string GuildBotMgr::KeepParty(Character& c, Player* bot)
@@ -1410,7 +1458,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
     return {
         "guildbot add <name> [job [args]]       make a character a guild character",
         "guildbot create <account> <name> <race> <class> [male|female]   create a level 1 character on an account",
-        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>, farm item=<id> [amount=<n>], learn profession=<name>, dungeon name=<dungeon>",
+        "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>, farm item=<id> [amount=<n>], learn profession=<name>, dungeon name=<dungeon> [with=<name>]",
         "guildbot role <name> tank|healer|dps|none   the role its talents follow",
         "guildbot tank <name> <order>|none      tank order in its group: 1 main tank, 2 the first assist tank, ...",
         "guildbot on|off <name>                 switch the engine's play on or off",
