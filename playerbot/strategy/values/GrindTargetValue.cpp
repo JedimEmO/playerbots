@@ -72,9 +72,11 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
         return add;
 
     // A guild party's leader at its next boss's place takes the boss, which may be out of sight on a deck above.
+    // Only within sight distance: combat drops a target farther than that, so a boss taken from farther off
+    // would flip the leader between attacking and leaving combat, and it would never travel to the boss.
     if (!AI_VALUE(bool, "travel target traveling"))
     {
-        if (Creature* boss = sGuildDungeon.NextBoss(bot, 100.0f))
+        if (Creature* boss = sGuildDungeon.NextBoss(bot, sPlayerbotAIConfig.sightDistance))
             return boss;
     }
 

@@ -1,5 +1,6 @@
 #include "TravelNode.h"
 #include "playerbot/TravelMgr.h"
+#include "playerbot/GuildBotMgr.h"
 
 #include <iomanip>
 #include <regex>
@@ -1556,7 +1557,9 @@ TravelNodeRoute TravelNodeMap::getRoute(TravelNode* start, TravelNode* goal, Uni
                 }
             }
 
-            if (AI_VALUE2(bool, "action useful", "hearthstone") && bot->IsAlive())
+            // A guild character with its party never takes a hearthstone as a shortcut: it would leave the dungeon
+            // or the meeting stone, and the party would stay behind.
+            if (AI_VALUE2(bool, "action useful", "hearthstone") && bot->IsAlive() && !sGuildBotMgr.StaysWithParty(bot))
             {
                 TravelNode* homeNode = sTravelNodeMap.getNode(AI_VALUE(WorldPosition, "home bind"), nullptr, 50.0f);
                 if (homeNode)
@@ -1585,6 +1588,10 @@ TravelNodeRoute TravelNodeMap::getRoute(TravelNode* start, TravelNode* goal, Uni
         for (auto spellId : teleSpells)
         {
             if (!bot->IsAlive())
+                continue;
+
+            // Nor a teleport spell, for the same reason.
+            if (sGuildBotMgr.StaysWithParty(bot))
                 continue;
 
             if (bot->IsInCombat())
@@ -1862,7 +1869,8 @@ TravelNodeRoute TravelNodeMap::getRoute(WorldPosition startPos, WorldPosition en
     {
         PlayerbotAI* ai = bot->GetPlayerbotAI();
         AiObjectContext* context = ai->GetAiObjectContext();
-        if (AI_VALUE2(bool, "action useful", "hearthstone"))
+        // With no walking route, a guild character with its party still does not hearth: it stays with the party.
+        if (AI_VALUE2(bool, "action useful", "hearthstone") && !sGuildBotMgr.StaysWithParty(bot))
         {
             startPath.clear();
             TravelNode* botNode = new TravelNode(startPos, "Bot Pos", false);
@@ -1910,6 +1918,8 @@ TravelPath TravelNodeMap::getFullPath(WorldPosition startPos, WorldPosition endP
     if (route.isEmpty())
     {
         route.cleanTempNodes();
+        // The lock is let go on this way out too, or a later exclusive lock on the travel map waits forever.
+        sTravelNodeMap.m_nMapMtx.unlock_shared();
         return movePath;
     }
 

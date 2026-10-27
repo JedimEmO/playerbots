@@ -3,6 +3,7 @@
 #include "AttackersValue.h"
 #include "PossibleTargetsValue.h"
 #include "EnemyPlayerValue.h"
+#include "playerbot/GuildBotMgr.h"
 
 using namespace ai;
 using namespace MaNGOS;
@@ -422,6 +423,12 @@ bool AttackersValue::IgnoreTarget(Unit* target, Player* playerToCheckAgainst)
 {
     if (!playerToCheckAgainst->GetPlayerbotAI())
         return false; 
+
+    // A creature a guild character gave up on as out of reach stays given up on in its fights too.
+    // Party members take their targets from here, through the assist strategies, so without this
+    // they would take the same creature again at once and never leave the fight.
+    if (sGuildBotMgr.IsGuildBot(playerToCheckAgainst) && sGuildBotMgr.IsIgnoredTarget(playerToCheckAgainst, target->GetObjectGuid()))
+        return true;
 
     PlayerbotAI* ai = playerToCheckAgainst->GetPlayerbotAI();
     AiObjectContext* context = ai->GetAiObjectContext();

@@ -5,6 +5,7 @@
 #include "MotionGenerators/MovementGenerator.h"
 #include "playerbot/FleeManager.h"
 #include "playerbot/LootObjectStack.h"
+#include "playerbot/GuildBotMgr.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/PositionValue.h"
@@ -712,7 +713,18 @@ TravelPath MovementAction::ResolveMovePath(const WorldPosition& startPosition, c
     {
         std::vector<WorldPosition> path = startPosition.getPathTo(endPosition, bot); //Navemesh pathfinding only.
 
-        outMovePath.addPath(path);
+        // Near a place across a ledge or water, the navmesh path can end where the bot stands, and it walks in place.
+        // The travel map's route may go round, so a guild character takes it when it ends nearer the destination.
+        if (sGuildBotMgr.IsGuildBot(bot) && !endPosition.isPathTo(path, sPlayerbotAIConfig.tooCloseDistance, 3.0f)
+            && !sTravelNodeMap.getNodes().empty() && !bot->InBattleGround())
+        {
+            TravelPath routed = sTravelNodeMap.getFullPath(startPosition, endPosition, bot);
+            if (!routed.empty() && (path.empty() || routed.getBack().distance(endPosition) < path.back().distance(endPosition)))
+                outMovePath = routed;
+        }
+
+        if (outMovePath.empty())
+            outMovePath.addPath(path);
     }
 
     if (!lastMove.lastPath.empty() && !outMovePath.empty() && lastMove.lastPath.getBack().distance(endPosition) <= outMovePath.getBack().distance(endPosition))
