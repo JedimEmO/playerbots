@@ -525,11 +525,34 @@ void GuildBotMgr::EnsureTables()
     for (const char* column : ACTIVITY_COLUMNS)
         CharacterDatabase.DirectPExecute("ALTER TABLE guildbot_metric ADD COLUMN IF NOT EXISTS %s INT UNSIGNED NOT NULL DEFAULT 0", column);
 
+    // The measure by grind spot: per hour, character and spot, the seconds on the way and there, and what it gave.
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guildbot_spot ("
+        " hour TIMESTAMP NOT NULL DEFAULT '2000-01-01 00:00:00',"
+        " guid INT UNSIGNED NOT NULL,"
+        " entry INT NOT NULL,"
+        " level TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        " visits INT UNSIGNED NOT NULL DEFAULT 0,"
+        " travel INT UNSIGNED NOT NULL DEFAULT 0,"
+        " work INT UNSIGNED NOT NULL DEFAULT 0,"
+        " experience INT UNSIGNED NOT NULL DEFAULT 0,"
+        " money INT UNSIGNED NOT NULL DEFAULT 0,"
+        " deaths INT UNSIGNED NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (hour, guid, entry), KEY entry (entry)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
     tablesReady = true;
 }
 
-GuildBotMgr::Activity GuildBotMgr::ActivityOf(Player* bot)
+GuildBotMgr::Activity GuildBotMgr::ActivityOf(Player* bot, int32& spot)
 {
+    spot = 0;
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    ai::TravelTarget* target = ai ? ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get() : nullptr;
+    ai::TravelDestination* destination = target ? target->GetDestination() : nullptr;
+    if (destination && uint32(destination->GetPurpose()) & uint32(ai::TravelDestinationPurpose::Grind) && destination->GetEntry() > 0)
+        spot = destination->GetEntry();
+
     if (!bot->IsAlive())
         return ACTIVITY_DEAD;
     if (bot->IsInCombat())
@@ -537,9 +560,6 @@ GuildBotMgr::Activity GuildBotMgr::ActivityOf(Player* bot)
     if (bot->getStandState() == UNIT_STAND_STATE_SIT)
         return ACTIVITY_REST;
 
-    PlayerbotAI* ai = bot->GetPlayerbotAI();
-    ai::TravelTarget* target = ai ? ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get() : nullptr;
-    ai::TravelDestination* destination = target ? target->GetDestination() : nullptr;
     if (!destination)
         return ACTIVITY_OTHER;
 
@@ -595,8 +615,28 @@ void GuildBotMgr::Measure(Character& c, Player* bot, bool died)
         c.seconds += uint32(step);
         if (c.xpAt && now - c.xpAt < EARNING_WINDOW_SECONDS)
             c.earning += uint32(step);
-        c.activity[ActivityOf(bot)] += uint32(step);
+        int32 spot = 0;
+        const Activity activity = ActivityOf(bot, spot);
+        c.activity[activity] += uint32(step);
+        if (spot && (activity == ACTIVITY_TRAVEL || activity == ACTIVITY_SEEK || activity == ACTIVITY_FIGHT || activity == ACTIVITY_REST || activity == ACTIVITY_DEAD))
+        {
+            Character::SpotCount& count = c.spots[spot];
+            if (spot != c.lastSpot)
+                count.visits++;
+            if (activity == ACTIVITY_TRAVEL)
+                count.travel += uint32(step);
+            else
+                count.work += uint32(step);
+            count.experience += gained;
+            // Coin looted there; selling happens on errands, which are not at a spot.
+            if (bot->GetMoney() > c.lastMoney && activity != ACTIVITY_TRAVEL)
+                count.money += bot->GetMoney() - c.lastMoney;
+            if (died)
+                count.deaths++;
+        }
+        c.lastSpot = spot;
     }
+    c.lastMoney = bot->GetMoney();
     c.experience += gained;
     if (died)
         c.deaths++;
@@ -624,6 +664,16 @@ void GuildBotMgr::WriteMetric(Character& c)
             columns.str().c_str(), uint32(c.metricHour), c.guid, Escape(c.metricJob).c_str(),
             c.seconds, c.earning, c.experience, c.deaths, values.str().c_str(), updates.str().c_str());
     }
+    if (c.metricHour)
+        for (auto& [entry, count] : c.spots)
+            CharacterDatabase.PExecute(
+                "INSERT INTO guildbot_spot (hour, guid, entry, level, visits, travel, work, experience, money, deaths) "
+                "VALUES (FROM_UNIXTIME(%u), %u, %d, %u, %u, %u, %u, %u, %u, %u) "
+                "ON DUPLICATE KEY UPDATE level = GREATEST(level, VALUES(level)), visits = visits + VALUES(visits), "
+                "travel = travel + VALUES(travel), work = work + VALUES(work), experience = experience + VALUES(experience), "
+                "money = money + VALUES(money), deaths = deaths + VALUES(deaths)",
+                uint32(c.metricHour), c.guid, entry, c.xpLevel, count.visits, count.travel, count.work, count.experience, count.money, count.deaths);
+    c.spots.clear();
     c.seconds = c.earning = c.experience = c.deaths = 0;
     std::fill(std::begin(c.activity), std::end(c.activity), 0);
     c.metricHour = 0;
@@ -684,6 +734,34 @@ std::list<std::string> GuildBotMgr::HandleMetrics(const std::string& args)
             out.push_back(line.str());
         } while (byCharacter->NextRow());
     }
+    return out;
+}
+
+std::list<std::string> GuildBotMgr::HandleSpots(const std::string& args)
+{
+    uint32 hours = uint32(atoi(Trim(args).c_str()));
+    if (!hours)
+        hours = 12;
+
+    std::list<std::string> out = { "grind spots, by experience per hour there: levels, visits, minutes walking per visit, minutes there, xp, gold, deaths" };
+    auto result = CharacterDatabase.PQuery(
+        "SELECT t.Name, MIN(s.level), MAX(s.level), SUM(s.visits), SUM(s.travel), SUM(s.work), SUM(s.experience), SUM(s.money), SUM(s.deaths) "
+        "FROM guildbot_spot s LEFT JOIN mangos.creature_template t ON t.Entry = s.entry "
+        "WHERE s.hour >= NOW() - INTERVAL %u HOUR GROUP BY s.entry HAVING SUM(s.work) >= 60 "
+        "ORDER BY SUM(s.experience) / SUM(s.work) DESC", hours);
+    if (!result)
+        return out;
+    do
+    {
+        Field* f = result->Fetch();
+        uint32 visits = f[3].GetUInt32(), travel = f[4].GetUInt32(), work = f[5].GetUInt32(), xp = f[6].GetUInt32();
+        std::ostringstream line;
+        line << "  " << (f[0].IsNULL() ? std::string("?") : f[0].GetCppString()) << "  L" << f[1].GetUInt32() << "-" << f[2].GetUInt32()
+             << ", " << (work ? uint64(xp) * HOUR / work : 0) << " xp/h, " << visits << " visits, "
+             << (visits ? travel / visits / MINUTE : 0) << " min walk/visit, " << work / MINUTE << " min there, "
+             << xp << " xp, " << f[7].GetUInt32() / 10000 << "g, " << f[8].GetUInt32() << " deaths";
+        out.push_back(line.str());
+    } while (result->NextRow());
     return out;
 }
 
@@ -1311,6 +1389,8 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         return HandleDebug(rest);
     if (sub == "metrics")
         return HandleMetrics(rest);
+    if (sub == "spots")
+        return HandleSpots(rest);
     if (sub == "tank")
         return HandleTank(rest);
     if (sub == "bench")
@@ -1331,6 +1411,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         "guildbot state <name>                  what it is doing, as the state table holds it",
         "guildbot debug <name>                  the engine's view: strategies, last action, target, power, movement",
         "guildbot metrics [hours]               how much of their time levelling characters earn experience, by hour",
+        "guildbot spots [hours]                 grind spots by experience per hour there, with the walk to them",
     };
 }
 

@@ -98,7 +98,8 @@ private:
         ACTIVITIES
     };
     static constexpr const char* ACTIVITY_COLUMNS[ACTIVITIES] = { "fight", "seek", "travel", "errand", "rest", "dead", "other" };
-    static Activity ActivityOf(Player* bot);
+    // The activity, and the grind spot it is at or on its way to: the creature entry, or 0.
+    static Activity ActivityOf(Player* bot, int32& spot);
 
     struct Character
     {
@@ -137,6 +138,11 @@ private:
         std::string metricJob;            // and the job
         uint32 seconds = 0, earning = 0, experience = 0, deaths = 0;
         uint32 activity[ACTIVITIES] = {};  // seconds by Activity
+        // The same counts by grind spot, for guildbot_spot: what each spot cost in walking and gave back.
+        struct SpotCount { uint32 travel = 0, work = 0, experience = 0, deaths = 0, money = 0, visits = 0; };
+        std::map<int32, SpotCount> spots;
+        int32 lastSpot = 0;               // the spot at the last check, to count visits
+        uint32 lastMoney = 0;             // money at the last check, for the coin looted at a spot
     };
 
     void EnsureTables();
@@ -153,6 +159,7 @@ private:
     void Measure(Character& c, Player* bot, bool died);
     void WriteMetric(Character& c);
     std::list<std::string> HandleMetrics(const std::string& args);
+    std::list<std::string> HandleSpots(const std::string& args);
     // The party job: be in the leader's group. Returns why not, or empty when it is.
     std::string KeepParty(Character& c, Player* bot);
     void LeaveParty(Character& c, Player* bot);
