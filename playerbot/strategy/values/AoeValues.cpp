@@ -1,6 +1,7 @@
 
 #include "playerbot/playerbot.h"
 #include "AoeValues.h"
+#include "TargetValue.h"
 
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
@@ -14,6 +15,10 @@ std::list<ObjectGuid> AoeCountValue::FindMaxDensity(Player* bot, float range)
     if (bot)
     {
         std::list<ObjectGuid> units = *bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<std::list<ObjectGuid>>("possible attack targets");
+
+        // Units a strategy keeps out of area damage do not count toward it.
+        GuidSet exclusions = GatherStrategyTargetExclusions(bot->GetPlayerbotAI(), TargetValueExclusionType::Aoe);
+        units.remove_if([&exclusions](const ObjectGuid& guid) { return exclusions.count(guid) > 0; });
         
         for (std::list<ObjectGuid>::iterator i = units.begin(); i != units.end(); ++i)
         {

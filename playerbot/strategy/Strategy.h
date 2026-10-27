@@ -38,6 +38,17 @@ namespace ai
 		ACTION_PASSTROUGH = 100
 	};
 
+    // What a strategy can keep a bot from choosing, as AzerothCore's raid strategies ask it:
+    // the tank target, the dps target (and dps aoe target), a debuff target (attacker without aura),
+    // and the units counted for area damage.
+    enum class TargetValueExclusionType : uint8
+    {
+        TankTarget,
+        DpsTarget,
+        DebuffTarget,
+        Aoe,
+    };
+
     class Strategy : public PlayerbotAIAware
     {
     public:
@@ -52,6 +63,11 @@ namespace ai
 		virtual int GetType() { return STRATEGY_TYPE_GENERIC; }
         virtual ActionNode* GetAction(std::string name);
 		virtual std::string getName() = 0;
+        // Adds the units this strategy keeps the bot from choosing as this kind of target.
+        // Gathered from the combat strategies by GatherStrategyTargetExclusions.
+        virtual void AppendTargetExclusions(GuidSet& exclusions, TargetValueExclusionType type) {}
+        // True when AppendTargetExclusions can add anything, so bots without such a strategy skip the gathering.
+        virtual bool HasTargetExclusions() const { return false; }
         void Update() {} //Nonfunctional see AiObjectContext::Update() to enable.
         void Reset() {}
 

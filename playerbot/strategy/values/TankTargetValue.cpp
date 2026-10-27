@@ -96,9 +96,12 @@ private:
 
 ObjectGuid TankTargetValue::Calculate()
 {
+    GuidSet exclusions = GatherStrategyTargetExclusions(ai, TargetValueExclusionType::TankTarget);
+
     // The marked target, unless another bot tank following the same mark already holds it.
     ObjectGuid rti = RtiTargetValue::Calculate();
-    if (Unit* rtiTarget = ai->GetUnit(rti))
+    Unit* rtiTarget = exclusions.count(rti) ? nullptr : ai->GetUnit(rti);
+    if (rtiTarget)
     {
         Unit* victim = rtiTarget->GetVictim();
         Player* player = victim && victim != bot && victim->IsPlayer() ? static_cast<Player*>(victim) : nullptr;
@@ -109,6 +112,6 @@ ObjectGuid TankTargetValue::Calculate()
     }
 
     FindTankTargetSmartStrategy strategy(ai);
-    Unit* target = FindTarget(&strategy);
+    Unit* target = FindTarget(&strategy, exclusions);
     return target ? target->GetObjectGuid() : ObjectGuid();
 }

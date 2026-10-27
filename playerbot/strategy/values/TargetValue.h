@@ -5,6 +5,12 @@
 
 namespace ai
 {
+    enum class TargetValueExclusionType : uint8;
+
+    // The units the bot's combat strategies keep it from choosing as this kind of target; empty, and cheap,
+    // when none of them has exclusions.
+    GuidSet GatherStrategyTargetExclusions(PlayerbotAI* ai, TargetValueExclusionType type);
+
     class FindTargetStrategy
     {
     public:
@@ -51,7 +57,8 @@ namespace ai
         virtual std::vector<std::string> GetUsedValues() { return { "possible attack targets" }; }
 #endif 
     protected:
-        Unit* FindTarget(FindTargetStrategy* strategy);
+        // The strategy's pick among the attackers, passing over the excluded ones.
+        Unit* FindTarget(FindTargetStrategy* strategy, const GuidSet& exclusions = GuidSet());
     };
 
     class RpgTargetValue : public ManualSetValue<GuidPosition>

@@ -8,11 +8,12 @@ using namespace ai;
 
 ObjectGuid DpsTargetValue::Calculate()
 {
+    GuidSet exclusions = GatherStrategyTargetExclusions(ai, TargetValueExclusionType::DpsTarget);
     ObjectGuid rti = RtiTargetValue::Calculate();
-    if (rti) return rti;
+    if (rti && !exclusions.count(rti)) return rti;
 
     FindLeastHpTargetStrategy strategy(ai);
-    Unit* target = TargetValue::FindTarget(&strategy);
+    Unit* target = TargetValue::FindTarget(&strategy, exclusions);
     return target ? target->GetObjectGuid() : ObjectGuid();
 }
 
@@ -37,10 +38,11 @@ protected:
 
 ObjectGuid DpsAoeTargetValue::Calculate()
 {
+    GuidSet exclusions = GatherStrategyTargetExclusions(ai, TargetValueExclusionType::DpsTarget);
     ObjectGuid rti = RtiTargetValue::Calculate();
-    if (rti) return rti;
+    if (rti && !exclusions.count(rti)) return rti;
 
     FindMaxHpTargetStrategy strategy(ai);
-    Unit* target = TargetValue::FindTarget(&strategy);
+    Unit* target = TargetValue::FindTarget(&strategy, exclusions);
     return target ? target->GetObjectGuid() : ObjectGuid();
 }

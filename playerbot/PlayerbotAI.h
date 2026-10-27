@@ -451,6 +451,8 @@ public:
     void PrintStrategies(Player* requester, BotState type);
     void ClearStrategies(BotState type);
     std::list<std::string_view> GetStrategies(BotState type);
+    // True when one of the combat strategies keeps the bot off some targets (Strategy::AppendTargetExclusions).
+    bool HasTargetExclusions() const;
     bool ContainsStrategy(StrategyType type);
     bool HasStrategy(const std::string& name, BotState type);
     template<class T>

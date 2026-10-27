@@ -81,6 +81,8 @@ namespace ai
 		void PrintStrategies(Player* requester, const std::string& engineType);
         std::string GetLastAction() { return lastAction; }
         const Action* GetLastExecutedAction() const { return lastExecutedAction; }
+        // True when one of the engine's strategies has target exclusions; set by Init.
+        bool HasTargetExclusions() const { return hasTargetExclusions; }
 
     public:
 	    virtual bool DoNextAction(Unit*, int depth, bool minimal, bool isStunned);
@@ -141,5 +143,8 @@ namespace ai
     public:
 		bool testMode;
         bool initMode = true;
+
+    private:
+        bool hasTargetExclusions = false;
     };
 }

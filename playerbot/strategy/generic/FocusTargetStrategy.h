@@ -32,4 +32,15 @@ namespace ai
         }
 #endif
     };    
+
+    // Keeps the bot from choosing whatever wears the cross mark as its dps or debuff target, and from counting it
+    // for area damage; a tank still picks it up. It tests the target exclusions, and is only ever added by hand.
+    class AvoidCrossStrategy : public Strategy
+    {
+    public:
+        AvoidCrossStrategy(PlayerbotAI* ai) : Strategy(ai) {}
+        std::string getName() override { return "avoid cross"; }
+        void AppendTargetExclusions(GuidSet& exclusions, TargetValueExclusionType type) override;
+        bool HasTargetExclusions() const override { return true; }
+    };
 }

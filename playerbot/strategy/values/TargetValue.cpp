@@ -10,13 +10,28 @@
 
 using namespace ai;
 
-Unit* TargetValue::FindTarget(FindTargetStrategy* strategy)
+GuidSet ai::GatherStrategyTargetExclusions(PlayerbotAI* ai, TargetValueExclusionType type)
+{
+    GuidSet exclusions;
+    if (!ai || !ai->HasTargetExclusions())
+        return exclusions;
+
+    for (std::string_view name : ai->GetStrategies(BotState::BOT_STATE_COMBAT))
+    {
+        if (Strategy* strategy = ai->GetStrategy<Strategy>(std::string(name), BotState::BOT_STATE_COMBAT))
+            strategy->AppendTargetExclusions(exclusions, type);
+    }
+
+    return exclusions;
+}
+
+Unit* TargetValue::FindTarget(FindTargetStrategy* strategy, const GuidSet& exclusions)
 {
     std::list<ObjectGuid> attackers = ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid>>("attackers")->Get();
     for (std::list<ObjectGuid>::iterator i = attackers.begin(); i != attackers.end(); ++i)
     {
         Unit* unit = ai->GetUnit(*i);
-        if (!unit)
+        if (!unit || exclusions.count(*i))
             continue;
 
         ThreatManager &threatManager = sServerFacade.GetThreatManager(unit);

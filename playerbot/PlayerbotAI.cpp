@@ -2919,6 +2919,12 @@ bool PlayerbotAI::IsHeal(Player* player, bool inGroup)
     return (botRoles & BOT_ROLE_HEALER) != 0;
 }
 
+bool PlayerbotAI::HasTargetExclusions() const
+{
+    Engine* engine = engines[(uint8)BotState::BOT_STATE_COMBAT];
+    return engine && engine->HasTargetExclusions();
+}
+
 std::vector<Player*> PlayerbotAI::GetGroupTanks(Group* group)
 {
     if (!group)

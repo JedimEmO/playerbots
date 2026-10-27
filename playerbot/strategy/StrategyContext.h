@@ -160,6 +160,7 @@ namespace ai
             creators["pull back"] = [](PlayerbotAI* ai) { return new PullBackStrategy(ai); };
             creators["focus heal targets"] = [](PlayerbotAI* ai) { return new FocusHealTargetsStrategy(ai); };
             creators["focus rti targets"] = [](PlayerbotAI* ai) { return new FocusRtiTargetsStrategy(ai); };
+            creators["avoid cross"] = [](PlayerbotAI* ai) { return new AvoidCrossStrategy(ai); };
             creators["heal interrupt"] = [](PlayerbotAI* ai) { return new HealInterruptStrategy(ai); };
             creators["preheal"] = [](PlayerbotAI* ai) { return new PreHealStrategy(ai); };
             creators["wbuff"] = [](PlayerbotAI* ai) { return new WorldBuffStrategy(ai); };

@@ -104,9 +104,11 @@ void Engine::Init()
 {
     Reset();
 
+    hasTargetExclusions = false;
     for (std::map<std::string, Strategy*>::iterator i = strategies.begin(); i != strategies.end(); i++)
     {
         Strategy* strategy = i->second;
+        hasTargetExclusions |= strategy->HasTargetExclusions();
         strategy->InitMultipliers(multipliers, state);
         strategy->InitTriggers(triggers, state);
         MultiplyAndPush(strategy->getDefaultActions(state), 0.0f, false, Event(), "default");
