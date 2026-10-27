@@ -117,6 +117,12 @@ BotRoles GuildBotMgr::GetRole(uint32 guid) const
     return it == characters.end() ? BotRoles::BOT_ROLE_NONE : ChatHelper::parseRole(it->second.role);
 }
 
+uint8 GuildBotMgr::GetTankOrder(uint32 guid) const
+{
+    auto it = tankOrders.find(guid);
+    return it == tankOrders.end() ? 0 : it->second;
+}
+
 bool GuildBotMgr::GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const
 {
     auto it = characters.find(guid);
@@ -250,6 +256,7 @@ void GuildBotMgr::Tick(uint32 elapsed)
         if (!tablesReady)
             EnsureTables();
         LoadOrders();
+        LoadAssignments();
         LoginLogout();
         ApplyOrders();
         CheckJobs();
@@ -305,6 +312,17 @@ void GuildBotMgr::EnsureTables()
         " ADD COLUMN IF NOT EXISTS talent_tree VARCHAR(32) NOT NULL DEFAULT '',"
         " ADD COLUMN IF NOT EXISTS talent_points TINYINT UNSIGNED NOT NULL DEFAULT 0,"
         " ADD COLUMN IF NOT EXISTS role_status VARCHAR(32) NOT NULL DEFAULT ''");
+
+    CharacterDatabase.DirectExecute(
+        "ALTER TABLE guildbot_state ADD COLUMN IF NOT EXISTS tank_order TINYINT UNSIGNED NOT NULL DEFAULT 0");
+
+    // Who tanks, in order, for the group a character is in; keyed by character, so the player's own counts too.
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guildbot_assignment ("
+        " guid INT UNSIGNED NOT NULL PRIMARY KEY,"
+        " tank_order TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        " updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
     CharacterDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS guildbot_event ("
@@ -747,21 +765,22 @@ void GuildBotMgr::WriteState(const Character& c, Player* bot)
             "0, 0, 0, 0, '%s', %u, '%s', '%s' FROM characters c WHERE c.guid = %u "
             "ON DUPLICATE KEY UPDATE controller = 'offline', level = VALUES(level), xp = VALUES(xp), money = VALUES(money), "
             "map = VALUES(map), zone = VALUES(zone), x = VALUES(x), y = VALUES(y), z = VALUES(z), in_combat = 0, "
-            "job = VALUES(job), job_seq = VALUES(job_seq), job_status = VALUES(job_status), job_reason = VALUES(job_reason), role = '%s'",
-            Escape(c.job).c_str(), c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str(), c.guid, Escape(c.role).c_str());
+            "job = VALUES(job), job_seq = VALUES(job_seq), job_status = VALUES(job_status), job_reason = VALUES(job_reason), role = '%s', tank_order = %u",
+            Escape(c.job).c_str(), c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str(), c.guid, Escape(c.role).c_str(), uint32(GetTankOrder(c.guid)));
         return;
     }
 
     CharacterDatabase.PExecute(
         "REPLACE INTO guildbot_state (guid, name, controller, level, xp, xp_next, money, map, zone, x, y, z, "
-        "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason, role, talent_tree, talent_points, role_status) "
-        "VALUES (%u, '%s', '%s', %u, %u, %u, %u, %u, %u, %f, %f, %f, %u, %u, %u, %u, '%s', %u, '%s', '%s', '%s', '%s', %u, '%s')",
+        "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason, role, talent_tree, talent_points, role_status, tank_order) "
+        "VALUES (%u, '%s', '%s', %u, %u, %u, %u, %u, %u, %f, %f, %f, %u, %u, %u, %u, '%s', %u, '%s', '%s', '%s', '%s', %u, '%s', %u)",
         c.guid, Escape(c.name).c_str(), controller.c_str(), bot->GetLevel(), bot->GetUInt32Value(PLAYER_XP),
         bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP), bot->GetMoney(), bot->GetMapId(), bot->GetZoneId(),
         bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), uint32(bot->GetHealthPercent()),
         sServerFacade.UnitIsDead(bot) ? 1 : 0, sServerFacade.IsInCombat(bot) ? 1 : 0, FreeBagSlots(bot),
         Escape(c.job).c_str(), GetPlayerBot(c.guid) ? c.appliedSeq : c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str(),
-        Escape(c.role).c_str(), Escape(TreeName(bot)).c_str(), uint32(TalentSpec(bot).GetTalentPoints()), Escape(c.roleStatus).c_str());
+        Escape(c.role).c_str(), Escape(TreeName(bot)).c_str(), uint32(TalentSpec(bot).GetTalentPoints()), Escape(c.roleStatus).c_str(),
+        uint32(GetTankOrder(c.guid)));
 }
 
 void GuildBotMgr::Event(uint32 guid, const std::string& kind, const std::string& detail)
@@ -851,6 +870,8 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         return HandleList();
     if (sub == "state")
         return HandleState(rest);
+    if (sub == "tank")
+        return HandleTank(rest);
     if (sub == "on" || sub == "off" || sub == "job" || sub == "remove" || sub == "role")
         return HandleOrder(sub, rest);
 
@@ -859,6 +880,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         "guildbot create <account> <name> <race> <class> [male|female]   create a level 1 character on an account",
         "guildbot job <name> <job> [args]       give an order: idle, level [until=<level>], party leader=<name>, farm item=<id> [amount=<n>], learn profession=<name>",
         "guildbot role <name> tank|healer|dps|none   the role its talents follow",
+        "guildbot tank <name> <order>|none      tank order in its group: 1 main tank, 2 the first assist tank, ...",
         "guildbot on|off <name>                 switch the engine's play on or off",
         "guildbot remove <name>                 stop treating it as a guild character",
         "guildbot list                          every guild character, one line each",
@@ -929,6 +951,58 @@ std::list<std::string> GuildBotMgr::HandleOrder(const std::string& sub, const st
     return { normalized + ": " + sub + (rest.empty() ? "" : " " + rest) };
 }
 
+void GuildBotMgr::LoadAssignments()
+{
+    std::map<uint32, uint8> loaded;
+    auto result = CharacterDatabase.PQuery("SELECT guid, tank_order FROM guildbot_assignment WHERE tank_order > 0");
+    if (result)
+    {
+        do
+        {
+            Field* f = result->Fetch();
+            loaded[f[0].GetUInt32()] = uint8(f[1].GetUInt32());
+        } while (result->NextRow());
+    }
+
+    auto describe = [](uint8 order) {
+        return order == 0 ? std::string("none") : order == 1 ? std::string("main") : "assist " + std::to_string(order - 2);
+    };
+
+    // An event for every change, the player's own characters included.
+    for (auto& [guid, order] : loaded)
+        if (GetTankOrder(guid) != order)
+            Event(guid, "tank", describe(order));
+    for (auto& [guid, order] : tankOrders)
+        if (!loaded.count(guid))
+            Event(guid, "tank", describe(0));
+
+    tankOrders = std::move(loaded);
+}
+
+std::list<std::string> GuildBotMgr::HandleTank(const std::string& args)
+{
+    auto [name, orderText] = SplitWord(args);
+    std::string normalized = name;
+    if (!normalizePlayerName(normalized) || orderText.empty())
+        return { "usage: guildbot tank <name> <order>|none" };
+
+    ObjectGuid guid = sObjectMgr.GetPlayerGuidByName(normalized);
+    if (!guid)
+        return { "no character named " + normalized };
+
+    uint32 order = orderText == "none" ? 0 : uint32(atoi(orderText.c_str()));
+    if (orderText != "none" && (order < 1 || order > 40))
+        return { "the order is 1 for the main tank, 2 for the first assist tank, and so on, or none" };
+
+    if (order)
+        CharacterDatabase.DirectPExecute("REPLACE INTO guildbot_assignment (guid, tank_order) VALUES (%u, %u)", guid.GetCounter(), order);
+    else
+        CharacterDatabase.DirectPExecute("DELETE FROM guildbot_assignment WHERE guid = %u", guid.GetCounter());
+
+    sinceOrders = ORDERS_MS;
+    return { normalized + ": tank " + orderText };
+}
+
 std::list<std::string> GuildBotMgr::HandleList()
 {
     std::list<std::string> out;
@@ -939,6 +1013,7 @@ std::list<std::string> GuildBotMgr::HandleList()
         line << c.name << " " << (!player ? "offline" : GetPlayerBot(guid) ? "bot" : "player")
              << (c.enabled ? "" : " (off)") << " L" << (player ? player->GetLevel() : 0)
              << (c.role.empty() ? "" : " role=" + c.role) << (c.roleStatus.empty() ? "" : " (" + c.roleStatus + ")")
+             << (GetTankOrder(guid) ? " tank=" + std::to_string(GetTankOrder(guid)) : "")
              << " job=" << c.job << (c.jobArgs.empty() ? "" : " " + c.jobArgs)
              << " #" << c.jobSeq << " " << c.status << (c.reason.empty() ? "" : " (" + c.reason + ")");
         out.push_back(line.str());

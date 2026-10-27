@@ -47,6 +47,9 @@ public:
     bool MayLearnSkill(Player* bot, uint32 skill) const;
     // The skill a profession name stands for, such as herbalism, or 0.
     static uint32 ProfessionSkill(const std::string& name);
+    // The tank order the guild service assigned: 1 is the main tank, 2 the first assist tank, and so on;
+    // 0 for none. Any character, the player's own included; read from guildbot_assignment with the orders.
+    uint8 GetTankOrder(uint32 guid) const;
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;
@@ -121,8 +124,11 @@ private:
     std::list<std::string> HandleList();
     std::list<std::string> HandleState(const std::string& args);
     std::list<std::string> HandleOrder(const std::string& sub, const std::string& args);
+    std::list<std::string> HandleTank(const std::string& args);
+    void LoadAssignments();
 
     std::map<uint32, Character> characters;
+    std::map<uint32, uint8> tankOrders;
     bool tablesReady = false;
     uint32 sinceOrders = 0;
     uint32 sinceState = 0;
