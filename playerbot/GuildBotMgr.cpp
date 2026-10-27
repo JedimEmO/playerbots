@@ -201,8 +201,17 @@ void GuildBotMgr::CheckLoot(Character& c, Player* bot)
     bot->GetMotionMaster()->Clear();
     bot->StopMoving();
     ignoredTargets[c.guid][loot.guid] = now + IGNORE_TARGET_SECONDS;
-    WorldObject* object = loot.GetWorldObject(bot);
-    Event(c.guid, "gave_up", "loot " + (object ? std::string(object->GetName()) : std::to_string(loot.guid.GetCounter())));
+    // The detail names what the loot was on: a corpse's creature, or the object.
+    std::string what;
+    if (WorldObject* object = loot.GetWorldObject(bot))
+        what = object->GetName();
+    if (what.empty() && loot.guid.IsCreature())
+        if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(loot.guid.GetEntry()))
+            what = info->Name;
+    if (what.empty() && loot.guid.IsGameObject())
+        if (GameObjectInfo const* info = ObjectMgr::GetGameObjectInfo(loot.guid.GetEntry()))
+            what = info->name;
+    Event(c.guid, "gave_up", "loot" + (what.empty() ? std::string() : " " + what));
     lootChases.erase(c.guid);
 }
 

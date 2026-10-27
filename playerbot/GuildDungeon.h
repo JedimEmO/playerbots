@@ -98,6 +98,8 @@ private:
         std::set<int32> killed;        // bosses reported dead
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
+        time_t leaderOutAt = 0;        // when the leader came out, with others still inside
+        time_t lastHearth = 0;         // when a member stranded inside was last sent home by hearthstone
         std::string cleared;           // what the run did, for the job's reason once it is done
     };
 

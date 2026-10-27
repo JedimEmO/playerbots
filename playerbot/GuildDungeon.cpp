@@ -27,6 +27,10 @@ namespace
     constexpr uint32 ENTRY_GAP_MS = 3 * IN_MILLISECONDS;
     // Out by the way out within this, or the job fails.
     constexpr time_t LEAVE_SECONDS = 15 * MINUTE;
+    // A member still inside this long after the leader came out is stranded, somewhere no route leads out of,
+    // and goes home by hearthstone, as a player would; tried again this often while it is on cooldown.
+    constexpr time_t STRANDED_SECONDS = 3 * MINUTE;
+    constexpr time_t HEARTH_RETRY_SECONDS = MINUTE;
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
@@ -454,22 +458,40 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
     const Dungeon& dungeon = run.dungeon;
     Group* group = leader->GetGroup();
 
+    const time_t now = time(nullptr);
+    const bool leaderOut = leader->GetMapId() != dungeon.mapId;
+    if (!leaderOut)
+        run.leaderOutAt = 0;
+    else if (!run.leaderOutAt)
+        run.leaderOutAt = now;
+    const bool stranded = leaderOut && now - run.leaderOutAt >= STRANDED_SECONDS && now - run.lastHearth >= HEARTH_RETRY_SECONDS;
+
     uint32 inside = 0;
     if (group)
     {
         for (auto& slot : group->GetMemberSlots())
         {
             Player* member = sObjectMgr.GetPlayer(slot.guid);
-            if (member && (member->GetMapId() == dungeon.mapId || (member->IsBeingTeleportedFar() && member->GetTeleportDest().mapid == dungeon.mapId)))
-                inside++;
+            if (!member || !(member->GetMapId() == dungeon.mapId || (member->IsBeingTeleportedFar() && member->GetTeleportDest().mapid == dungeon.mapId)))
+                continue;
+            inside++;
+            // Left behind where no route leads out, such as caught on the Deadmines ship: home by hearthstone.
+            PlayerbotAI* memberAi = member->GetPlayerbotAI();
+            if (stranded && memberAi && sGuildBotMgr.IsGuildBot(member) && member->IsAlive() && !member->IsBeingTeleported())
+            {
+                bool home = memberAi->DoSpecificAction("hearthstone", Event(), true);
+                update.events.push_back({ "recovery", std::string(member->GetName()) + (home ? " hearthstone out of " : " hearthstone not ready in ") + dungeon.name });
+            }
         }
+        if (stranded)
+            run.lastHearth = now;
     }
     else if (leader->GetMapId() == dungeon.mapId)
         inside = 1;
 
     if (inside)
     {
-        if (time(nullptr) - run.leaveStarted > LEAVE_SECONDS)
+        if (now - run.leaveStarted > LEAVE_SECONDS)
         {
             update.status = "failed";
             update.reason = run.cleared + "; " + std::to_string(inside) + " still inside after " + std::to_string(LEAVE_SECONDS / MINUTE) + " minutes";
