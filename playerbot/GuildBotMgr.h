@@ -131,6 +131,7 @@ private:
     std::list<std::string> HandleCreate(const std::string& args);
     std::list<std::string> HandleList();
     std::list<std::string> HandleState(const std::string& args);
+    std::list<std::string> HandleDebug(const std::string& args);
     std::list<std::string> HandleOrder(const std::string& sub, const std::string& args);
     std::list<std::string> HandleTank(const std::string& args);
     void LoadAssignments();

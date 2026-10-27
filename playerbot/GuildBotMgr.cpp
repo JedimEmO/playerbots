@@ -1035,6 +1035,8 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         return HandleList();
     if (sub == "state")
         return HandleState(rest);
+    if (sub == "debug")
+        return HandleDebug(rest);
     if (sub == "tank")
         return HandleTank(rest);
     if (sub == "bench")
@@ -1053,6 +1055,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         "guildbot list                          every guild character, one line each",
         "guildbot bench ...                     GM test benches only: level, gear, consumables (guildbot bench help)",
         "guildbot state <name>                  what it is doing, as the state table holds it",
+        "guildbot debug <name>                  the engine's view: strategies, last action, target, power, movement",
     };
 }
 
@@ -1218,6 +1221,57 @@ std::list<std::string> GuildBotMgr::HandleState(const std::string& args)
         << ",\"job\":\"" << c->job << "\",\"job_seq\":" << c->jobSeq << ",\"job_status\":\"" << c->status
         << "\",\"job_reason\":\"" << c->reason << "\",\"active_job\":\"" << GetActiveJob(c->guid) << "\"}";
     return { out.str() };
+}
+
+std::list<std::string> GuildBotMgr::HandleDebug(const std::string& args)
+{
+    Character* c = Find(Trim(args));
+    if (!c)
+        return { "not a guild character" };
+
+    Player* bot = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, c->guid), false);
+    PlayerbotAI* ai = GetPlayerBot(c->guid) ? bot->GetPlayerbotAI() : nullptr;
+    if (!bot || !ai)
+        return { c->name + " is not played by the engine now" };
+
+    auto join = [](const std::list<std::string_view>& names) {
+        std::string text;
+        for (auto& name : names)
+            text += (text.empty() ? "" : ",") + std::string(name);
+        return text;
+    };
+
+    std::list<std::string> out;
+    out.push_back("combat: " + join(ai->GetStrategies(BotState::BOT_STATE_COMBAT)));
+    out.push_back("non combat: " + join(ai->GetStrategies(BotState::BOT_STATE_NON_COMBAT)));
+    out.push_back("last action: combat " + ai->GetLastExecutedActionName(BotState::BOT_STATE_COMBAT)
+        + ", non combat " + ai->GetLastExecutedActionName(BotState::BOT_STATE_NON_COMBAT));
+    out.push_back("last decision: " + ai->GetLastActionDecision(BotState::BOT_STATE_COMBAT));
+
+    std::ostringstream power;
+    power << "power " << uint32(bot->GetPowerType()) << " at " << bot->GetPower(bot->GetPowerType()) << "/" << bot->GetMaxPower(bot->GetPowerType())
+          << ", form " << uint32(bot->GetShapeshiftForm()) << ", moving " << (bot->IsMoving() ? "yes" : "no")
+          << ", movement " << uint32(bot->GetMotionMaster()->GetCurrentMovementGeneratorType())
+          << ", casting " << (bot->IsNonMeleeSpellCasted(false) ? "yes" : "no");
+    out.push_back(power.str());
+
+    if (Unit* victim = bot->GetVictim())
+    {
+        std::ostringstream target;
+        target << "victim " << victim->GetName() << " health " << victim->GetHealth() << "/" << victim->GetMaxHealth()
+               << " distance " << uint32(bot->GetDistance(victim)) << " height " << int32(victim->GetPositionZ() - bot->GetPositionZ())
+               << " sight " << (bot->IsWithinLOSInMap(victim) ? "yes" : "no") << " attacking us " << (victim->GetVictim() == bot ? "yes" : "no");
+        out.push_back(target.str());
+    }
+    else
+        out.push_back("no victim");
+
+    std::ostringstream attackers;
+    attackers << "attackers:";
+    for (Unit* attacker : bot->getAttackers())
+        attackers << " " << attacker->GetName() << " (" << uint32(attacker->GetHealthPercent()) << "%)";
+    out.push_back(attackers.str());
+    return out;
 }
 
 std::list<std::string> GuildBotMgr::HandleCreate(const std::string& args)
