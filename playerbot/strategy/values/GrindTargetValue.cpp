@@ -8,6 +8,7 @@
 #include "AttackersValue.h"
 #include "PossibleAttackTargetsValue.h"
 #include "playerbot/strategy/actions/ChooseTargetActions.h"
+#include "playerbot/strategy/actions/ChooseTravelTargetAction.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/strategy/values/GuildValues.h"
 #include "playerbot/strategy/values/SharedValueContext.h"
@@ -107,7 +108,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     {
         if (uint32 itemId = GuildOrderValue::FindItemByName(order.target))
         {
-            for (int32 dropEntry : GAI_VALUE2(std::list<int32>, "item drop list", itemId))
+            for (int32 dropEntry : ChooseTravelTargetAction::FarmDropEntries(itemId, bot->GetLevel()))
                 if (dropEntry > 0)
                     farmEntries.insert(dropEntry);
         }

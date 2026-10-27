@@ -469,6 +469,39 @@ DestinationList ChooseTravelTargetAction::FindDestination(PlayerTravelInfo info,
     return dests;
 };
 
+// The creatures (positive entries) and objects (negative) worth farming an item from. Creatures more
+// than 4 levels above the bot are left out; low and gray ones are fine. Shared loot tables give many
+// creatures an item at a tiny chance (Small Crag Boar has Chunk of Boar Meat at 0.01%), so only
+// sources with at least a quarter of the best chance among their kind are kept.
+std::vector<int32> ChooseTravelTargetAction::FarmDropEntries(uint32 itemId, uint32 botLevel)
+{
+    std::vector<std::pair<int32, float>> sources;
+    float bestCreature = 0.0f, bestObject = 0.0f;
+
+    for (int32 entry : GAI_VALUE2(std::list<int32>, "item drop list", itemId))
+    {
+        if (entry > 0)
+        {
+            CreatureInfo const* cInfo = ObjectMgr::GetCreatureTemplate(entry);
+            if (!cInfo || cInfo->MinLevel > botLevel + 4)
+                continue;
+        }
+
+        float chance = GAI_VALUE2(float, "loot chance", std::to_string(entry) + " " + std::to_string(itemId));
+        sources.push_back({ entry, chance });
+
+        float& best = entry > 0 ? bestCreature : bestObject;
+        best = std::max(best, chance);
+    }
+
+    std::vector<int32> entries;
+    for (auto& [entry, chance] : sources)
+        if (chance >= (entry > 0 ? bestCreature : bestObject) / 4)
+            entries.push_back(entry);
+
+    return entries;
+}
+
 bool ChooseGroupTravelTargetAction::Execute(Event& event)
 {
     std::vector<ObjectGuid> groupPlayers;
@@ -1020,16 +1053,23 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
         }
         else if (order.type == GuildOrderType::Farm || order.type == GuildOrderType::Kill)
         {
-            *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [travelInfo = PlayerTravelInfo(bot), center, orderTarget, partitions = travelPartitions]()
+            // Looked up here, not in the task below: the shared values are not safe to fill from another thread.
+            uint32 foundItemId = GuildOrderValue::FindItemByName(orderTarget);
+            std::vector<int32> dropEntries;
+            std::set<int32> anyDropEntries;
+            if (foundItemId)
+            {
+                dropEntries = ChooseTravelTargetAction::FarmDropEntries(foundItemId, bot->GetLevel());
+                for (int32 entry : GAI_VALUE2(std::list<int32>, "item drop list", foundItemId))
+                    anyDropEntries.insert(entry);
+            }
+
+            *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [travelInfo = PlayerTravelInfo(bot), center, orderTarget, partitions = travelPartitions, foundItemId, dropEntries, anyDropEntries]()
                 {
                     PartitionedTravelList list;
 
-                    uint32 foundItemId = GuildOrderValue::FindItemByName(orderTarget);
-
                     if (foundItemId)
                     {
-                        std::list<int32> dropEntries = GAI_VALUE2(std::list<int32>, "item drop list", foundItemId);
-
                         if (!dropEntries.empty())
                         {
                             std::vector<int32> gatherEntries, mobEntries;
@@ -1100,20 +1140,10 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
                             if (list.empty() && !mobEntries.empty())
                             {
                                 // Only creatures that drop money get a grind destination, so beasts such as
-                                // boars have just a skinning one. Either leads to the creature. Farming is not
-                                // grinding: low and gray creatures are fine, but not ones the bot would not attack.
-                                std::vector<int32> farmEntries;
-                                for (int32 entry : mobEntries)
-                                {
-                                    CreatureInfo const* cInfo = ObjectMgr::GetCreatureTemplate(entry);
-                                    if (cInfo && (int32)cInfo->MinLevel <= (int32)travelInfo.GetLevel() + 4)
-                                        farmEntries.push_back(entry);
-                                }
-
+                                // boars have just a skinning one. Either leads to the creature.
                                 uint32 mobPurpose = (uint32)TravelDestinationPurpose::Grind | (uint32)TravelDestinationPurpose::GatherSkinning;
 
-                                if (!farmEntries.empty())
-                                    list = sTravelMgr.GetPartitions(center, partitions, travelInfo, mobPurpose, farmEntries, false);
+                                list = sTravelMgr.GetPartitions(center, partitions, travelInfo, mobPurpose, mobEntries, false);
                             }
                         }
                     }
@@ -1131,6 +1161,9 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
                         {
                             for (auto& destination : ChooseTravelTargetAction::FindDestination(travelInfo, orderTarget, false, false, false, false, false, true))
                             {
+                                if (foundItemId && !anyDropEntries.count(destination->GetEntry()))
+                                    continue;
+
                                 std::list<uint8> chancesToGoFar = { 10,50,90 };
                                 WorldPosition* point = destination->GetNextPoint(center, chancesToGoFar);
                                 if (!point) continue;
@@ -1144,6 +1177,10 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
                             bool includeMobs = !hasAnyGathering;
                             for (auto& destination : ChooseTravelTargetAction::FindDestination(travelInfo, orderTarget, false, includeMobs, false, includeMobs, includeMobs, true))
                             {
+                                // A name match is only a place to farm an item if it drops the item.
+                                if (foundItemId && !anyDropEntries.count(destination->GetEntry()))
+                                    continue;
+
                                 std::list<uint8> chancesToGoFar = { 10,50,90 };
                                 WorldPosition* point = destination->GetNextPoint(center, chancesToGoFar);
                                 if (!point) continue;
