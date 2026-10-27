@@ -614,7 +614,12 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     int32 minLevel = std::max(botLevel * (0.4f + levelMod), botLevel - 12.0f + levelBoost);
     // Upstream grinds well below its level for safe gold; a character levelling wants creatures that give experience.
     if (info.WantsExperience())
+    {
         minLevel = std::max(minLevel, int32(MaNGOS::XP::GetGrayLevel(botLevel)) + 1);
+        // Judged by the middle of the creature's levels, or a spot whose low spawns are gray leaves little to fight.
+        if (int32(cInfo->MinLevel + cInfo->MaxLevel) / 2 < minLevel)
+            return false;
+    }
 
     if ((int32)cInfo->MaxLevel < minLevel) //@lvl5 min = 3, @lvl60 max = 50
         return false;
