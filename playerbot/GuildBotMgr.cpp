@@ -804,8 +804,11 @@ std::string GuildBotMgr::KeepParty(Character& c, Player* bot)
     Group* leaderGroup = leader->GetGroup();
     if (leaderGroup && !leaderGroup->IsLeader(leader->GetObjectGuid()))
         return leaderName + " is in a group it does not lead";
+    // A full party becomes a raid, so a guild can gather forty; a full raid has no room.
+    if (leaderGroup && leaderGroup->IsFull() && !leaderGroup->IsRaidGroup())
+        leaderGroup->ConvertToRaid();
     if (leaderGroup && leaderGroup->IsFull())
-        return leaderName + "'s group is full";
+        return leaderName + "'s raid is full";
 
     // Invite and accept, the way the client does, so the core forms the group itself.
     if (!leaderGroup)
