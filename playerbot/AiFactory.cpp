@@ -290,6 +290,15 @@ BotRoles AiFactory::GetPlayerRoles(const Player* player)
     return role;
 }
 
+// A feral druid tanks in bear form once it has Primal Fury. A guild character with the tank role tanks from its first feral talent.
+static bool IsFeralTank(Player* player)
+{
+    if (player->HasSpell(16961) || player->HasSpell(16958))
+        return true;
+
+    return sGuildBotMgr.IsGuildBot(player) && sGuildBotMgr.GetRole(player->GetGUIDLow()) == BOT_ROLE_TANK;
+}
+
 void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const facade, Engine* combatEngine)
 {
     int tab = GetPlayerSpecTab(player);
@@ -421,7 +430,7 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
         {
             if (tab == 1)
             {
-                if (player->HasSpell(16961) || player->HasSpell(16958))
+                if (IsFeralTank(player))
                 {
                     combatEngine->addStrategies("tank feral", "tank assist", "pull", "pull back", "close", NULL);
                 }
@@ -834,7 +843,7 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
         {
             if (tab == 1)
             {
-                if (player->HasSpell(16961) || player->HasSpell(16958))
+                if (IsFeralTank(player))
                 {
                     nonCombatEngine->addStrategies("tank feral", "tank assist", NULL);
                 }
@@ -1247,7 +1256,7 @@ void AiFactory::AddDefaultDeadStrategies(Player* player, PlayerbotAI* const faca
         {
             if (tab == 1)
             {
-                if (player->HasSpell(16961) || player->HasSpell(16958))
+                if (IsFeralTank(player))
                 {
                     deadEngine->addStrategy("tank feral");
                 }
@@ -1441,7 +1450,7 @@ void AiFactory::AddDefaultReactionStrategies(Player* player, PlayerbotAI* const 
         {
             if (tab == 1)
             {
-                if (player->HasSpell(16961) || player->HasSpell(16958))
+                if (IsFeralTank(player))
                 {
                     reactionEngine->addStrategy("tank feral");
                 }

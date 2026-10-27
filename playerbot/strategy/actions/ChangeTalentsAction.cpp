@@ -168,8 +168,16 @@ std::vector<TalentPath*> ChangeTalentsAction::getPremadePaths(uint8 cls, std::st
         if (!findName.empty() && path.name.find(findName) == std::string::npos)
             continue;
 
-        if (role != BotRoles::BOT_ROLE_NONE && AiFactory::GetPlayerRoles(cls, path.talentSpec.back().highestTree()) != role)
-            continue;
+        if (role != BotRoles::BOT_ROLE_NONE)
+        {
+            int tree = path.talentSpec.back().highestTree();
+            BotRoles roles = AiFactory::GetPlayerRoles(cls, tree);
+            // Feral is the druid's tank tree as well as a damage tree, though GetPlayerRoles counts it as damage only.
+            if (cls == CLASS_DRUID && tree == 1)
+                roles = BotRoles(roles | BotRoles::BOT_ROLE_TANK);
+            if (!(roles & role))
+                continue;
+        }
 
         ret.push_back(&path);
     }

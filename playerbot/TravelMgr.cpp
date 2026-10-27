@@ -2777,7 +2777,24 @@ PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, cons
         }
 
         if (std::get<2>(point) > 0)
-            pointMap[pointRange.first].push_back(point);
+        {
+            // The squares measure a point on another map by its x and y alone, so a camp across the sea
+            // at the same coordinates lands in the closest range. The point is filed by its real distance instead,
+            // never in a closer range than the squares gave. Keys are squared ranges, computed as the squares compute them.
+            uint32 partition = pointRange.first;
+            float realDistance = std::get<2>(point);
+            for (uint32 range : distancePartitions)
+            {
+                if (realDistance < range || range == distancePartitions.back())
+                {
+                    uint32 sqRange = range * range;
+                    partition = std::max(partition, sqRange);
+                    break;
+                }
+            }
+
+            pointMap[partition].push_back(point);
+        }
     }
 
     sTravelMgr.GetPartitionsLock(false);
