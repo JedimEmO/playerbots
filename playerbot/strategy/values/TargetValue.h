@@ -122,6 +122,24 @@ namespace ai
         ObjectGuid Calculate() override;
     };
 
+    // The unit the bot's group is fighting with this name, in any case and whole: find target::golemagg the incinerator.
+    // Empty before the pull and after the kill, so a boss strategy can test it to know its fight is on.
+    class FindTargetValue : public UnitCalculatedValue, public Qualified
+    {
+    public:
+        FindTargetValue(PlayerbotAI* ai, std::string name = "find target") : UnitCalculatedValue(ai, name), Qualified() {}
+        ObjectGuid Calculate() override;
+    };
+
+    // The raid boss the bot's group is fighting: the bot's own target when it is one, else the first among the attackers.
+    // Raid bosses are world bosses by rank; the bosses of five-player dungeons are plain elites and are not found.
+    class BossTargetValue : public UnitCalculatedValue
+    {
+    public:
+        BossTargetValue(PlayerbotAI* ai, std::string name = "boss target") : UnitCalculatedValue(ai, name) {}
+        ObjectGuid Calculate() override;
+    };
+
     class ManualFollowTargetValue : public GuidPositionManualSetValue
     {
     public:

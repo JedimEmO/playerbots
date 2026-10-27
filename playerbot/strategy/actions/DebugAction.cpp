@@ -3937,6 +3937,10 @@ bool DebugAction::HandleValues(Event& event, Player* requester, const std::strin
         param = text.substr(7);
     }
 
+    // A value nothing has read yet is not listed; asking for it by its full name, qualifier included, creates it.
+    if (!param.empty())
+        context->GetUntypedValue(param);
+
     std::set<std::string> names = context->GetValues();
     std::vector<std::string> values;
     for (auto name : names)

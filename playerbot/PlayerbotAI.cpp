@@ -2919,6 +2919,110 @@ bool PlayerbotAI::IsHeal(Player* player, bool inGroup)
     return (botRoles & BOT_ROLE_HEALER) != 0;
 }
 
+std::vector<Player*> PlayerbotAI::GetGroupTanks(Group* group)
+{
+    if (!group)
+        return {};
+
+    std::vector<std::pair<uint8, Player*>> assigned;
+    std::vector<Player*> others;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->getSource();
+        if (!member)
+            continue;
+
+        if (uint8 order = sGuildBotMgr.GetTankOrder(member->GetGUIDLow()))
+            assigned.push_back({ order, member });
+        else if (IsTank(member))
+            others.push_back(member);
+    }
+
+    // Stable, so two members given the same order keep their member order.
+    std::stable_sort(assigned.begin(), assigned.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::vector<Player*> tanks;
+    for (const auto& [order, member] : assigned)
+        tanks.push_back(member);
+    tanks.insert(tanks.end(), others.begin(), others.end());
+    return tanks;
+}
+
+// The main tank among a group's ordered tanks: the one with tank order 1, alive or dead, else the first living one.
+static Player* MainTankOf(const std::vector<Player*>& tanks)
+{
+    if (!tanks.empty() && sGuildBotMgr.GetTankOrder(tanks.front()->GetGUIDLow()) == 1)
+        return tanks.front();
+
+    for (Player* tank : tanks)
+    {
+        if (tank->IsAlive())
+            return tank;
+    }
+
+    return nullptr;
+}
+
+ObjectGuid PlayerbotAI::GetMainTankGuid(Group* group)
+{
+    Player* mainTank = MainTankOf(GetGroupTanks(group));
+    return mainTank ? mainTank->GetObjectGuid() : ObjectGuid();
+}
+
+bool PlayerbotAI::IsMainTank(Player* player)
+{
+    Group* group = player->GetGroup();
+    if (!group)
+        return IsTank(player);
+
+    return MainTankOf(GetGroupTanks(group)) == player;
+}
+
+bool PlayerbotAI::IsExplicitMainTank(Player* player)
+{
+    Group* group = player->GetGroup();
+    return group && sGuildBotMgr.GetTankOrder(player->GetGUIDLow()) == 1 && MainTankOf(GetGroupTanks(group)) == player;
+}
+
+bool PlayerbotAI::IsAssistTank(Player* player)
+{
+    Group* group = player->GetGroup();
+    if (!group)
+        return false;
+
+    std::vector<Player*> tanks = GetGroupTanks(group);
+    return std::find(tanks.begin(), tanks.end(), player) != tanks.end() && MainTankOf(tanks) != player;
+}
+
+bool PlayerbotAI::IsAssistTankOfIndex(Player* player, uint8 index, bool indexLivingOnly)
+{
+    Group* group = player->GetGroup();
+    if (!group || (indexLivingOnly && !player->IsAlive()))
+        return false;
+
+    std::vector<Player*> tanks = GetGroupTanks(group);
+    Player* mainTank = MainTankOf(tanks);
+    uint8 position = 0;
+    for (Player* tank : tanks)
+    {
+        if (tank == mainTank || (indexLivingOnly && !tank->IsAlive()))
+            continue;
+
+        if (tank == player)
+            return position == index;
+
+        ++position;
+    }
+
+    return false;
+}
+
+uint32 PlayerbotAI::GetGroupTankNum(Player* player)
+{
+    std::vector<Player*> tanks = GetGroupTanks(player->GetGroup());
+    return std::count_if(tanks.begin(), tanks.end(), [](Player* tank) { return tank->IsAlive(); });
+}
+
 namespace MaNGOS
 {
 

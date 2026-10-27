@@ -467,6 +467,23 @@ public:
     void Reset(bool full = false);
     static bool IsTank(Player* player, bool inGroup = true);
     static bool IsHeal(Player* player, bool inGroup = true);
+
+    // Main and assist tanks, under the names AzerothCore's raid code uses, so ported strategies call them unchanged.
+    // The tanks of a group are the members the guild service gave a tank order, in that order
+    // (GuildBotMgr::GetTankOrder), followed by the other members IsTank says are tanks, in member order.
+    // The main tank is the member with tank order 1, alive or dead; without one, the first living tank.
+    // The other tanks are the assist tanks 0, 1, 2 and so on.
+    static std::vector<Player*> GetGroupTanks(Group* group);
+    static ObjectGuid GetMainTankGuid(Group* group);
+    // The group's main tank; without a group, any tank.
+    static bool IsMainTank(Player* player);
+    // The main tank by assignment only, never by the fallback.
+    static bool IsExplicitMainTank(Player* player);
+    static bool IsAssistTank(Player* player);
+    // With indexLivingOnly the dead are skipped, so the living move up: assist tank 1 becomes 0 when 0 dies.
+    static bool IsAssistTankOfIndex(Player* player, uint8 index, bool indexLivingOnly = false);
+    // The living tanks in the player's group, assigned or not.
+    static uint32 GetGroupTankNum(Player* player);
     bool IsRanged(Player* player, bool inGroup = true);
     bool IsMelee(Player* player, bool inGroup = true);
     Creature* GetCreature(ObjectGuid guid) const;

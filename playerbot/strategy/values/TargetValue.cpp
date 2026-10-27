@@ -154,6 +154,54 @@ ObjectGuid PullTargetValue::Get()
     return guid;
 }
 
+ObjectGuid FindTargetValue::Calculate()
+{
+    if (qualifier.empty())
+        return ObjectGuid();
+
+    std::wstring wanted;
+    if (!Utf8toWStr(qualifier, wanted))
+        return ObjectGuid();
+    wstrToLower(wanted);
+
+    for (const ObjectGuid& guid : AI_VALUE(std::list<ObjectGuid>, "attackers"))
+    {
+        Unit* unit = ai->GetUnit(guid);
+        if (!unit || !unit->IsAlive())
+            continue;
+
+        std::wstring name;
+        if (!Utf8toWStr(unit->GetName(), name))
+            continue;
+        wstrToLower(name);
+
+        if (name == wanted)
+            return guid;
+    }
+
+    return ObjectGuid();
+}
+
+ObjectGuid BossTargetValue::Calculate()
+{
+    auto isBoss = [](Unit* unit)
+    {
+        return unit && unit->IsAlive() && unit->GetTypeId() == TYPEID_UNIT && static_cast<Creature*>(unit)->IsWorldBoss();
+    };
+
+    Unit* current = ai->GetUnit(AI_VALUE(ObjectGuid, "current target"));
+    if (isBoss(current))
+        return current->GetObjectGuid();
+
+    for (const ObjectGuid& guid : AI_VALUE(std::list<ObjectGuid>, "attackers"))
+    {
+        if (isBoss(ai->GetUnit(guid)))
+            return guid;
+    }
+
+    return ObjectGuid();
+}
+
 ObjectGuid FollowTargetValue::Calculate()
 {
     Unit* followTarget = AI_VALUE(GuidPosition, "manual follow target").GetUnit(bot->GetInstanceId());

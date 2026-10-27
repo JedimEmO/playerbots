@@ -108,6 +108,7 @@
 #include "WorldBuffTravelValues.h"
 #include "AvoidCreatureListValue.h"
 #include "CreatureIdValue.h"
+#include "GroupTankValues.h"
 
 namespace ai
 {
@@ -308,6 +309,10 @@ namespace ai
             creators["boost targets"] = [](PlayerbotAI* ai) { return new BoostTargetsValue(ai); };
             creators["revive targets"] = [](PlayerbotAI* ai) { return new ReviveTargetsValue(ai); };
             creators["buff targets"] = [](PlayerbotAI* ai) { return new BuffTargetsValue(ai); };
+            creators["find target"] = [](PlayerbotAI* ai) { return new FindTargetValue(ai); };
+            creators["boss target"] = [](PlayerbotAI* ai) { return new BossTargetValue(ai); };
+            creators["main tank"] = [](PlayerbotAI* ai) { return new MainTankValue(ai); };
+            creators["assist tank"] = [](PlayerbotAI* ai) { return new AssistTankValue(ai); };
 
             creators["bg type"] = [](PlayerbotAI* ai) { return new BgTypeValue(ai); };
             creators["rpg bg type"] = [](PlayerbotAI* ai) { return new RpgBgTypeValue(ai); };
