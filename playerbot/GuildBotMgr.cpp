@@ -1269,6 +1269,16 @@ std::list<std::string> GuildBotMgr::HandleDebug(const std::string& args)
     else
         out.push_back("no victim");
 
+    std::ostringstream travel;
+    ai::TravelTarget* target = ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get();
+    if (target && target->GetDestination() && target->GetPosition())
+        travel << "travel " << target->GetDestination()->GetTitle() << " (" << target->GetDestination()->GetShortName() << ")"
+               << " status " << uint32(target->GetStatus()) << " map " << target->GetPosition()->getMapId()
+               << " distance " << uint32(target->Distance(bot)) << " forced " << (target->IsForced() ? "yes" : "no");
+    else
+        travel << "no travel target";
+    out.push_back(travel.str());
+
     std::ostringstream attackers;
     attackers << "attackers:";
     for (Unit* attacker : bot->getAttackers())
