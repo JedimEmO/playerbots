@@ -159,6 +159,16 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     if (!dungeon.lastBoss)
         dungeon.lastBoss = dungeon.bosses.back();
 
+    // The last boss goes last, or the bosses farther from the entrance than it, such as Cookie, are never visited.
+    for (size_t i = 0; i + 1 < dungeon.bosses.size(); ++i)
+    {
+        if (dungeon.bosses[i] != dungeon.lastBoss)
+            continue;
+        std::rotate(dungeon.bosses.begin() + i, dungeon.bosses.begin() + i + 1, dungeon.bosses.end());
+        std::rotate(dungeon.spawns.begin() + i, dungeon.spawns.begin() + i + 1, dungeon.spawns.end());
+        break;
+    }
+
     return true;
 }
 
