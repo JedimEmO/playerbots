@@ -1,4 +1,5 @@
 #include "playerbot/TravelMgr.h"
+#include "playerbot/GuildBotMgr.h"
 #include <sstream>
 #include <ctime>
 #include <cstdio>
@@ -36,6 +37,7 @@ PlayerTravelInfo::PlayerTravelInfo(Player* player)
     skillMax[SKILL_SKINNING] = player->GetSkillMax(SKILL_SKINNING);
 
     money = player->GetMoney();
+    avoidEnemyZones = sGuildBotMgr.IsGuildBot(player);
 
     if (player->GetGroup())
         groupSize = player->GetGroup()->GetMembersCount();
@@ -2676,6 +2678,18 @@ bool TravelMgr::IsLocationLevelValid(const WorldPosition& position, const Player
 
     if (position.getMapId() == 571 && info.GetLevel() < 68) //Northrend
         return false;
+
+    // A zone of the other faction is full of its guards.
+    if (info.AvoidsEnemyZones())
+    {
+        if (AreaTableEntry const* area = position.GetArea())
+        {
+            AreaTableEntry const* zone = area->zone ? GetAreaEntryByAreaID(area->zone) : area;
+            uint32 team = zone ? zone->team : area->team;
+            if ((team == AREATEAM_ALLY && info.GetTeam() == HORDE) || (team == AREATEAM_HORDE && info.GetTeam() == ALLIANCE))
+                return false;
+        }
+    }
 
     if (info.GetBoolValue("can fight boss"))
         botLevel += 5;

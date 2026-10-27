@@ -51,6 +51,8 @@ namespace ai
 		bool IsInRaid() const { return groupSize > 5; }
 		bool IsInGroup() const { return groupSize > 1 && groupSize <= 5; }
 		uint32 GetMoney() const { return money; }
+		// Guild characters walk everywhere, so they keep out of the other faction's zones.
+		bool AvoidsEnemyZones() const { return avoidEnemyZones; }
 
 		bool HasFocusQuest() const {return !focusList.empty();}
 		bool IsFocusQuest(uint32 questId) const { return focusList.find(questId) != focusList.end(); }
@@ -68,6 +70,7 @@ namespace ai
 		uint16 skillMax[MAX_SKILL_TYPE] = { 0 };
 		uint8 groupSize = 0;
 		uint32 money = 0;
+		bool avoidEnemyZones = false;
 
 		focusQuestTravelList focusList = {};
 
