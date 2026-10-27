@@ -13,6 +13,7 @@
 #include "PlayerbotAI.h"
 #include "BotTests.h"
 #include "Globals/ObjectAccessor.h"
+#include "Tools/Formulas.h"
 
 using namespace ai;
 using namespace MaNGOS;
@@ -39,7 +40,10 @@ PlayerTravelInfo::PlayerTravelInfo(Player* player)
     money = player->GetMoney();
     avoidEnemyZones = sGuildBotMgr.IsGuildBot(player);
     if (avoidEnemyZones)
+    {
         leftEntries = sGuildBotMgr.LeftDestinations(player);
+        wantsExperience = sGuildBotMgr.GetActiveJob(player->GetGUIDLow()) == "level";
+    }
 
     if (player->GetGroup())
         groupSize = player->GetGroup()->GetMembersCount();
@@ -608,6 +612,9 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
         return false;
 
     int32 minLevel = std::max(botLevel * (0.4f + levelMod), botLevel - 12.0f + levelBoost);
+    // Upstream grinds well below its level for safe gold; a character levelling wants creatures that give experience.
+    if (info.WantsExperience())
+        minLevel = std::max(minLevel, int32(MaNGOS::XP::GetGrayLevel(botLevel)) + 1);
 
     if ((int32)cInfo->MaxLevel < minLevel) //@lvl5 min = 3, @lvl60 max = 50
         return false;

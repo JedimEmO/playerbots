@@ -104,6 +104,10 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
 
     std::unordered_map<uint32, bool> needForQuestCache;
 
+    // A guild character levelling starts no fight with a creature that gives no experience.
+    bool wantsExperience = sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) == "level";
+    uint32 grayLevel = MaNGOS::XP::GetGrayLevel(bot->GetLevel());
+
     // The creatures a farm order's item drops from are wanted like quest creatures, even when gray.
     std::set<int32> farmEntries;
     GuildOrder order = AI_VALUE(GuildOrder, "guild order");
@@ -243,6 +247,9 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
                 ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (ignore critters).");
             continue;
         }
+
+        if (wantsExperience && creature && creature->GetLevel() <= grayLevel && !farmEntries.count(int32(unit->GetEntry())))
+            continue;
 
         float newdistance = sServerFacade.GetDistance2d(bot, unit);
 

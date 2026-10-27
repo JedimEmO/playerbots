@@ -53,6 +53,7 @@ namespace ai
 		uint32 GetMoney() const { return money; }
 		// Guild characters walk everywhere, so they keep out of the other faction's zones.
 		bool AvoidsEnemyZones() const { return avoidEnemyZones; }
+		bool WantsExperience() const { return wantsExperience; }
 		// A destination this character left lately because it could not work it.
 		bool HasLeft(int32 entry) const { return leftEntries.count(entry) > 0; }
 
@@ -73,6 +74,7 @@ namespace ai
 		uint8 groupSize = 0;
 		uint32 money = 0;
 		bool avoidEnemyZones = false;
+		bool wantsExperience = false; // a guild character levelling: grind only what gives experience
 		std::set<int32> leftEntries;
 
 		focusQuestTravelList focusList = {};

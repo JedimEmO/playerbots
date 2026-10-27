@@ -5,6 +5,7 @@
 #include "playerbot/TravelMgr.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
+#include "playerbot/GuildBotMgr.h"
 
 bool DpsAssistAction::isUseful()
 {
@@ -32,7 +33,9 @@ bool AttackAnythingAction::isUseful()
     if (pinnedByOrder && target->GetDistance(bot) >= ai->GetRange("spell"))
         return false;
 
-    if (ai->ContainsStrategy(STRATEGY_TYPE_HEAL) && !ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT))
+    // A healer leaves the pulling to its party; a guild character on its own has no one else to pull.
+    bool alone = !bot->GetGroup() && sGuildBotMgr.IsGuildBot(bot);
+    if (ai->ContainsStrategy(STRATEGY_TYPE_HEAL) && !ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT) && !alone)
         return false;
 
     if(!target->IsPlayer() && bot->isInFront(target,target->GetAttackDistance(bot)*1.5f, M_PI_F*0.5f) && target->CanAttackOnSight(bot) && target->GetLevel() < bot->GetLevel() + 3.0) //Attack before being attacked.
