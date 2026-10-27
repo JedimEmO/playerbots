@@ -1,5 +1,6 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 #include "TravelValues.h"
 #include "QuestValues.h"
 #include "SharedValueContext.h"
@@ -285,6 +286,10 @@ bool NeedTravelPurposeValue::Calculate()
     case TravelDestinationPurpose::GatherSkinning:
     case TravelDestinationPurpose::GatherMining:
     case TravelDestinationPurpose::GatherHerbalism:
+        // A levelling guild character gathers what it passes, with the gather strategy; it makes no trips for it.
+        // A dwarf paladin walked from Dun Morogh to Elwynn for copper and earned nothing for half an hour.
+        if (sGuildBotMgr.IsGuildBot(bot))
+            return false;
         skill = gatheringSkills.at(purpose);
         if (bot->GetSkillValue(skill) < std::min(bot->GetSkillMax(skill), bot->GetSkillMaxForLevel(bot)))
         {
@@ -441,6 +446,17 @@ bool ShouldTravelNamedValue::Calculate()
     else if (name == "guild order")
     {
         return AI_VALUE(bool, "has guild travel order");
+    }
+    else if (name == "dungeon")
+    {
+        // A guild character leading a dungeon run sets out once it has sold and repaired.
+        if (!sGuildDungeon.ShouldTravel(bot))
+            return false;
+        if (AI_VALUE(bool, "should sell") && AI_VALUE(bool, "can sell"))
+            return false;
+        if (AI_VALUE(bool, "should repair") && AI_VALUE(bool, "can repair"))
+            return false;
+        return true;
     }
     else if (name == "reagent vendor")
     {
