@@ -217,6 +217,7 @@ void TalentSpec::SortTalents(std::vector<TalentListEntry>& talents, int sortBy)
 //Set the talent ranks to the current rank of the player.
 void TalentSpec::ReadTalents(Player* bot) {
     for (auto& entry : talents)
+    {
         for (int rank = 0; rank < MAX_TALENT_RANK; ++rank)
         {
             uint32 spellId = entry.talentInfo->RankID[rank];
@@ -225,11 +226,11 @@ void TalentSpec::ReadTalents(Player* bot) {
                 continue;
 
             if (bot->HasSpell(spellId))
-            {
                 entry.rank = rank + 1;
-                points += 1;
-            }
         }
+        // A higher rank replaces the spell of the one below, so the points are the rank, not the spells found.
+        points += entry.rank;
+    }
 }
 
 //Set the talent ranks to the ranks of the link.
