@@ -2,6 +2,7 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildBench.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildRuns.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/Engine.h"
@@ -445,6 +446,7 @@ void GuildBotMgr::Tick(uint32 elapsed)
         LoginLogout();
         ApplyOrders();
         CheckJobs();
+        sGuildRuns.Sweep();
     }
 
     if (sinceState >= STATE_MS)
@@ -550,6 +552,7 @@ void GuildBotMgr::EnsureTables()
         " PRIMARY KEY (hour, guid, entry), KEY entry (entry)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
+    sGuildRuns.EnsureTables();
     tablesReady = true;
 }
 
@@ -983,6 +986,7 @@ void GuildBotMgr::CheckJobs()
             Event(guid, "died", std::to_string(bot->GetZoneId()));
         Measure(c, bot, dead && !c.dead);
         c.dead = dead;
+        sGuildRuns.Observe(bot);
 
         // Cut off from its group, say outside a dungeon its party is in: it plays as a solo character until it is back.
         bool alone = false;
@@ -1448,6 +1452,8 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         return HandleMetrics(rest);
     if (sub == "spots")
         return HandleSpots(rest);
+    if (sub == "runs")
+        return sGuildRuns.HandleRuns(rest);
     if (sub == "tank")
         return HandleTank(rest);
     if (sub == "bench")
@@ -1469,6 +1475,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         "guildbot debug <name>                  the engine's view: strategies, last action, target, power, movement",
         "guildbot metrics [hours]               how much of their time levelling characters earn experience, by hour",
         "guildbot spots [hours]                 grind spots by experience per hour there, with the walk to them",
+        "guildbot runs [count]                  the latest dungeon runs: members, bosses, wipes and loot",
     };
 }
 

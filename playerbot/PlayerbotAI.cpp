@@ -1,6 +1,7 @@
 #include "PlayerbotMgr.h"
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildRuns.h"
 #include <stdarg.h>
 #include <iomanip>
 
@@ -1810,6 +1811,10 @@ void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fr
 
 void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
 {
+    // What the group is told of loot, for the record of dungeon runs.
+    if ((packet.GetOpcode() == SMSG_ITEM_PUSH_RESULT || packet.GetOpcode() == SMSG_LOOT_ROLL_WON) && sGuildBotMgr.IsGuildBot(bot))
+        sGuildRuns.OnPacket(bot, packet);
+
     //if (packet.empty())
     //    return;
 

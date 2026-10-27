@@ -70,6 +70,14 @@ public:
     // entrance or the way out. False when it is not in that position.
     static bool LeaderAcrossEntrance(Player* bot, WorldLocation& leaderPlace);
 
+    // For the run record: the dungeon on this map, its bosses in order with their spawns, and the last boss.
+    struct Bosses { std::string name; std::vector<int32> entries; std::vector<uint32> spawns; int32 last = 0; };
+    static bool BossesOf(uint32 mapId, Player* member, Bosses& out);
+    // The boss's spawn in this instance is dead: killed, with its respawn time saved, or a corpse now.
+    static bool BossDead(Map* map, uint32 spawn);
+    // The boss's spawn exists in this instance: false for a pooled rare the pool did not choose.
+    static bool BossSpawned(Map* map, uint32 spawn);
+
 private:
     GuildDungeon() = default;
 
@@ -107,10 +115,6 @@ private:
     static uint32 FindMap(const std::string& name);
     // Why the party cannot set out yet, or empty. Sets failed when waiting would not help.
     static std::string CheckParty(Player* leader, const Dungeon& dungeon, bool& failed);
-    // The boss's spawn in this instance is dead: killed, with its respawn time saved, or a corpse now.
-    static bool BossDead(Map* map, uint32 spawn);
-    // The boss's spawn exists in this instance: false for a pooled rare the pool did not choose.
-    static bool BossSpawned(Map* map, uint32 spawn);
     // The bosses step, inside with the whole party.
     void TickBosses(Player* leader, Run& run, Update& update);
     // The finish step: out, then the reset.

@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildDungeon.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildRuns.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
@@ -271,10 +272,26 @@ std::string GuildDungeon::CheckParty(Player* leader, const Dungeon& dungeon, boo
     return "";
 }
 
+namespace
+{
+    // Upstream marks a travel purpose that once found no destination as having none, until something else clears it,
+    // and then never asks again; a run that wants to travel and has no target asks afresh.
+    void AllowTravelRequest(Player* leader)
+    {
+        PlayerbotAI* ai = leader->GetPlayerbotAI();
+        if (!ai)
+            return;
+        AiObjectContext* context = ai->GetAiObjectContext();
+        if (!context->GetValue<TravelTarget*>("travel target")->Get()->IsActive())
+            context->GetValue<bool>("no active travel destinations", "dungeon")->Set(false);
+    }
+}
+
 GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
 {
     Update update;
     std::lock_guard<std::mutex> guard(lock);
+    AllowTravelRequest(leader);
 
     Run& run = runs[leader->GetGUIDLow()];
     if (!run.resolved)
@@ -392,6 +409,22 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     else
         update.reason = why;
     return update;
+}
+
+bool GuildDungeon::BossesOf(uint32 mapId, Player* member, Bosses& out)
+{
+    MapEntry const* map = sMapStore.LookupEntry(mapId);
+    if (!map || !map->IsNonRaidDungeon())
+        return false;
+    Dungeon dungeon;
+    std::string error;
+    if (!Resolve(map->name[0], member, dungeon, error))
+        return false;
+    out.name = dungeon.name;
+    out.entries = dungeon.bosses;
+    out.spawns = dungeon.spawns;
+    out.last = dungeon.lastBoss;
+    return true;
 }
 
 bool GuildDungeon::BossDead(Map* map, uint32 spawn)
@@ -539,11 +572,14 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
 
     // Everyone is out: the leader resets the instance, as a player's client asks the server to.
     bool reset = true;
-    if (group && group->GetBoundInstance(dungeon.mapId))
+    if (InstanceGroupBind* bind = group ? group->GetBoundInstance(dungeon.mapId) : nullptr)
     {
+        const uint32 instanceId = bind->state ? bind->state->GetInstanceId() : 0;
         WorldPacket packet(CMSG_RESET_INSTANCES);
         leader->GetSession()->HandleResetInstancesOpcode(packet);
         reset = !group->GetBoundInstance(dungeon.mapId);
+        if (reset && instanceId)
+            sGuildRuns.InstanceReset(instanceId);
     }
     update.status = "done";
     update.reason = run.cleared + (reset ? ", and reset" : ", but the reset failed");
