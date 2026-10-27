@@ -45,7 +45,19 @@ namespace
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
-        { 36, 639 },   // The Deadmines: Edwin VanCleef
+        { 389, 11519 },  // Ragefire Chasm: Bazzalan
+        { 36, 639 },     // The Deadmines: Edwin VanCleef
+        { 43, 5775 },    // Wailing Caverns: Verdan the Everliving; Mutanus comes only with the Naralex escort
+        { 33, 4275 },    // Shadowfang Keep: Archmage Arugal
+        { 48, 4829 },    // Blackfathom Deeps: Aku'mai
+        { 34, 1716 },    // The Stockade: Bazil Thredd
+        { 47, 4421 },    // Razorfen Kraul: Charlga Razorflank
+        { 90, 7800 },    // Gnomeregan: Mekgineer Thermaplugg
+        { 129, 7358 },   // Razorfen Downs: Amnennar the Coldbringer
+        { 189, 3977 },   // Scarlet Monastery: High Inquisitor Whitemane, in the Cathedral
+        { 70, 2748 },    // Uldaman: Archaedas
+        { 209, 7267 },   // Zul'Farrak: Chief Ukorz Sandscalp
+        { 349, 12201 },  // Maraudon: Princess Theradras
     };
 
     // Letters only, in lower case, without a leading "the": "The Deadmines" and "deadmines" are one name.
@@ -123,6 +135,13 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     for (TravelDestination* dest : sTravelMgr.GetDestinations(PlayerTravelInfo(leader), (uint32)TravelDestinationPurpose::Boss, {}, false, 0))
     {
         if (dest->GetEntry() <= 0)
+            continue;
+        // Only enemies: an escort or a prisoner, such as the Disciple of Naralex or Deathstalker Adamant, is an elite
+        // with one spawn too, but friendly, and the party would stand by it waiting for it to die.
+        CreatureInfo const* bossInfo = ObjectMgr::GetCreatureTemplate(dest->GetEntry());
+        FactionTemplateEntry const* bossFaction = bossInfo ? sFactionTemplateStore.LookupEntry(bossInfo->Faction) : nullptr;
+        FactionTemplateEntry const* ownFaction = leader->GetFactionTemplateEntry();
+        if (!bossFaction || !ownFaction || !(bossFaction->IsHostileTo(*ownFaction) || bossFaction->IsHostileToPlayers()))
             continue;
         // The destination's point nearest the arrival: on the dungeon's map if it has one there.
         std::list<uint8> nearest = { 0, 0, 0 };
@@ -792,7 +811,8 @@ bool GuildDungeon::EnterByStone(Player* player, uint32 mapId, std::string& why)
 void GuildDungeon::FollowByStone(Player* member)
 {
     Group* group = member->GetGroup();
-    if (!group || !sGuildBotMgr.IsGuildBot(member) || !member->IsAlive() || member->IsInCombat() || group->IsLeader(member->GetObjectGuid()))
+    if (!group || !sGuildBotMgr.IsGuildBot(member) || !member->IsInWorld() || member->IsBeingTeleported() || !member->IsAlive()
+        || member->IsInCombat() || group->IsLeader(member->GetObjectGuid()))
         return;
     Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
     if (!leader || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->GetMapId() == member->GetMapId())
@@ -820,7 +840,8 @@ Creature* GuildDungeon::NextBoss(Player* bot, float within) const
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(bot->GetGUIDLow());
-    if (it == runs.end() || it->second.phase != Phase::Bosses || !it->second.nextSpawn || bot->GetMapId() != it->second.dungeon.mapId)
+    if (it == runs.end() || it->second.phase != Phase::Bosses || !it->second.nextSpawn || bot->GetMapId() != it->second.dungeon.mapId
+        || !bot->IsInWorld())
         return nullptr;
     Creature* boss = bot->GetMap()->GetCreature(it->second.nextSpawn);
     if (!boss || !boss->IsAlive() || !boss->IsInWorld() || bot->GetDistance(boss) > within)

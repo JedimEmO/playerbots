@@ -373,7 +373,7 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
         // Inside, the travel target is the next boss, and at the boss it fights: grind, which starts no fight
         // on the way to a destination that is not a grind spot, only there.
         engine->addStrategies("collision", "travel", "rpg", "free", "guild level", NULL);
-        if (player->GetMap() && player->GetMap()->IsDungeon())
+        if (MapEntry const* map = sMapStore.LookupEntry(player->GetMapId()); map && map->IsDungeon())
             engine->addStrategy("grind");
         engine->removeStrategy("rpg quest");
         engine->removeStrategy("rpg explore");
@@ -965,12 +965,19 @@ void GuildBotMgr::ApplyOrders()
     }
 }
 
+// The zone, or 0 for a character between maps, which has no terrain to ask.
+uint32 GuildBotMgr::ZoneOf(Player* bot)
+{
+    return bot->IsInWorld() && !bot->IsBeingTeleportedFar() ? bot->GetZoneId() : 0;
+}
+
 void GuildBotMgr::CheckJobs()
 {
     for (auto& [guid, c] : characters)
     {
         Player* bot = GetPlayerBot(guid);
-        if (!bot)
+        // Between maps, after a teleport to another map, a character has no map, and what asks for one asserts.
+        if (!bot || !bot->IsInWorld() || bot->IsBeingTeleportedFar())
             continue;
 
         if (c.lastLevel && bot->GetLevel() > c.lastLevel)
@@ -1352,7 +1359,7 @@ void GuildBotMgr::WriteState(const Character& c, Player* bot)
         "health_pct, dead, in_combat, free_bag_slots, job, job_seq, job_status, job_reason, role, talent_tree, talent_points, role_status, tank_order) "
         "VALUES (%u, '%s', '%s', %u, %u, %u, %u, %u, %u, %f, %f, %f, %u, %u, %u, %u, '%s', %u, '%s', '%s', '%s', '%s', %u, '%s', %u)",
         c.guid, Escape(c.name).c_str(), controller.c_str(), bot->GetLevel(), bot->GetUInt32Value(PLAYER_XP),
-        bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP), bot->GetMoney(), bot->GetMapId(), bot->GetZoneId(),
+        bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP), bot->GetMoney(), bot->GetMapId(), ZoneOf(bot),
         bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), uint32(bot->GetHealthPercent()),
         sServerFacade.UnitIsDead(bot) ? 1 : 0, sServerFacade.IsInCombat(bot) ? 1 : 0, FreeBagSlots(bot),
         Escape(c.job).c_str(), GetPlayerBot(c.guid) ? c.appliedSeq : c.jobSeq, Escape(c.status).c_str(), Escape(c.reason).c_str(),
@@ -1636,7 +1643,7 @@ std::list<std::string> GuildBotMgr::HandleState(const std::string& args)
     out << "{\"name\":\"" << c->name << "\",\"controller\":\"" << (GetPlayerBot(c->guid) ? "bot" : "player")
         << "\",\"level\":" << bot->GetLevel() << ",\"xp\":" << bot->GetUInt32Value(PLAYER_XP)
         << ",\"xp_next\":" << bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP) << ",\"money\":" << bot->GetMoney()
-        << ",\"map\":" << bot->GetMapId() << ",\"zone\":" << bot->GetZoneId()
+        << ",\"map\":" << bot->GetMapId() << ",\"zone\":" << ZoneOf(bot)
         << ",\"health_pct\":" << uint32(bot->GetHealthPercent()) << ",\"dead\":" << (sServerFacade.UnitIsDead(bot) ? "true" : "false")
         << ",\"in_combat\":" << (sServerFacade.IsInCombat(bot) ? "true" : "false") << ",\"free_bag_slots\":" << FreeBagSlots(bot)
         << ",\"job\":\"" << c->job << "\",\"job_seq\":" << c->jobSeq << ",\"job_status\":\"" << c->status

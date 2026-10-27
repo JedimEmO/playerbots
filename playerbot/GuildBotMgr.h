@@ -156,6 +156,7 @@ private:
     void ApplyRole(Character& c, Player* bot);
     void CheckChase(Character& c, Player* bot);
     void CheckLoot(Character& c, Player* bot);
+    static uint32 ZoneOf(Player* bot);
     // Count this check into the hourly measure, and write the counts when the hour or job changes, or every few minutes.
     void Measure(Character& c, Player* bot, bool died);
     void WriteMetric(Character& c);
