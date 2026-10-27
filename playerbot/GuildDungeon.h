@@ -67,6 +67,9 @@ private:
         uint32 mapId = 0;
         AreaTrigger const* entrance = nullptr;
         uint32 entranceTrigger = 0;    // the area trigger outside that takes a player in
+        // Where the dungeon's exit puts a player down outside: walkable ground beside the entrance, which the
+        // trigger itself, often inside the portal, is not. Zero when no exit lands near the entrance.
+        float approachX = 0, approachY = 0, approachZ = 0;
         std::vector<int32> bosses;     // boss entries, nearest the entrance first
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
     };
@@ -85,7 +88,7 @@ private:
     static std::string CheckParty(Player* leader, const Dungeon& dungeon, bool& failed);
     // Walks a member outside to the entrance trigger, where the entry guard lets it in after the leader.
     // A follower's follow target is out of reach once the leader is on the dungeon's map.
-    static void BringToEntrance(Player* member, uint32 triggerId);
+    static void BringToEntrance(Player* member, const Dungeon& dungeon);
 
     mutable std::mutex lock;
     std::map<uint32, Run> runs;                 // by leader guid
