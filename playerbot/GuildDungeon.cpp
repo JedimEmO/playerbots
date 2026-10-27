@@ -7,6 +7,9 @@
 #include "Pools/PoolManager.h"
 #include "AI/ScriptDevAI/ScriptDevAIMgr.h"
 #include "AI/ScriptDevAI/include/sc_gossip.h"
+#include "Grids/GridNotifiers.h"
+#include "Grids/GridNotifiersImpl.h"
+#include "Grids/CellImpl.h"
 
 #include <algorithm>
 #include <cctype>
@@ -93,19 +96,36 @@ namespace
     constexpr float TALK_DISTANCE = 6.0f;
 
     // Objects a party uses before a boss, as players would: how many members use it, and the boss it is for.
-    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; };
+    // An object that wakes its boss is used for as long as the boss sleeps, unattackable and out of combat,
+    // so it is used again after a wipe puts the boss back to sleep; any other is used once.
+    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; bool wakes; };
     const UseObject USES[] = {
         // Blackfathom Deeps: the four Fires of Aku'mai, lit once Kelris is dead, open the way to Aku'mai.
-        { 48, 21118, 1, 4829 },
-        { 48, 21119, 1, 4829 },
-        { 48, 21120, 1, 4829 },
-        { 48, 21121, 1, 4829 },
-        // Uldaman: three at the Altar of Archaedas wake him.
-        { 70, 133234, 3, 2748 },
+        { 48, 21118, 1, 4829, false },
+        { 48, 21119, 1, 4829, false },
+        { 48, 21120, 1, 4829, false },
+        { 48, 21121, 1, 4829, false },
+        // Uldaman: the Altar of Archaedas is a ritual for three. Its spell wakes him, and he attacks the first user.
+        { 70, 133234, 3, 2748, true },
     };
-    // The leader uses an object this near it, and members this near the leader join it.
+    // The leader uses an object this near it, and members this near the leader come to it to join.
     constexpr float USE_DISTANCE = 5.0f;
     constexpr float USE_JOIN_DISTANCE = 20.0f;
+    // A member joining stands this near the object, inside the distance the core takes a use from.
+    constexpr float USE_STAND = 2.0f;
+    // An object that has not woken its boss yet is used again after this.
+    constexpr time_t USE_RETRY_SECONDS = 15;
+
+    // Creatures with no spawn of their own, brought by an event, that a party kills before a boss, as players would:
+    // the creature, the boss, and the door their deaths open. The step is done when none is alive near the leader,
+    // or when the door is open.
+    struct KillFirst { uint32 map; uint32 entry; int32 before; uint32 door; };
+    const KillFirst KILLS[] = {
+        // Shadowfang Keep: Fenrus's death brings Arugal's four voidwalkers, and the Sorcerer's Gate opens when all four die.
+        { 33, 4627, 3927, 18972 },
+    };
+    // The leader looks this far for them.
+    constexpr float KILL_RANGE = 60.0f;
 
     // Letters only, in lower case, without a leading "the": "The Deadmines" and "deadmines" are one name.
     std::string Normalize(const std::string& name)
@@ -310,6 +330,7 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         step.entry = use.entry;
         step.users = use.users;
         step.before = use.before;
+        step.wakes = use.wakes;
         WorldPosition place;
         auto findSpawn = [&](auto const& pair)
         {
@@ -331,6 +352,28 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         }
         step.place = destination.get();
         dungeon.uses.push_back(step);
+    }
+
+    // Creatures to kill on the way, with the spawn of the door they open, where the map has it.
+    for (const KillFirst& kill : KILLS)
+    {
+        if (kill.map != dungeon.mapId)
+            continue;
+        Dungeon::Kill step;
+        step.entry = kill.entry;
+        step.before = kill.before;
+        if (kill.door)
+        {
+            auto findDoor = [&](auto const& pair)
+            {
+                if (pair.second.id != kill.door || pair.second.mapid != dungeon.mapId)
+                    return false;
+                step.doorSpawn = pair.first;
+                return true;
+            };
+            sObjectMgr.DoGOData(findDoor);
+        }
+        dungeon.kills.push_back(step);
     }
 
     // The meeting stone; StonePlace takes the same lock, so this comes after it is let go.
@@ -717,13 +760,50 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         return;
     }
 
+    // Creatures an event brought that stand between the party and the next boss: the leader takes the nearest
+    // as its target, on its way or not. Done once none is alive near the leader, or the door they open is open.
+    run.nextBoss = next;
+    run.killGuid = ObjectGuid();
+    std::string killing;
+    for (const Dungeon::Kill& kill : dungeon.kills)
+    {
+        if (kill.before != next)
+            continue;
+        if (kill.doorSpawn)
+            if (GameObject* door = map->GetGameObject(kill.doorSpawn))
+                if (door->GetGoState() != GO_STATE_READY)
+                    continue;
+        std::list<Unit*> found;
+        MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, kill.entry, KILL_RANGE);
+        MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
+        Cell::VisitAllObjects(leader, searcher, KILL_RANGE);
+        Unit* nearest = nullptr;
+        for (Unit* unit : found)
+            if (unit->IsAlive() && unit->IsInWorld() && (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest)))
+                nearest = unit;
+        if (!nearest)
+            continue;
+        run.killGuid = nearest->GetObjectGuid();
+        killing = BossName(kill.entry);
+        break;
+    }
+
     // An object to use before the next boss, such as an altar that wakes it: the leader goes to it first,
     // and it and as many members as the object needs use it, as players would.
-    run.nextBoss = next;
     run.useSpawn = 0;
+    const time_t now = time(nullptr);
     for (const Dungeon::Use& use : dungeon.uses)
     {
-        if (use.before != next || run.used.count(use.spawn))
+        if (use.before != next)
+            continue;
+        if (use.wakes)
+        {
+            // Due while the boss sleeps, unattackable and out of combat; done while it is awake.
+            Creature* boss = map->GetCreature(run.nextSpawn);
+            if (!boss || !boss->IsAlive() || boss->IsInCombat() || !boss->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE))
+                continue;
+        }
+        else if (run.used.count(use.spawn))
             continue;
         GameObject* object = map->GetGameObject(use.spawn);
         if (!object)
@@ -731,39 +811,74 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             run.used.insert(use.spawn);
             continue;
         }
+        const std::string name = object->GetGOInfo()->name;
+        run.useSpawn = use.spawn;
         if (leader->GetDistance(object) <= USE_DISTANCE)
         {
-            std::vector<Player*> users = { leader };
-            if (Group* group = leader->GetGroup())
-                for (auto& slot : group->GetMemberSlots())
-                    if (Player* member = sObjectMgr.GetPlayer(slot.guid))
-                        if (member != leader && users.size() < use.users && member->IsInWorld() && member->IsAlive()
-                            && member->GetMapId() == leader->GetMapId() && member->GetDistance(leader) <= USE_JOIN_DISTANCE)
-                            users.push_back(member);
-            if (users.size() < use.users)
+            // Everyone has used it and the boss still sleeps: again, after a while.
+            std::set<uint32>& usedBy = run.usedBy[use.spawn];
+            if (usedBy.size() >= use.users)
             {
-                update.reason = "at the " + std::string(object->GetGOInfo()->name) + " in " + dungeon.name + ", waiting for "
-                    + std::to_string(use.users) + " to use it";
-                return;
+                if (now - run.usedAt[use.spawn] < USE_RETRY_SECONDS)
+                {
+                    update.reason = "used the " + name + " in " + dungeon.name + ", waiting for " + BossName(next) + " to wake";
+                    return;
+                }
+                usedBy.clear();
             }
-            for (Player* user : users)
+
+            // The core takes a use only from a user within the object's reach who can use it now.
+            // The core keeps each user of a ritual until it has enough, so members use it as they come.
+            auto canUse = [&](Player* user)
+            {
+                return user->IsInWorld() && user->IsAlive() && user->GetMapId() == leader->GetMapId()
+                    && object->IsWithinDistInMap(user, object->GetInteractionDistance()) && object->CanUseNow(user);
+            };
+            auto useBy = [&](Player* user)
             {
                 WorldPacket packet(CMSG_GAMEOBJ_USE);
                 packet << object->GetObjectGuid();
                 user->GetSession()->HandleGameObjectUseOpcode(packet);
+                usedBy.insert(user->GetGUIDLow());
+            };
+            // The leader first: a ritual's first user casts its spell, and a boss it wakes attacks that user.
+            if (!usedBy.count(leader->GetGUIDLow()))
+            {
+                if (!canUse(leader))
+                {
+                    update.reason = "at the " + name + " in " + dungeon.name + ", waiting to use it";
+                    return;
+                }
+                useBy(leader);
             }
-            run.used.insert(use.spawn);
-            update.events.push_back({ "used", object->GetGOInfo()->name });
-            continue;
+            if (Group* group = leader->GetGroup())
+                for (auto& slot : group->GetMemberSlots())
+                    if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                        if (usedBy.size() < use.users && !usedBy.count(member->GetGUIDLow()) && canUse(member))
+                            useBy(member);
+            if (usedBy.size() < use.users)
+            {
+                update.reason = "at the " + name + " in " + dungeon.name + ", " + std::to_string(usedBy.size()) + " of "
+                    + std::to_string(use.users) + " have used it";
+                return;
+            }
+            run.usedAt[use.spawn] = now;
+            update.events.push_back({ "used", name });
+            if (!use.wakes)
+            {
+                run.used.insert(use.spawn);
+                continue;
+            }
+            update.reason = "used the " + name + " in " + dungeon.name + ", waiting for " + BossName(next) + " to wake";
+            return;
         }
-        run.useSpawn = use.spawn;
         if (PlayerbotAI* ai = leader->GetPlayerbotAI())
         {
             TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
             if (target && target->IsActive() && target->GetDestination() != use.place)
                 target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
         }
-        update.reason = "on the way to use the " + std::string(object->GetGOInfo()->name) + " in " + dungeon.name + ", " + count;
+        update.reason = "on the way to use the " + name + " in " + dungeon.name + ", " + count;
         return;
     }
 
@@ -775,7 +890,10 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (target && target->IsActive() && target->GetEntry() != next)
             target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
     }
-    update.reason = (dungeon.talks.count(next) ? "on the way to speak to " : "on the way to ") + BossName(next) + " in " + dungeon.name + ", " + count;
+    if (!killing.empty())
+        update.reason = "killing " + killing + " before " + BossName(next) + " in " + dungeon.name + ", " + count;
+    else
+        update.reason = (dungeon.talks.count(next) ? "on the way to speak to " : "on the way to ") + BossName(next) + " in " + dungeon.name + ", " + count;
 }
 
 void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
@@ -1059,6 +1177,10 @@ bool GuildDungeon::FollowByTravel(Player* bot, WorldLocation& place)
         return LeaderAcrossEntrance(bot, place);
     }
 
+    // The leader at an object that needs more than one user, such as an altar: to it, near enough to use it.
+    if (sGuildDungeon.UseSpot(leader, bot, place))
+        return true;
+
     // Upstream's follow gives up this far off; a follower that wandered or was taken away travels back.
     if (bot->GetDistance(leader) > FOLLOW_BY_TRAVEL)
     {
@@ -1106,6 +1228,33 @@ TravelDestination* GuildDungeon::UseDestination(Player* bot) const
     return nullptr;
 }
 
+bool GuildDungeon::UseSpot(Player* leader, Player* member, WorldLocation& place) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(leader->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Bosses || !it->second.useSpawn || member->GetMapId() != it->second.dungeon.mapId
+        || leader->GetMapId() != member->GetMapId())
+        return false;
+    for (const Dungeon::Use& use : it->second.dungeon.uses)
+    {
+        if (use.spawn != it->second.useSpawn || use.users < 2)
+            continue;
+        // A member who has used it this time stays where it is.
+        auto usedBy = it->second.usedBy.find(use.spawn);
+        if (usedBy != it->second.usedBy.end() && usedBy->second.count(member->GetGUIDLow()))
+            return false;
+        GameObject* object = member->GetMap()->GetGameObject(use.spawn);
+        if (!object || leader->GetDistance(object) > USE_DISTANCE || member->GetDistance(leader) > USE_JOIN_DISTANCE
+            || member->GetDistance(object) <= USE_STAND)
+            return false;
+        float x, y, z;
+        object->GetNearPoint(member, x, y, z, member->GetObjectBoundingRadius(), USE_STAND, object->GetAngle(member));
+        place = WorldLocation(object->GetMapId(), x, y, z, 0.0f);
+        return true;
+    }
+    return false;
+}
+
 TravelDestination* GuildDungeon::ExitDestination(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);
@@ -1122,10 +1271,26 @@ Creature* GuildDungeon::NextBoss(Player* bot, float within) const
     if (it == runs.end() || it->second.phase != Phase::Bosses || !it->second.nextSpawn || bot->GetMapId() != it->second.dungeon.mapId
         || !bot->IsInWorld())
         return nullptr;
+    // An object to use first, such as the altar that wakes the boss: the leader stays at it.
+    if (it->second.useSpawn)
+        return nullptr;
     Creature* boss = bot->GetMap()->GetCreature(it->second.nextSpawn);
     if (!boss || !boss->IsAlive() || !boss->IsInWorld() || bot->GetDistance(boss) > within)
         return nullptr;
     return boss;
+}
+
+Creature* GuildDungeon::KillTarget(Player* bot, float within) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(bot->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Bosses || it->second.killGuid.IsEmpty() || bot->GetMapId() != it->second.dungeon.mapId
+        || !bot->IsInWorld())
+        return nullptr;
+    Creature* creature = bot->GetMap()->GetCreature(it->second.killGuid);
+    if (!creature || !creature->IsAlive() || !creature->IsInWorld() || bot->GetDistance(creature) > within)
+        return nullptr;
+    return creature;
 }
 
 bool GuildDungeon::MayEnter(Player* bot, uint32 triggerId)

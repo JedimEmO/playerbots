@@ -66,6 +66,11 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
         return unit;
     }
 
+    // A guild party's leader takes what it must kill before its next boss, such as creatures an event brought,
+    // even on its way to the boss, where it starts no other fights.
+    if (Creature* add = sGuildDungeon.KillTarget(bot, 60.0f))
+        return add;
+
     // A guild party's leader at its next boss's place takes the boss, which may be out of sight on a deck above.
     if (!AI_VALUE(bool, "travel target traveling"))
     {
