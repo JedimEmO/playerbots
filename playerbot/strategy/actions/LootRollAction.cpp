@@ -1,5 +1,6 @@
 
 #include "playerbot/playerbot.h"
+#include "playerbot/GuildBotMgr.h"
 #include "LootRollAction.h"
 #include "playerbot/strategy/values/ItemUsageValue.h"
 #include "playerbot/strategy/values/LootValues.h"
@@ -213,7 +214,8 @@ RollVote RollAction::CalculateRollVote(ItemQualifier& itemQualifier)
     // special case for bad equip
     if (usage == ItemUsage::ITEM_USAGE_BAD_EQUIP)
     {
-        bool shouldEquipBadItems = sPlayerbotAIConfig.rollBadItemsWithPlayer || !ai->HasRealPlayerMaster();
+        // Guild characters roll need only on upgrades; an item that does not suit them is greed, whoever leads.
+        bool shouldEquipBadItems = !sGuildBotMgr.IsGuildBot(bot) && (sPlayerbotAIConfig.rollBadItemsWithPlayer || !ai->HasRealPlayerMaster());
         if (shouldEquipBadItems)
             needVote = ROLL_NEED;
         else
