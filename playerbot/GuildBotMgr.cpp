@@ -987,6 +987,7 @@ void GuildBotMgr::CheckJobs()
         Measure(c, bot, dead && !c.dead);
         c.dead = dead;
         sGuildRuns.Observe(bot);
+        GuildDungeon::FollowByStone(bot);
 
         // Cut off from its group, say outside a dungeon its party is in: it plays as a solo character until it is back.
         bool alone = false;

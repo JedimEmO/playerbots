@@ -923,8 +923,22 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
     }
     else if (travelName == "dungeon")
     {
+        // On the way to a dungeon with a meeting stone: the stone, which takes the party in.
+        TravelDestination* stone = sGuildDungeon.StoneDestination(bot);
+        if (stone)
+        {
+            *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [stone, center]()
+                {
+                    PartitionedTravelList list;
+                    std::list<uint8> chancesToGoFar = { 10,50,90 };
+                    if (WorldPosition* point = stone->GetNextPoint(center, chancesToGoFar))
+                        list[0].push_back(TravelPoint(stone, point, point->distance(center)));
+                    return list;
+                });
+            SET_AI_VALUE2(std::string, "manual string", "future travel detail", stone->GetTitle());
+        }
         // A cleared dungeon: the way out, a place the dungeon job keeps.
-        if (TravelDestination* exit = sGuildDungeon.ExitDestination(bot))
+        else if (TravelDestination* exit = sGuildDungeon.ExitDestination(bot))
         {
             *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [exit, center]()
                 {

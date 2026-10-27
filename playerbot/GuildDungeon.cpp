@@ -15,6 +15,9 @@ std::mutex GuildDungeon::entryLock;
 std::map<uint32, uint32> GuildDungeon::lastEntry;
 std::mutex GuildDungeon::exitLock;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::exits;
+std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::stones;
+std::map<uint32, WorldPosition> GuildDungeon::stonePlaces;
+bool GuildDungeon::stonesIndexed = false;
 
 namespace
 {
@@ -32,6 +35,9 @@ namespace
     // and goes home by hearthstone, as a player would; tried again this often while it is on cooldown.
     constexpr time_t STRANDED_SECONDS = 3 * MINUTE;
     constexpr time_t HEARTH_RETRY_SECONDS = MINUTE;
+    // At the stone: the leader uses it within this, and a member this near it follows the leader in by it.
+    constexpr float AT_STONE = 8.0f;
+    constexpr float NEAR_STONE = 40.0f;
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
@@ -162,6 +168,15 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
                 WorldPosition(back->target_mapId, back->target_X, back->target_Y, back->target_Z, back->target_Orientation),
                 "out of " + dungeon.name);
         dungeon.exit = exit.get();
+
+        WorldPosition stonePlace;
+        if (StonePlace(dungeon.mapId, stonePlace))
+        {
+            auto& stone = stones[dungeon.mapId];
+            if (!stone)
+                stone = std::make_unique<PlaceTravelDestination>(stonePlace, "the meeting stone of " + dungeon.name);
+            dungeon.stone = stone.get();
+        }
     }
 
     // The party must be near the last boss's level: the one the table names, or else the highest.
@@ -402,6 +417,14 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     if (run.phase == Phase::Check && why.empty())
         run.phase = Phase::Go;
 
+    // With a meeting stone, the leader goes to it and in by it, once the party is with it.
+    if (run.phase == Phase::Go && dungeon.stone && why.empty() && dungeon.stone->DistanceTo(WorldPosition(leader)) <= AT_STONE)
+    {
+        std::string refused;
+        if (!EnterByStone(leader, dungeon.mapId, refused) && !refused.empty())
+            why = refused;
+    }
+
     // Once on the way, a member falling behind does not stop the leader: it waits at the entrance
     // until the party is near, as upstream's travel does for dungeon destinations.
     if (run.phase == Phase::Go)
@@ -601,6 +624,12 @@ bool GuildDungeon::LeaderAcrossEntrance(Player* bot, WorldLocation& leaderPlace)
     if (!(leaderMap && leaderMap->IsDungeon()) && !(botMap && botMap->IsDungeon()))
         return false;
 
+    // At the stone of the leader's dungeon, it waits for its turn to go in by the stone instead of walking off to the entrance.
+    WorldPosition stone;
+    if (leaderMap && leaderMap->IsDungeon() && StonePlace(leader->GetMapId(), stone) && stone.getMapId() == bot->GetMapId()
+        && stone.distance(WorldPosition(bot)) <= NEAR_STONE)
+        return false;
+
     leader->GetPosition(leaderPlace);
     return true;
 }
@@ -643,6 +672,135 @@ int32 GuildDungeon::TravelEntry(Player* bot) const
     return it->second.dungeon.bosses.front();
 }
 
+TravelDestination* GuildDungeon::StoneDestination(Player* bot) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(bot->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Go || bot->GetMapId() == it->second.dungeon.mapId)
+        return nullptr;
+    return it->second.dungeon.stone;
+}
+
+uint32 GuildDungeon::StoneMap(uint32 areaId)
+{
+    if (!areaId)
+        return 0;
+    for (uint32 i = 0; i < sMapStore.GetNumRows(); ++i)
+        if (MapEntry const* map = sMapStore.LookupEntry(i))
+            if (map->linked_zone == areaId && map->IsDungeon())
+                return map->MapID;
+    if (AreaTableEntry const* area = GetAreaEntryByAreaID(areaId))
+        if (MapEntry const* map = sMapStore.LookupEntry(area->mapid))
+            if (map->IsDungeon())
+                return map->MapID;
+    return 0;
+}
+
+bool GuildDungeon::StonePlace(uint32 mapId, WorldPosition& place)
+{
+    std::lock_guard<std::mutex> guard(exitLock);
+    if (!stonesIndexed)
+    {
+        stonesIndexed = true;
+        auto index = [&](auto const& pair)
+        {
+            GameObjectData const& data = pair.second;
+            GameObjectInfo const* info = ObjectMgr::GetGameObjectInfo(data.id);
+            if (!info || info->type != GAMEOBJECT_TYPE_MEETINGSTONE)
+                return false;
+            if (uint32 dungeon = StoneMap(info->meetingstone.areaID))
+                stonePlaces[dungeon] = WorldPosition(data.mapid, data.posX, data.posY, data.posZ, data.orientation);
+            return false;
+        };
+        sObjectMgr.DoGOData(index);
+    }
+    auto it = stonePlaces.find(mapId);
+    if (it == stonePlaces.end())
+        return false;
+    place = it->second;
+    return true;
+}
+
+void GuildDungeon::UseStone(Player* player, uint32 areaId)
+{
+    std::string why;
+    const uint32 mapId = StoneMap(areaId);
+    if (!mapId)
+        why = "This stone leads to no dungeon.";
+    else if (!EnterByStone(player, mapId, why) && why.empty())
+        why = "Someone else is entering; try again in a moment.";
+    if (!why.empty() && !player->GetPlayerbotAI())
+        ChatHandler(player).SendSysMessage(why.c_str());
+}
+
+bool GuildDungeon::EnterByStone(Player* player, uint32 mapId, std::string& why)
+{
+    why.clear();
+    if (!player->IsAlive() || player->IsInCombat() || player->IsBeingTeleported() || player->GetMapId() == mapId)
+        return false;
+    AreaTrigger const* at = sObjectMgr.GetMapEntranceTrigger(mapId);
+    MapEntry const* map = sMapStore.LookupEntry(mapId);
+    if (!at || !map)
+    {
+        why = "No entrance is known for this dungeon.";
+        return false;
+    }
+
+    // The entrance's own checks, as walking in would make them.
+    uint32 misc = 0;
+    switch (player->GetAreaTriggerLockStatus(at, misc))
+    {
+    case AREA_LOCKSTATUS_OK:
+        break;
+    case AREA_LOCKSTATUS_TOO_LOW_LEVEL:
+        why = "You must be level " + std::to_string(misc) + " to enter " + std::string(map->name[0]) + ".";
+        return false;
+    case AREA_LOCKSTATUS_MISSING_ITEM:
+    {
+        ItemPrototype const* item = sObjectMgr.GetItemPrototype(misc);
+        why = "You need " + (item ? std::string(item->Name1) : "a key") + " to enter " + std::string(map->name[0]) + ".";
+        return false;
+    }
+    case AREA_LOCKSTATUS_QUEST_NOT_COMPLETED:
+        why = "You have not done the quest " + std::string(map->name[0]) + " needs.";
+        return false;
+    case AREA_LOCKSTATUS_TOO_MANY_INSTANCE:
+        why = "You have entered too many instances recently.";
+        return false;
+    case AREA_LOCKSTATUS_ZONE_IN_COMBAT:
+        why = std::string(map->name[0]) + " has a fight in progress.";
+        return false;
+    default:
+        why = "You may not enter " + std::string(map->name[0]) + ".";
+        return false;
+    }
+
+    // One at a time, and guild characters after their leader: two entering an unbound instance at once can crash the server.
+    if (!MayEnterMap(player, mapId))
+        return false;
+
+    player->TeleportTo(at->target_mapId, at->target_X, at->target_Y, at->target_Z, at->target_Orientation);
+    return true;
+}
+
+void GuildDungeon::FollowByStone(Player* member)
+{
+    Group* group = member->GetGroup();
+    if (!group || !sGuildBotMgr.IsGuildBot(member) || !member->IsAlive() || member->IsInCombat() || group->IsLeader(member->GetObjectGuid()))
+        return;
+    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+    if (!leader || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->GetMapId() == member->GetMapId())
+        return;
+    MapEntry const* map = sMapStore.LookupEntry(leader->GetMapId());
+    if (!map || !map->IsNonRaidDungeon())
+        return;
+    WorldPosition stone;
+    if (!StonePlace(leader->GetMapId(), stone) || stone.getMapId() != member->GetMapId() || stone.distance(WorldPosition(member)) > NEAR_STONE)
+        return;
+    std::string why;
+    EnterByStone(member, leader->GetMapId(), why);
+}
+
 TravelDestination* GuildDungeon::ExitDestination(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);
@@ -675,17 +833,24 @@ bool GuildDungeon::MayEnter(Player* bot, uint32 triggerId)
         return true;
 
     // Only guild characters, which go in with their leader; random bots keep upstream's behaviour.
+    if (!bot->GetGroup() || !sGuildBotMgr.IsGuildBot(bot))
+        return true;
+    return MayEnterMap(bot, at->target_mapId);
+}
+
+bool GuildDungeon::MayEnterMap(Player* bot, uint32 mapId)
+{
     Group* group = bot->GetGroup();
-    if (!group || !sGuildBotMgr.IsGuildBot(bot))
+    if (!group)
         return true;
 
-    if (!group->IsLeader(bot->GetObjectGuid()))
+    if (sGuildBotMgr.IsGuildBot(bot) && !group->IsLeader(bot->GetObjectGuid()))
     {
         // The leader first, a player or a guild character: inside, in the world, and the group bound.
         Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
-        if (!leader || !leader->IsInWorld() || leader->IsBeingTeleportedFar() || leader->GetMapId() != at->target_mapId)
+        if (!leader || !leader->IsInWorld() || leader->IsBeingTeleportedFar() || leader->GetMapId() != mapId)
             return false;
-        if (!group->GetBoundInstance(at->target_mapId))
+        if (!group->GetBoundInstance(mapId))
             return false;
     }
 
@@ -693,7 +858,7 @@ bool GuildDungeon::MayEnter(Player* bot, uint32 triggerId)
     for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
     {
         Player* member = ref->getSource();
-        if (member && member != bot && member->IsBeingTeleportedFar() && member->GetTeleportDest().mapid == at->target_mapId)
+        if (member && member != bot && member->IsBeingTeleportedFar() && member->GetTeleportDest().mapid == mapId)
             return false;
     }
 

@@ -64,11 +64,27 @@ public:
     // can crash the server on the group bind, so a guild character in a group enters a dungeon only first,
     // as the group's leader, or after the leader is inside and the group is bound, and one at a time.
     static bool MayEnter(Player* bot, uint32 triggerId);
+
+    // The meeting stone enhancement: a stone used with no party member selected takes the user into its dungeon,
+    // after the entrance's own checks (level, key, quest, the hourly limit) and one member of a group at a time.
+    // Selecting a member keeps the stone's summoning. The core calls UseStone from the stone's use.
+    static void UseStone(Player* player, uint32 areaId);
+    static bool EnterByStone(Player* player, uint32 mapId, std::string& why);
+    // The dungeon a stone's area names, or 0.
+    static uint32 StoneMap(uint32 areaId);
+    // Where the dungeon's stone stands; false when it has none.
+    static bool StonePlace(uint32 mapId, WorldPosition& place);
+    // A guild character in a group, at the stone of the dungeon its leader is in: it goes in after the leader.
+    static void FollowByStone(Player* member);
+    // The stone, for the leader on its way to the dungeon; null when the dungeon has none.
+    ai::TravelDestination* StoneDestination(Player* bot) const;
     // Where a guild character should go when its group's leader is on the other side of a dungeon's entrance,
     // inside while it is outside or outside while it is inside: the leader's place. Its follow target is out of
     // reach on another map, so follow moves there instead, and the route the travel map gives runs through the
     // entrance or the way out. False when it is not in that position.
     static bool LeaderAcrossEntrance(Player* bot, WorldLocation& leaderPlace);
+    // The one-at-a-time entry guard, for the trigger and the stone alike; guild characters also go after their leader.
+    static bool MayEnterMap(Player* player, uint32 mapId);
 
     // For the run record: the dungeon on this map, its bosses in order with their spawns, and the last boss.
     struct Bosses { std::string name; std::vector<int32> entries; std::vector<uint32> spawns; int32 last = 0; };
@@ -93,6 +109,7 @@ private:
         int32 lastBoss = 0;            // the boss whose death ends the run
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
         ai::PlaceTravelDestination* exit = nullptr;  // outside, where the way out leads; kept in exits
+        ai::PlaceTravelDestination* stone = nullptr; // the dungeon's meeting stone, if it has one; kept in stones
     };
 
     struct Run
@@ -124,6 +141,9 @@ private:
     std::map<uint32, Run> runs;                 // by leader guid
     static std::mutex exitLock;
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> exits;  // by dungeon map, never freed
+    static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> stones; // by dungeon map, never freed
+    static std::map<uint32, WorldPosition> stonePlaces;                         // by dungeon map
+    static bool stonesIndexed;
     static std::mutex entryLock;
     static std::map<uint32, uint32> lastEntry;  // by group id: when a member last took the entrance, in ms
 };
