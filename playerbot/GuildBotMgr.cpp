@@ -740,29 +740,32 @@ void GuildBotMgr::CheckJobs()
             continue;
         }
 
-        if (c.job == "level" && !c.stalled && now - c.progressAt >= STALL_SECONDS)
+        if (c.job == "level" && now - c.progressAt >= STALL_SECONDS)
         {
-            c.stalled = true;
             c.reason = "no experience for " + std::to_string((now - c.progressAt) / MINUTE) + " minutes";
-            Event(guid, "stalled", c.reason);
-
-            // Get it going again: first drop what it is doing, which is usually a target it cannot reach;
-            // if it stalls again soon after, go home by hearthstone.
-            PlayerbotAI* ai = bot->GetPlayerbotAI();
-            if (ai && (!c.recoveredAt || now - c.recoveredAt > RECOVERY_WINDOW_SECONDS))
+            if (!c.stalled)
             {
-                bot->CombatStop();
-                ai->Reset(true);
-                c.recoveredAt = now;
-                c.progressAt = now;
-                Event(guid, "recovery", "reset");
+                c.stalled = true;
+                Event(guid, "stalled", c.reason);
             }
-            else if (ai)
+
+            // Get it going again, once every stall period while it earns nothing: first drop what it is doing,
+            // which is usually a target it cannot reach; if that does not help, go home by hearthstone.
+            PlayerbotAI* ai = bot->GetPlayerbotAI();
+            if (ai && now - c.recoveredAt >= STALL_SECONDS)
             {
-                bool home = ai->DoSpecificAction("hearthstone", ai::Event(), true);
+                if (now - c.recoveredAt > RECOVERY_WINDOW_SECONDS)
+                {
+                    bot->CombatStop();
+                    ai->Reset(true);
+                    Event(guid, "recovery", "reset");
+                }
+                else
+                {
+                    bool home = ai->DoSpecificAction("hearthstone", ai::Event(), true);
+                    Event(guid, "recovery", home ? "hearthstone" : "hearthstone not ready");
+                }
                 c.recoveredAt = now;
-                c.progressAt = now;
-                Event(guid, "recovery", home ? "hearthstone" : "hearthstone not ready");
             }
         }
 
