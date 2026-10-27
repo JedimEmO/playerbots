@@ -40,6 +40,8 @@ namespace
     // A target the character has not hurt in this long is out of its reach; it is passed over for a while.
     constexpr time_t UNREACHED_TARGET_SECONDS = 45;
     constexpr time_t IGNORE_TARGET_SECONDS = 10 * MINUTE;
+    // Loot it has been after this long without taking it is out of reach, on a deck above or across water.
+    constexpr time_t UNREACHED_LOOT_SECONDS = 45;
     // This many give-ups this close together mean the spot itself is out of reach: leave it for a while.
     constexpr size_t GIVE_UPS_TO_LEAVE = 3;
     constexpr time_t GIVE_UP_WINDOW_SECONDS = 10 * MINUTE;
@@ -166,6 +168,42 @@ std::set<int32> GuildBotMgr::LeftDestinations(Player* bot) const
         if (until > now)
             left.insert(entry);
     return left;
+}
+
+void GuildBotMgr::CheckLoot(Character& c, Player* bot)
+{
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai)
+        return;
+    AiObjectContext* context = ai->GetAiObjectContext();
+    LootObject loot = context->GetValue<LootObject>("loot target")->Get();
+    if (loot.IsEmpty() || bot->IsInCombat())
+    {
+        lootChases.erase(c.guid);
+        return;
+    }
+
+    const time_t now = time(nullptr);
+    LootChase& chase = lootChases[c.guid];
+    if (chase.target != loot.guid)
+    {
+        chase.target = loot.guid;
+        chase.since = now;
+        return;
+    }
+    if (now - chase.since < UNREACHED_LOOT_SECONDS)
+        return;
+
+    // Upstream's move to loot has no give-up: it keeps a character walking at loot it cannot reach,
+    // and a leader waits for a member that is moving. Drop it, and keep it off the stack for a while.
+    context->GetValue<LootObjectStack*>("available loot")->Get()->Remove(loot.guid);
+    context->GetValue<LootObject>("loot target")->Set(LootObject());
+    bot->GetMotionMaster()->Clear();
+    bot->StopMoving();
+    ignoredTargets[c.guid][loot.guid] = now + IGNORE_TARGET_SECONDS;
+    WorldObject* object = loot.GetWorldObject(bot);
+    Event(c.guid, "gave_up", "loot " + (object ? std::string(object->GetName()) : std::to_string(loot.guid.GetCounter())));
+    lootChases.erase(c.guid);
 }
 
 void GuildBotMgr::CheckChase(Character& c, Player* bot)
@@ -652,8 +690,9 @@ std::list<std::string> GuildBotMgr::HandleMetrics(const std::string& args)
 void GuildBotMgr::LoadOrders()
 {
     auto result = CharacterDatabase.PQuery(
-        "SELECT g.guid, c.account, c.name, g.enabled, g.job, g.job_args, g.job_seq, g.role "
-        "FROM guildbot_character g JOIN characters c ON c.guid = g.guid");
+        "SELECT g.guid, c.account, c.name, g.enabled, g.job, g.job_args, g.job_seq, g.role, "
+        "s.job_seq, s.job_status, s.job_reason "
+        "FROM guildbot_character g JOIN characters c ON c.guid = g.guid LEFT JOIN guildbot_state s ON s.guid = g.guid");
 
     std::set<uint32> seen;
     if (result)
@@ -678,7 +717,16 @@ void GuildBotMgr::LoadOrders()
                 c.roleChanged = true;
             c.role = role;
             if (isNew)
+            {
                 c.offlineSince = 0;
+                // An order already done or failed before a restart stays so, or the job would run again.
+                std::string status = f[9].GetCppString();
+                if (!f[8].IsNULL() && f[8].GetUInt32() == c.jobSeq && (status == "done" || status == "failed"))
+                {
+                    c.status = status;
+                    c.reason = f[10].GetCppString();
+                }
+            }
         } while (result->NextRow());
     }
 
@@ -841,6 +889,7 @@ void GuildBotMgr::CheckJobs()
 
         ApplyRole(c, bot);
         CheckChase(c, bot);
+        CheckLoot(c, bot);
 
         bool dead = sServerFacade.UnitIsDead(bot);
         if (dead && !c.dead)

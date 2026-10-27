@@ -3,6 +3,7 @@
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/SharedValueContext.h"
+#include "playerbot/GuildBotMgr.h"
 
 using namespace ai;
 
@@ -336,6 +337,10 @@ bool LootObject::IsLootPossible(Player* bot)
 
 bool LootObjectStack::Add(ObjectGuid guid)
 {
+    // Loot a guild character gave up on, out of its reach.
+    if (sGuildBotMgr.IsIgnoredTarget(bot, guid))
+        return false;
+
     if (!availableLoot.insert(guid).second)
         return false;
 
