@@ -49,6 +49,9 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
         if (!unit || !sServerFacade.IsAlive(unit))
             continue;
 
+        if (sGuildBotMgr.IsIgnoredTarget(bot, unit->GetObjectGuid()))
+            continue;
+
         if (!bot->InBattleGround() && !CanFreeMoveValue::CanFreeTarget(ai, GuidPosition(unit)))
         {
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
@@ -118,6 +121,10 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     {
         Unit* unit = ai->GetUnit(*tIter);
         if (!unit)
+            continue;
+
+        // A creature this guild character gave up on as out of reach, for now.
+        if (sGuildBotMgr.IsIgnoredTarget(bot, unit->GetObjectGuid()))
             continue;
 
 #ifdef MANGOSBOT_TWO 

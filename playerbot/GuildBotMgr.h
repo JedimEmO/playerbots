@@ -50,6 +50,8 @@ public:
     // The tank order the guild service assigned: 1 is the main tank, 2 the first assist tank, and so on;
     // 0 for none. Any character, the player's own included; read from guildbot_assignment with the orders.
     uint8 GetTankOrder(uint32 guid) const;
+    // A creature the character gave up on as out of its reach, for a while; target picking passes over it.
+    bool IsIgnoredTarget(Player* bot, ObjectGuid target) const;
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;
@@ -111,6 +113,7 @@ private:
     void WriteState();
     void WriteState(const Character& c, Player* bot);
     void ApplyRole(Character& c, Player* bot);
+    void CheckChase(Character& c, Player* bot);
     // The party job: be in the leader's group. Returns why not, or empty when it is.
     std::string KeepParty(Character& c, Player* bot);
     void LeaveParty(Character& c, Player* bot);
@@ -130,6 +133,9 @@ private:
 
     std::map<uint32, Character> characters;
     std::map<uint32, uint8> tankOrders;
+    struct Chase { ObjectGuid target; uint32 health = 0; time_t since = 0; };
+    std::map<uint32, Chase> chases;                             // per character: the target it is after
+    std::map<uint32, std::map<ObjectGuid, time_t>> ignoredTargets; // per character: given up, until
     bool assignmentsLoaded = false;   // the first load after a start reports nothing; it is not a change
     bool tablesReady = false;
     uint32 sinceOrders = 0;

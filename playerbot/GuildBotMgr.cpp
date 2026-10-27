@@ -25,6 +25,9 @@ namespace
     constexpr time_t STALL_SECONDS = 15 * MINUTE;
     // A second stall this soon after a reset sends the character home instead.
     constexpr time_t RECOVERY_WINDOW_SECONDS = 30 * MINUTE;
+    // A target the character has not hurt in this long is out of its reach; it is passed over for a while.
+    constexpr time_t UNREACHED_TARGET_SECONDS = 45;
+    constexpr time_t IGNORE_TARGET_SECONDS = 10 * MINUTE;
 
     std::string Trim(const std::string& s)
     {
@@ -117,6 +120,57 @@ BotRoles GuildBotMgr::GetRole(uint32 guid) const
 {
     auto it = characters.find(guid);
     return it == characters.end() ? BotRoles::BOT_ROLE_NONE : ChatHelper::parseRole(it->second.role);
+}
+
+bool GuildBotMgr::IsIgnoredTarget(Player* bot, ObjectGuid target) const
+{
+    auto it = ignoredTargets.find(bot->GetGUIDLow());
+    if (it == ignoredTargets.end())
+        return false;
+    auto t = it->second.find(target);
+    return t != it->second.end() && t->second > time(nullptr);
+}
+
+void GuildBotMgr::CheckChase(Character& c, Player* bot)
+{
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    Unit* victim = bot->GetVictim();
+    if (!ai || !victim || !victim->IsAlive() || victim->GetObjectGuid().IsPlayer())
+    {
+        chases.erase(c.guid);
+        return;
+    }
+
+    const time_t now = time(nullptr);
+    Chase& chase = chases[c.guid];
+    if (chase.target != victim->GetObjectGuid() || victim->GetHealth() < chase.health)
+    {
+        // A new target, or one it is hurting: the clock starts again.
+        chase.target = victim->GetObjectGuid();
+        chase.health = victim->GetHealth();
+        chase.since = now;
+        return;
+    }
+
+    if (now - chase.since < UNREACHED_TARGET_SECONDS || victim->GetHealth() < victim->GetMaxHealth())
+        return;
+
+    // Untouched at full health all this time: a creature it cannot get to, in a mine shaft or on a ledge.
+    // Drop it as upstream's reach action does after failed moves, which a chase that starts but leads nowhere never counts.
+    AiObjectContext* context = ai->GetAiObjectContext();
+    context->GetValue<ObjectGuid>("old target")->Set(victim->GetObjectGuid());
+    context->GetValue<ObjectGuid>("current target")->Set(ObjectGuid());
+    context->GetValue<ObjectGuid>("attack target")->Set(ObjectGuid());
+    bot->SetSelectionGuid(ObjectGuid());
+    bot->AttackStop();
+
+    auto& ignored = ignoredTargets[c.guid];
+    for (auto it = ignored.begin(); it != ignored.end();)
+        it = it->second <= now ? ignored.erase(it) : std::next(it);
+    ignored[victim->GetObjectGuid()] = now + IGNORE_TARGET_SECONDS;
+
+    Event(c.guid, "gave_up", victim->GetName());
+    chases.erase(c.guid);
 }
 
 uint8 GuildBotMgr::GetTankOrder(uint32 guid) const
@@ -522,6 +576,7 @@ void GuildBotMgr::CheckJobs()
         c.lastLevel = bot->GetLevel();
 
         ApplyRole(c, bot);
+        CheckChase(c, bot);
 
         bool dead = sServerFacade.UnitIsDead(bot);
         if (dead && !c.dead)
