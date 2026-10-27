@@ -387,6 +387,13 @@ namespace ai
             creators["enable magmadar fight strategy"] = [](PlayerbotAI* ai) { return new MagmadarEnableFightStrategyAction(ai); };
             creators["disable magmadar fight strategy"] = [](PlayerbotAI* ai) { return new MagmadarDisableFightStrategyAction(ai); };
             creators["move away from magmadar"] = [](PlayerbotAI* ai) { return new MagmadarMoveAwayAction(ai); };
+            creators["enable golemagg fight strategy"] = [](PlayerbotAI* ai) { return new GolemaggEnableFightStrategyAction(ai); };
+            creators["disable golemagg fight strategy"] = [](PlayerbotAI* ai) { return new GolemaggDisableFightStrategyAction(ai); };
+            creators["mc golemagg mark boss"] = [](PlayerbotAI* ai) { return new McGolemaggMarkBossAction(ai); };
+            creators["mc golemagg main tank attack golemagg"] = [](PlayerbotAI* ai) { return new McGolemaggMainTankAttackGolemaggAction(ai); };
+            creators["mc golemagg assist tank attack core rager"] = [](PlayerbotAI* ai) { return new McGolemaggAssistTankAttackCoreRagerAction(ai); };
+            creators["mc golemagg healer position"] = [](PlayerbotAI* ai) { return new McGolemaggHealerPositionAction(ai); };
+            creators["mc golemagg back off"] = [](PlayerbotAI* ai) { return new McGolemaggBackOffAction(ai); };
 
             creators["move away from hazard"] = [](PlayerbotAI* ai) { return new MoveAwayFromHazard(ai); };
             creators["move to mc rune"] = [](PlayerbotAI* ai) { return new MoveToMCRuneAction(ai); };

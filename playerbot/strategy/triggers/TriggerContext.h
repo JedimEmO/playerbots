@@ -321,6 +321,13 @@ namespace ai
             creators["end magmadar fight"] = [](PlayerbotAI* ai) { return new MagmadarEndFightTrigger(ai); };
             creators["magmadar lava bomb"] = [](PlayerbotAI* ai) { return new MagmadarLavaBombTrigger(ai); };
             creators["magmadar too close"] = [](PlayerbotAI* ai) { return new MagmadarTooCloseTrigger(ai); };
+            creators["start golemagg fight"] = [](PlayerbotAI* ai) { return new GolemaggStartFightTrigger(ai); };
+            creators["end golemagg fight"] = [](PlayerbotAI* ai) { return new GolemaggEndFightTrigger(ai); };
+            creators["mc golemagg mark boss"] = [](PlayerbotAI* ai) { return new McGolemaggMarkBossTrigger(ai); };
+            creators["mc golemagg is main tank"] = [](PlayerbotAI* ai) { return new McGolemaggIsMainTankTrigger(ai); };
+            creators["mc golemagg is assist tank"] = [](PlayerbotAI* ai) { return new McGolemaggIsAssistTankTrigger(ai); };
+            creators["mc golemagg is healer"] = [](PlayerbotAI* ai) { return new McGolemaggIsHealerTrigger(ai); };
+            creators["mc golemagg magma splash"] = [](PlayerbotAI* ai) { return new McGolemaggMagmaSplashTrigger(ai); };
 
             creators["fire protection potion ready"] = [](PlayerbotAI* ai) { return new FireProtectionPotionReadyTrigger(ai); };
 

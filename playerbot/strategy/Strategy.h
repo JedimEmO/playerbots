@@ -34,6 +34,8 @@ namespace ai
 	    ACTION_LIGHT_HEAL = 60,
 	    ACTION_MEDIUM_HEAL = 70,
 	    ACTION_CRITICAL_HEAL = 80,
+	    // Raid mechanics, as AzerothCore's ACTION_RAID: above every heal, below an emergency.
+	    ACTION_RAID = 85,
 	    ACTION_EMERGENCY = 90,
 		ACTION_PASSTROUGH = 100
 	};
