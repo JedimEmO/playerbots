@@ -16,6 +16,18 @@ bool UnstuckAction::Execute(Event& event)
         return ai->DoSpecificAction("reset", event, true);
     }
 
+    // A living guild character is never released: upstream's repop puts it at its race's starting spot,
+    // a level 1 zone a continent away. It goes home by hearthstone if that is ready, or resets.
+    const bool guildCharacter = sGuildBotMgr.IsGuildBot(bot);
+    auto longStuck = [&]()
+    {
+        if (AI_VALUE2(bool, "action useful", "hearthstone") && bot->IsAlive())
+            return ai->DoSpecificAction("hearthstone", event, true);
+        if (guildCharacter && bot->IsAlive())
+            return ai->DoSpecificAction("reset", event, true);
+        return ai->DoSpecificAction("repop", event, true);
+    };
+
     // Default action if no specific source is matched
     if (source.empty())
     {
@@ -34,14 +46,7 @@ bool UnstuckAction::Execute(Event& event)
     if (source.find("move long stuck") != std::string::npos)
     {
         ai->TellDebug(master, "Unstuck: Long move stuck detected, attempting hearthstone or repop.", "debug unstuck");
-        if (AI_VALUE2(bool, "action useful", "hearthstone") && bot->IsAlive())
-        {
-            return ai->DoSpecificAction("hearthstone", event, true);
-        }
-        else
-        {
-            return ai->DoSpecificAction("repop", event, true);
-        }
+        return longStuck();
     }
 
     // Handle combat stuck scenarios
@@ -55,14 +60,7 @@ bool UnstuckAction::Execute(Event& event)
     if (source.find("combat long stuck") != std::string::npos)
     {
         ai->TellDebug(master, "Unstuck: Long combat stuck detected, attempting hearthstone or repop.", "debug unstuck");
-        if (AI_VALUE2(bool, "action useful", "hearthstone") && bot->IsAlive())
-        {
-            return ai->DoSpecificAction("hearthstone", event, true);
-        }
-        else
-        {
-            return ai->DoSpecificAction("repop", event, true);
-        }
+        return longStuck();
     }
 
     // Fallback to reset if no specific condition is met
