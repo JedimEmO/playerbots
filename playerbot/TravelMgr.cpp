@@ -585,6 +585,8 @@ bool ExploreTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& inf
     return !(currFields & val);    
 }
 
+static constexpr size_t MIN_LEVEL_GRIND_SPAWNS = 4;
+
 bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
 {
     if (info.HasLeft(GetEntry()))
@@ -628,6 +630,11 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
         return false;
 
     if (cInfo->Rank > CREATURE_ELITE_NORMAL && !info.GetBoolValue("can fight elite"))
+        return false;
+
+    // A named creature with one spawn is one kill at the end of a long walk; levelling wants a camp.
+    // GetSize counts only the first sub-square, so count the points.
+    if (info.WantsExperience() && GetPoints().size() < MIN_LEVEL_GRIND_SPAWNS)
         return false;
 
     return true;
