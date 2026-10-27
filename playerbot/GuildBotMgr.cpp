@@ -484,8 +484,44 @@ void GuildBotMgr::EnsureTables()
         " deaths INT UNSIGNED NOT NULL DEFAULT 0,"
         " PRIMARY KEY (hour, guid, job)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    for (const char* column : ACTIVITY_COLUMNS)
+        CharacterDatabase.DirectPExecute("ALTER TABLE guildbot_metric ADD COLUMN IF NOT EXISTS %s INT UNSIGNED NOT NULL DEFAULT 0", column);
 
     tablesReady = true;
+}
+
+GuildBotMgr::Activity GuildBotMgr::ActivityOf(Player* bot)
+{
+    if (!bot->IsAlive())
+        return ACTIVITY_DEAD;
+    if (bot->IsInCombat())
+        return ACTIVITY_FIGHT;
+    if (bot->getStandState() == UNIT_STAND_STATE_SIT)
+        return ACTIVITY_REST;
+
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    ai::TravelTarget* target = ai ? ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get() : nullptr;
+    ai::TravelDestination* destination = target ? target->GetDestination() : nullptr;
+    if (!destination)
+        return ACTIVITY_OTHER;
+
+    const uint32 purpose = uint32(destination->GetPurpose());
+    const uint32 errands = uint32(ai::TravelDestinationPurpose::GenericRpg) | uint32(ai::TravelDestinationPurpose::Trainer)
+        | uint32(ai::TravelDestinationPurpose::Repair) | uint32(ai::TravelDestinationPurpose::Vendor)
+        | uint32(ai::TravelDestinationPurpose::AH) | uint32(ai::TravelDestinationPurpose::Mail)
+        | uint32(ai::TravelDestinationPurpose::Bank);
+    const ai::TravelStatus status = target->GetStatus();
+    const bool going = status == ai::TravelStatus::TRAVEL_STATUS_TRAVEL || status == ai::TravelStatus::TRAVEL_STATUS_READY;
+    if (purpose & errands && (going || status == ai::TravelStatus::TRAVEL_STATUS_WORK))
+        return ACTIVITY_ERRAND;
+    if (purpose & uint32(ai::TravelDestinationPurpose::Grind))
+    {
+        if (going)
+            return ACTIVITY_TRAVEL;
+        if (status == ai::TravelStatus::TRAVEL_STATUS_WORK)
+            return ACTIVITY_SEEK;
+    }
+    return ACTIVITY_OTHER;
 }
 
 void GuildBotMgr::Measure(Character& c, Player* bot, bool died)
@@ -521,6 +557,7 @@ void GuildBotMgr::Measure(Character& c, Player* bot, bool died)
         c.seconds += uint32(step);
         if (c.xpAt && now - c.xpAt < EARNING_WINDOW_SECONDS)
             c.earning += uint32(step);
+        c.activity[ActivityOf(bot)] += uint32(step);
     }
     c.experience += gained;
     if (died)
@@ -533,13 +570,24 @@ void GuildBotMgr::Measure(Character& c, Player* bot, bool died)
 void GuildBotMgr::WriteMetric(Character& c)
 {
     if (c.metricHour && (c.seconds || c.experience || c.deaths))
+    {
+        std::ostringstream columns, values, updates;
+        for (uint32 i = 0; i < ACTIVITIES; ++i)
+        {
+            columns << ", " << ACTIVITY_COLUMNS[i];
+            values << ", " << c.activity[i];
+            updates << ", " << ACTIVITY_COLUMNS[i] << " = " << ACTIVITY_COLUMNS[i] << " + VALUES(" << ACTIVITY_COLUMNS[i] << ")";
+        }
         CharacterDatabase.PExecute(
-            "INSERT INTO guildbot_metric (hour, guid, job, seconds, earning, experience, deaths) "
-            "VALUES (FROM_UNIXTIME(%u), %u, '%s', %u, %u, %u, %u) "
+            "INSERT INTO guildbot_metric (hour, guid, job, seconds, earning, experience, deaths%s) "
+            "VALUES (FROM_UNIXTIME(%u), %u, '%s', %u, %u, %u, %u%s) "
             "ON DUPLICATE KEY UPDATE seconds = seconds + VALUES(seconds), earning = earning + VALUES(earning), "
-            "experience = experience + VALUES(experience), deaths = deaths + VALUES(deaths)",
-            uint32(c.metricHour), c.guid, Escape(c.metricJob).c_str(), c.seconds, c.earning, c.experience, c.deaths);
+            "experience = experience + VALUES(experience), deaths = deaths + VALUES(deaths)%s",
+            columns.str().c_str(), uint32(c.metricHour), c.guid, Escape(c.metricJob).c_str(),
+            c.seconds, c.earning, c.experience, c.deaths, values.str().c_str(), updates.str().c_str());
+    }
     c.seconds = c.earning = c.experience = c.deaths = 0;
+    std::fill(std::begin(c.activity), std::end(c.activity), 0);
     c.metricHour = 0;
 }
 
@@ -550,9 +598,12 @@ std::list<std::string> GuildBotMgr::HandleMetrics(const std::string& args)
         hours = 12;
 
     std::list<std::string> out = { "levelling characters, by hour: earning experience / time played, experience, deaths, characters" };
+    std::ostringstream sums;
+    for (const char* column : ACTIVITY_COLUMNS)
+        sums << ", SUM(" << column << ")";
     auto byHour = CharacterDatabase.PQuery(
-        "SELECT DATE_FORMAT(hour, '%%Y-%%m-%%d %%H:00'), SUM(earning), SUM(seconds), SUM(experience), SUM(deaths), COUNT(DISTINCT guid) "
-        "FROM guildbot_metric WHERE job = 'level' AND hour >= NOW() - INTERVAL %u HOUR GROUP BY hour ORDER BY hour", hours);
+        "SELECT DATE_FORMAT(hour, '%%Y-%%m-%%d %%H:00'), SUM(earning), SUM(seconds), SUM(experience), SUM(deaths), COUNT(DISTINCT guid)%s "
+        "FROM guildbot_metric WHERE job = 'level' AND hour >= NOW() - INTERVAL %u HOUR GROUP BY hour ORDER BY hour", sums.str().c_str(), hours);
     if (byHour)
     {
         do
@@ -563,6 +614,18 @@ std::list<std::string> GuildBotMgr::HandleMetrics(const std::string& args)
             line << f[0].GetCppString() << "  " << (seconds ? earning * 100 / seconds : 0) << "% of " << seconds / MINUTE << " min, "
                  << f[3].GetUInt32() << " xp, " << f[4].GetUInt32() << " deaths, " << f[5].GetUInt32() << " characters";
             out.push_back(line.str());
+            // The split by activity; hours counted before it existed show none.
+            uint32 split = 0;
+            for (uint32 i = 0; i < ACTIVITIES; ++i)
+                split += f[6 + i].GetUInt32();
+            if (split)
+            {
+                std::ostringstream activities;
+                activities << "    of the split " << split / MINUTE << " min:";
+                for (uint32 i = 0; i < ACTIVITIES; ++i)
+                    activities << " " << ACTIVITY_COLUMNS[i] << " " << f[6 + i].GetUInt32() * 100 / split << "%";
+                out.push_back(activities.str());
+            }
         } while (byHour->NextRow());
     }
 

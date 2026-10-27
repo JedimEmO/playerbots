@@ -21,7 +21,8 @@ namespace ai { class Engine; }
 //                          and their job. A new order is a new job_seq.
 //   guildbot_state         what each one is doing now, written every few seconds.
 //   guildbot_event         things that happened, appended: logins, takeovers, levels, deaths, jobs done.
-//   guildbot_metric        per character, job and hour: seconds played, seconds earning experience, experience, deaths.
+//   guildbot_metric        per character, job and hour: seconds played, seconds earning experience, experience, deaths,
+//                          and the seconds played split by activity: fighting, looking for a target, and so on.
 class GuildBotMgr : public PlayerbotHolder
 {
 public:
@@ -84,6 +85,21 @@ protected:
 private:
     GuildBotMgr() = default;
 
+    // What a character is doing at a check, for the measure; the names are guildbot_metric's columns.
+    enum Activity
+    {
+        ACTIVITY_FIGHT,   // in combat
+        ACTIVITY_SEEK,    // at a grind spot, out of combat
+        ACTIVITY_TRAVEL,  // on the way to a grind spot
+        ACTIVITY_ERRAND,  // to or at a vendor, trainer, repairer, bank, mailbox or the like
+        ACTIVITY_REST,    // sitting, to eat or drink
+        ACTIVITY_DEAD,
+        ACTIVITY_OTHER,
+        ACTIVITIES
+    };
+    static constexpr const char* ACTIVITY_COLUMNS[ACTIVITIES] = { "fight", "seek", "travel", "errand", "rest", "dead", "other" };
+    static Activity ActivityOf(Player* bot);
+
     struct Character
     {
         uint32 guid = 0;
@@ -120,6 +136,7 @@ private:
         time_t metricHour = 0;            // the hour the counts below belong to
         std::string metricJob;            // and the job
         uint32 seconds = 0, earning = 0, experience = 0, deaths = 0;
+        uint32 activity[ACTIVITIES] = {};  // seconds by Activity
     };
 
     void EnsureTables();
