@@ -84,6 +84,7 @@ private:
         bool entered = false;          // the whole party has been inside
         int32 nextBoss = 0;            // the boss the party is on its way to
         std::set<int32> killed;        // bosses reported dead
+        bool bossesSeen = false;       // the bosses have been looked at once in this run
     };
 
     static bool Resolve(const std::string& name, Player* leader, Dungeon& dungeon, std::string& error);

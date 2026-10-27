@@ -368,7 +368,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (BossDead(map, dungeon.spawns[i]))
         {
             present++;
-            if (run.killed.insert(entry).second)
+            // Bosses dead before this run started, such as before a restart, are not news.
+            if (run.killed.insert(entry).second && run.bossesSeen)
                 update.events.push_back({ "boss_killed", BossName(entry) });
             continue;
         }
@@ -380,6 +381,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             next = entry;
     }
 
+    run.bossesSeen = true;
     const std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(present) + " bosses down";
     if (run.killed.count(dungeon.lastBoss) || !next)
     {
@@ -389,16 +391,14 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         return;
     }
 
-    // A new boss to go to: drop the travel target at the one that died, and the travel strategy asks for the next.
-    if (next != run.nextBoss)
+    // Any travel target but the next boss goes, at a boss that died or one that replaced it, such as a grind spot:
+    // upstream asks for no travel target while one is active, so the dungeon's request could not take it back.
+    run.nextBoss = next;
+    if (PlayerbotAI* ai = leader->GetPlayerbotAI())
     {
-        run.nextBoss = next;
-        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
-        {
-            TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-            if (target && target->GetEntry() && target->GetEntry() != next)
-                target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
-        }
+        TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+        if (target && target->IsActive() && target->GetEntry() != next)
+            target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
     }
     update.reason = "on the way to " + BossName(next) + " in " + dungeon.name + ", " + count;
 }
