@@ -288,6 +288,23 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
             return update;
         }
         run.resolved = true;
+
+        // A run cleared before a restart: the group is still bound to the instance, whose saved state has the last
+        // boss dead. It has to finish, getting everyone out and resetting, before a new run can go in.
+        Group* bound = leader->GetGroup();
+        InstanceGroupBind* bind = bound ? bound->GetBoundInstance(run.dungeon.mapId) : nullptr;
+        if (bind && bind->state)
+        {
+            for (size_t i = 0; i < run.dungeon.bosses.size(); ++i)
+            {
+                if (run.dungeon.bosses[i] != run.dungeon.lastBoss || bind->state->GetCreatureRespawnTime(run.dungeon.spawns[i]) <= time(nullptr))
+                    continue;
+                run.phase = Phase::Leave;
+                run.leaveStarted = time(nullptr);
+                run.cleared = run.dungeon.name + " cleared to " + BossName(run.dungeon.lastBoss) + " before a restart";
+                update.strategiesChanged = true;
+            }
+        }
     }
 
     if (run.phase == Phase::Leave)
