@@ -69,7 +69,9 @@ namespace
         TalentSpec spec(bot);
         if (!spec.GetTalentPoints())
             return "";
-        return ChatHelper::formatClass(bot, spec.highestTree());
+        // The tree's plain name, such as "combat": formatClass gives "combat (0/1/0)|r rogue" with chat colours.
+        std::string formatted = ChatHelper::formatClass(bot, spec.highestTree());
+        return formatted.substr(0, formatted.find(" ("));
     }
 
     // The jobs the engine knows. Anything else fails with "unknown job".

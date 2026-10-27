@@ -9,6 +9,7 @@
 #include "PossibleAttackTargetsValue.h"
 #include "playerbot/strategy/actions/ChooseTargetActions.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
+#include "playerbot/strategy/values/GuildValues.h"
 #include "Tools/Formulas.h"
 
 using namespace ai;
@@ -96,6 +97,19 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
     }
 
     std::unordered_map<uint32, bool> needForQuestCache;
+
+    // The creatures a farm order's item drops from are wanted like quest creatures, even when gray.
+    std::set<int32> farmEntries;
+    GuildOrder order = AI_VALUE(GuildOrder, "guild order");
+    if (order.type == GuildOrderType::Farm)
+    {
+        if (uint32 itemId = GuildOrderValue::FindItemByName(order.target))
+        {
+            for (int32 dropEntry : GAI_VALUE2(std::list<int32>, "item drop list", itemId))
+                if (dropEntry > 0)
+                    farmEntries.insert(dropEntry);
+        }
+    }
 
     for (std::list<ObjectGuid>::iterator tIter = targets.begin(); tIter != targets.end(); tIter++)
     {
@@ -233,7 +247,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             }
             else
             {
-                needForQuest = AI_VALUE2(bool, "need for quest", std::to_string(entry));
+                needForQuest = farmEntries.count(entry) || AI_VALUE2(bool, "need for quest", std::to_string(entry));
                 needForQuestCache[entry] = needForQuest;
             }
         }
