@@ -148,8 +148,21 @@ std::list<std::string> GuildBench::Level(Player* bot, const std::string& name, u
     if (level > oldLevel)
     {
         bot->GiveLevel(level);
-        bot->InitTalentForLevel();
         bot->SetUInt32Value(PLAYER_XP, 0);
+    }
+    // The talent points for the level, also for a character raised some other way, which may have too few.
+    bot->InitTalentForLevel();
+
+    // A bench character is built for its role: talents spent in a tree that does not suit it are reset, for free,
+    // and the path picked earlier is forgotten, so the picks below follow the role.
+    BotRoles role = sGuildBotMgr.GetRole(bot->GetGUIDLow());
+    std::set<int> trees = ChangeTalentsAction::RoleTrees(bot->getClass(), role);
+    TalentSpec spent(bot);
+    if (spent.GetTalentPoints() > 0 && !trees.empty() && !trees.count(spent.highestTree()))
+    {
+        bot->resetTalents(true);
+        sRandomPlayerbotMgr.SetValue(bot->GetGUIDLow(), "specNo", 0);
+        sRandomPlayerbotMgr.SetValue(bot->GetGUIDLow(), "specLink", 0, "");
     }
 
     // What a class trainer would teach by this level, without the cost; and weapon skills at their maximum.
@@ -161,7 +174,7 @@ std::list<std::string> GuildBench::Level(Player* bot, const std::string& name, u
 
     // Talents along the role's premade path, as the engine picks them for a guild character.
     std::ostringstream talentOut;
-    ChangeTalentsAction::AutoSelectTalents(bot, &talentOut, sGuildBotMgr.GetRole(bot->GetGUIDLow()));
+    ChangeTalentsAction::AutoSelectTalents(bot, &talentOut, role);
 
     // Combat strategies follow the talent tree.
     bot->GetPlayerbotAI()->ResetStrategies();
