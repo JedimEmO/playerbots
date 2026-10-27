@@ -92,6 +92,8 @@ private:
     static std::string CheckParty(Player* leader, const Dungeon& dungeon, bool& failed);
     // The boss's spawn in this instance is dead: killed, with its respawn time saved, or a corpse now.
     static bool BossDead(Map* map, uint32 spawn);
+    // The boss's spawn exists in this instance: false for a pooled rare the pool did not choose.
+    static bool BossSpawned(Map* map, uint32 spawn);
     // The bosses step, inside with the whole party.
     void TickBosses(Player* leader, Run& run, Update& update);
 

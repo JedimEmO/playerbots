@@ -3,6 +3,7 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/ServerFacade.h"
+#include "Pools/PoolManager.h"
 
 #include <algorithm>
 #include <cctype>
@@ -346,25 +347,40 @@ bool GuildDungeon::BossDead(Map* map, uint32 spawn)
     return state && state->GetCreatureRespawnTime(spawn) > time(nullptr);
 }
 
+bool GuildDungeon::BossSpawned(Map* map, uint32 spawn)
+{
+    if (!map || !spawn || !sPoolMgr.IsPartOfAPool<Creature>(spawn))
+        return true;
+    MapPersistentState* state = map->GetPersistentState();
+    return !state || state->IsSpawnedPoolObject<Creature>(spawn);
+}
+
 void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
 {
     const Dungeon& dungeon = run.dungeon;
     Map* map = leader->GetMap();
 
     int32 next = 0;
+    uint32 present = 0;
     for (size_t i = 0; i < dungeon.bosses.size(); ++i)
     {
         int32 entry = dungeon.bosses[i];
         if (BossDead(map, dungeon.spawns[i]))
         {
+            present++;
             if (run.killed.insert(entry).second)
                 update.events.push_back({ "boss_killed", BossName(entry) });
+            continue;
         }
-        else if (!next)
+        // A rare in a spawn pool, such as Miner Johnson, that the pool did not spawn in this instance.
+        if (!BossSpawned(map, dungeon.spawns[i]))
+            continue;
+        present++;
+        if (!next)
             next = entry;
     }
 
-    const std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(dungeon.bosses.size()) + " bosses down";
+    const std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(present) + " bosses down";
     if (run.killed.count(dungeon.lastBoss) || !next)
     {
         update.status = "done";
