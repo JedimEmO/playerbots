@@ -86,9 +86,9 @@ ItemUsage ItemUsageValue::Calculate()
     if (!proto)
         return ItemUsage::ITEM_USAGE_NONE;
 
-    // What a guild character's job collects stays in its bags.
+    // What a guild character's job collects: looted, never sold, banked or destroyed, and rolled need on.
     if (sGuildBotMgr.IsJobItem(bot->GetGUIDLow(), itemId))
-        return ItemUsage::ITEM_USAGE_KEEP;
+        return ItemUsage::ITEM_USAGE_GUILD_TASK;
 
     //FORCE
     ForceItemUsage forceUsage = AI_VALUE2_EXISTS(ForceItemUsage, "force item usage", proto->ItemId, ForceItemUsage::FORCE_USAGE_NONE);
