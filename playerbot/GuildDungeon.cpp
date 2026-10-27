@@ -12,6 +12,8 @@ using namespace ai;
 
 std::mutex GuildDungeon::entryLock;
 std::map<uint32, uint32> GuildDungeon::lastEntry;
+std::mutex GuildDungeon::exitLock;
+std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::exits;
 
 namespace
 {
@@ -23,6 +25,8 @@ namespace
     constexpr uint32 BOSS_LEVELS_ABOVE = 3;
     // Members take the entrance at least this far apart, so the core binds the group to the instance once.
     constexpr uint32 ENTRY_GAP_MS = 3 * IN_MILLISECONDS;
+    // Out by the way out within this, or the job fails.
+    constexpr time_t LEAVE_SECONDS = 15 * MINUTE;
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
@@ -136,6 +140,23 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     {
         error = "no bosses known in " + dungeon.name;
         return false;
+    }
+
+    // The way out: where the trigger that leads out of the dungeon puts a player, outside by the entrance.
+    AreaTrigger const* back = sObjectMgr.GetGoBackTrigger(dungeon.mapId);
+    if (!back)
+    {
+        error = "no way out known for " + dungeon.name;
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> guard(exitLock);
+        auto& exit = exits[dungeon.mapId];
+        if (!exit)
+            exit = std::make_unique<PlaceTravelDestination>(
+                WorldPosition(back->target_mapId, back->target_X, back->target_Y, back->target_Z, back->target_Orientation),
+                "out of " + dungeon.name);
+        dungeon.exit = exit.get();
     }
 
     // The party must be near the last boss's level: the one the table names, or else the highest.
@@ -265,6 +286,14 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
         run.resolved = true;
     }
 
+    if (run.phase == Phase::Leave)
+    {
+        TickLeave(leader, run, update);
+        if (update.status != "working")
+            runs.erase(leader->GetGUIDLow());
+        return update;
+    }
+
     const Dungeon& dungeon = run.dungeon;
     Group* group = leader->GetGroup();
 
@@ -300,8 +329,6 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
                 update.strategiesChanged = true;
             }
             TickBosses(leader, run, update);
-            if (update.status == "done")
-                runs.erase(leader->GetGUIDLow());
             return update;
         }
 
@@ -398,9 +425,15 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     const std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(present) + " bosses down";
     if (run.killed.count(dungeon.lastBoss) || !next)
     {
-        update.status = "done";
-        update.reason = dungeon.name + " cleared to " + BossName(dungeon.lastBoss) + ", " + count;
+        // Cleared: out by the way out, and the reset.
+        run.cleared = dungeon.name + " cleared to " + BossName(dungeon.lastBoss) + ", " + count;
         update.events.push_back({ "dungeon_done", dungeon.name + ", " + count });
+        run.phase = Phase::Leave;
+        run.leaveStarted = time(nullptr);
+        run.nextBoss = 0;
+        run.nextSpawn = 0;
+        update.strategiesChanged = true;
+        TickLeave(leader, run, update);
         return;
     }
 
@@ -416,7 +449,59 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     update.reason = "on the way to " + BossName(next) + " in " + dungeon.name + ", " + count;
 }
 
-bool GuildDungeon::LeaderInDungeon(Player* bot, WorldLocation& leaderPlace)
+void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
+{
+    const Dungeon& dungeon = run.dungeon;
+    Group* group = leader->GetGroup();
+
+    uint32 inside = 0;
+    if (group)
+    {
+        for (auto& slot : group->GetMemberSlots())
+        {
+            Player* member = sObjectMgr.GetPlayer(slot.guid);
+            if (member && (member->GetMapId() == dungeon.mapId || (member->IsBeingTeleportedFar() && member->GetTeleportDest().mapid == dungeon.mapId)))
+                inside++;
+        }
+    }
+    else if (leader->GetMapId() == dungeon.mapId)
+        inside = 1;
+
+    if (inside)
+    {
+        if (time(nullptr) - run.leaveStarted > LEAVE_SECONDS)
+        {
+            update.status = "failed";
+            update.reason = run.cleared + "; " + std::to_string(inside) + " still inside after " + std::to_string(LEAVE_SECONDS / MINUTE) + " minutes";
+            return;
+        }
+        // The leader inside goes for the way out; any other travel target goes, as at a dead boss.
+        if (leader->GetMapId() == dungeon.mapId)
+            if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            {
+                TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+                if (target && target->IsActive() && target->GetDestination() != dungeon.exit)
+                    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+            }
+        update.reason = "leaving " + dungeon.name + ", " + std::to_string(inside) + " inside; " + run.cleared;
+        return;
+    }
+
+    // Everyone is out: the leader resets the instance, as a player's client asks the server to.
+    bool reset = true;
+    if (group && group->GetBoundInstance(dungeon.mapId))
+    {
+        WorldPacket packet(CMSG_RESET_INSTANCES);
+        leader->GetSession()->HandleResetInstancesOpcode(packet);
+        reset = !group->GetBoundInstance(dungeon.mapId);
+    }
+    update.status = "done";
+    update.reason = run.cleared + (reset ? ", and reset" : ", but the reset failed");
+    if (reset)
+        update.events.push_back({ "dungeon_reset", dungeon.name });
+}
+
+bool GuildDungeon::LeaderAcrossEntrance(Player* bot, WorldLocation& leaderPlace)
 {
     Group* group = bot->GetGroup();
     if (!group || !sGuildBotMgr.IsGuildBot(bot) || !bot->IsAlive())
@@ -425,8 +510,9 @@ bool GuildDungeon::LeaderInDungeon(Player* bot, WorldLocation& leaderPlace)
     Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
     if (!leader || leader == bot || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->GetMapId() == bot->GetMapId())
         return false;
-    MapEntry const* map = sMapStore.LookupEntry(leader->GetMapId());
-    if (!map || !map->IsDungeon())
+    MapEntry const* leaderMap = sMapStore.LookupEntry(leader->GetMapId());
+    MapEntry const* botMap = sMapStore.LookupEntry(bot->GetMapId());
+    if (!(leaderMap && leaderMap->IsDungeon()) && !(botMap && botMap->IsDungeon()))
         return false;
 
     leader->GetPosition(leaderPlace);
@@ -448,6 +534,8 @@ bool GuildDungeon::ShouldTravel(Player* bot) const
     const Run& run = it->second;
     if (run.phase == Phase::Go)
         return bot->GetMapId() != run.dungeon.mapId;
+    if (run.phase == Phase::Leave)
+        return bot->GetMapId() == run.dungeon.mapId;
     return run.phase == Phase::Bosses && run.nextBoss && bot->GetMapId() == run.dungeon.mapId;
 }
 
@@ -467,6 +555,15 @@ int32 GuildDungeon::TravelEntry(Player* bot) const
     if (it->second.phase == Phase::Bosses)
         return it->second.nextBoss;
     return it->second.dungeon.bosses.front();
+}
+
+TravelDestination* GuildDungeon::ExitDestination(Player* bot) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(bot->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Leave || bot->GetMapId() != it->second.dungeon.mapId)
+        return nullptr;
+    return it->second.dungeon.exit;
 }
 
 Creature* GuildDungeon::NextBoss(Player* bot, float within) const

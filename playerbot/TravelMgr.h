@@ -191,6 +191,31 @@ namespace ai
         WorldPosition destination;
     };
 
+    // A place, like a temporary destination, but owned by whoever made it: a travel target that moves on does not
+    // delete it, so it may be shared and kept. The dungeon job's way out is one.
+    class PlaceTravelDestination : public TravelDestination
+    {
+    public:
+        PlaceTravelDestination(WorldPosition place, std::string title) : TravelDestination(), place(place), title(title) {}
+
+        virtual std::string GetTitle() const override { return title; }
+
+        virtual bool IsPossible(const PlayerTravelInfo& info) const override { return true; }
+        virtual bool IsActive(Player* bot, const PlayerTravelInfo& info) const override { return true; }
+
+        virtual bool IsIn(const WorldPosition& pos, float radius = 0) const override { return place.getMapId() == pos.getMapId() && place.distance(pos) <= (radius ? radius : INTERACTION_DISTANCE); }
+        virtual bool IsOut(const WorldPosition& pos, float radius = 0) const override { return place.getMapId() != pos.getMapId() || place.distance(pos) > (radius ? radius : sPlayerbotAIConfig.sightDistance); }
+
+        virtual float sqDistance(const WorldPosition& point) const override { return place.sqDistance(point); }
+        virtual WorldPosition* GetNextPoint(const WorldPosition& point, std::list<uint8>& chancesToGoFar, bool allowSame = false) const override { return const_cast<WorldPosition*>(&place); }
+        virtual WorldPosition* GetClosestPoint(const WorldPosition& point) const override { return const_cast<WorldPosition*>(&place); }
+
+        virtual std::string GetShortName() const override { return "place"; };
+    private:
+        WorldPosition place;
+        std::string title;
+    };
+
 	class EntryTravelDestination : public TravelDestination
 	{
 	public:

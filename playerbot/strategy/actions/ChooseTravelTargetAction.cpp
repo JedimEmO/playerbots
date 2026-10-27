@@ -923,27 +923,43 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
     }
     else if (travelName == "dungeon")
     {
-        // A dungeon run: the first boss, inside, so the route passes the entrance.
-        int32 entry = sGuildDungeon.TravelEntry(bot);
-        if (!entry)
-            return false;
+        // A cleared dungeon: the way out, a place the dungeon job keeps.
+        if (TravelDestination* exit = sGuildDungeon.ExitDestination(bot))
+        {
+            *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [exit, center]()
+                {
+                    PartitionedTravelList list;
+                    std::list<uint8> chancesToGoFar = { 10,50,90 };
+                    if (WorldPosition* point = exit->GetNextPoint(center, chancesToGoFar))
+                        list[0].push_back(TravelPoint(exit, point, point->distance(center)));
+                    return list;
+                });
+            SET_AI_VALUE2(std::string, "manual string", "future travel detail", exit->GetTitle());
+        }
+        else
+        {
+            // A dungeon run: the first boss, inside, so the route passes the entrance.
+            int32 entry = sGuildDungeon.TravelEntry(bot);
+            if (!entry)
+                return false;
 
-        DestinationList dests = sTravelMgr.GetDestinations(PlayerTravelInfo(bot), (uint32)TravelDestinationPurpose::Boss, { entry }, false, 0);
-        if (dests.empty())
-            return false;
+            DestinationList dests = sTravelMgr.GetDestinations(PlayerTravelInfo(bot), (uint32)TravelDestinationPurpose::Boss, { entry }, false, 0);
+            if (dests.empty())
+                return false;
 
-        TravelDestination* dest = dests.front();
-        *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [dest, center]()
-            {
-                PartitionedTravelList list;
-                std::list<uint8> chancesToGoFar = { 10,50,90 };
-                if (WorldPosition* point = dest->GetNextPoint(center, chancesToGoFar))
-                    list[0].push_back(TravelPoint(dest, point, point->distance(center)));
-                return list;
-            });
+            TravelDestination* dest = dests.front();
+            *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [dest, center]()
+                {
+                    PartitionedTravelList list;
+                    std::list<uint8> chancesToGoFar = { 10,50,90 };
+                    if (WorldPosition* point = dest->GetNextPoint(center, chancesToGoFar))
+                        list[0].push_back(TravelPoint(dest, point, point->distance(center)));
+                    return list;
+                });
 
-        if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry))
-            SET_AI_VALUE2(std::string, "manual string", "future travel detail", std::string(info->Name));
+            if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry))
+                SET_AI_VALUE2(std::string, "manual string", "future travel detail", std::string(info->Name));
+        }
     }
     else if (travelName == "guild order")
     {
