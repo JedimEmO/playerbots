@@ -21,6 +21,7 @@ namespace ai { class Engine; }
 //                          and their job. A new order is a new job_seq.
 //   guildbot_state         what each one is doing now, written every few seconds.
 //   guildbot_event         things that happened, appended: logins, takeovers, levels, deaths, jobs done.
+//   guildbot_metric        per character, job and hour: seconds played, seconds earning experience, experience, deaths.
 class GuildBotMgr : public PlayerbotHolder
 {
 public:
@@ -111,6 +112,14 @@ private:
         bool dead = false;
         bool alone = false;         // in a group but with no member near, as its strategies were last built
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
+
+        // The hourly measure, counted every check and written every few minutes; see guildbot_metric.
+        uint32 xpLevel = 0, xpValue = 0;  // level and experience at the last check
+        time_t xpAt = 0;                  // when it last gained experience
+        time_t measuredAt = 0;            // the last check counted
+        time_t metricHour = 0;            // the hour the counts below belong to
+        std::string metricJob;            // and the job
+        uint32 seconds = 0, earning = 0, experience = 0, deaths = 0;
     };
 
     void EnsureTables();
@@ -122,6 +131,10 @@ private:
     void WriteState(const Character& c, Player* bot);
     void ApplyRole(Character& c, Player* bot);
     void CheckChase(Character& c, Player* bot);
+    // Count this check into the hourly measure, and write the counts when the hour or job changes, or every few minutes.
+    void Measure(Character& c, Player* bot, bool died);
+    void WriteMetric(Character& c);
+    std::list<std::string> HandleMetrics(const std::string& args);
     // The party job: be in the leader's group. Returns why not, or empty when it is.
     std::string KeepParty(Character& c, Player* bot);
     void LeaveParty(Character& c, Player* bot);

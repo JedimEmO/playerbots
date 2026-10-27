@@ -27,6 +27,12 @@ namespace
     constexpr time_t LOGIN_RETRY_SECONDS = 60;
     // A levelling character that earns no experience for this long is reported as stalled.
     constexpr time_t STALL_SECONDS = 15 * MINUTE;
+    // A character that gained experience this recently is earning it, for the hourly measure.
+    constexpr time_t EARNING_WINDOW_SECONDS = 5 * MINUTE;
+    // The measure's counts reach the table this often, and at every change of hour or job.
+    constexpr time_t METRIC_WRITE_SECONDS = 5 * MINUTE;
+    // A gap longer than this between checks, such as a restart, is not counted as time played.
+    constexpr time_t MEASURE_GAP_SECONDS = 30;
     // A group member farther than this from every other is on its own.
     constexpr float ALONE_DISTANCE = 60.0f;
     // A second stall this soon after a reset sends the character home instead.
@@ -466,7 +472,118 @@ void GuildBotMgr::EnsureTables()
         " KEY guid (guid), KEY at (at)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
+    // The hourly measure of how much of its time a character spends earning experience.
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guildbot_metric ("
+        " hour TIMESTAMP NOT NULL DEFAULT '2000-01-01 00:00:00',"
+        " guid INT UNSIGNED NOT NULL,"
+        " job VARCHAR(16) NOT NULL,"
+        " seconds INT UNSIGNED NOT NULL DEFAULT 0,"
+        " earning INT UNSIGNED NOT NULL DEFAULT 0,"
+        " experience INT UNSIGNED NOT NULL DEFAULT 0,"
+        " deaths INT UNSIGNED NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (hour, guid, job)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
     tablesReady = true;
+}
+
+void GuildBotMgr::Measure(Character& c, Player* bot, bool died)
+{
+    const time_t now = time(nullptr);
+    const uint32 level = bot->GetLevel(), xp = bot->GetUInt32Value(PLAYER_XP);
+
+    // Experience gained since the last check, across a level up.
+    uint32 gained = 0;
+    if (c.xpLevel && level == c.xpLevel && xp > c.xpValue)
+        gained = xp - c.xpValue;
+    else if (c.xpLevel && level == c.xpLevel + 1)
+        gained = sObjectMgr.GetXPForLevel(c.xpLevel) - std::min(c.xpValue, sObjectMgr.GetXPForLevel(c.xpLevel)) + xp;
+    if (gained || (c.xpLevel && level > c.xpLevel))
+        c.xpAt = now;
+    c.xpLevel = level;
+    c.xpValue = xp;
+
+    const std::string job = c.status == "working" ? c.job : "idle";
+    const time_t hour = now - now % HOUR;
+    if (c.metricHour && (hour != c.metricHour || job != c.metricJob))
+        WriteMetric(c);
+    if (!c.metricHour)
+    {
+        c.metricHour = hour;
+        c.metricJob = job;
+    }
+
+    const time_t step = c.measuredAt ? now - c.measuredAt : 0;
+    c.measuredAt = now;
+    if (step > 0 && step <= MEASURE_GAP_SECONDS)
+    {
+        c.seconds += uint32(step);
+        if (c.xpAt && now - c.xpAt < EARNING_WINDOW_SECONDS)
+            c.earning += uint32(step);
+    }
+    c.experience += gained;
+    if (died)
+        c.deaths++;
+
+    if (c.seconds >= METRIC_WRITE_SECONDS)
+        WriteMetric(c);
+}
+
+void GuildBotMgr::WriteMetric(Character& c)
+{
+    if (c.metricHour && (c.seconds || c.experience || c.deaths))
+        CharacterDatabase.PExecute(
+            "INSERT INTO guildbot_metric (hour, guid, job, seconds, earning, experience, deaths) "
+            "VALUES (FROM_UNIXTIME(%u), %u, '%s', %u, %u, %u, %u) "
+            "ON DUPLICATE KEY UPDATE seconds = seconds + VALUES(seconds), earning = earning + VALUES(earning), "
+            "experience = experience + VALUES(experience), deaths = deaths + VALUES(deaths)",
+            uint32(c.metricHour), c.guid, Escape(c.metricJob).c_str(), c.seconds, c.earning, c.experience, c.deaths);
+    c.seconds = c.earning = c.experience = c.deaths = 0;
+    c.metricHour = 0;
+}
+
+std::list<std::string> GuildBotMgr::HandleMetrics(const std::string& args)
+{
+    uint32 hours = uint32(atoi(Trim(args).c_str()));
+    if (!hours)
+        hours = 12;
+
+    std::list<std::string> out = { "levelling characters, by hour: earning experience / time played, experience, deaths, characters" };
+    auto byHour = CharacterDatabase.PQuery(
+        "SELECT DATE_FORMAT(hour, '%%Y-%%m-%%d %%H:00'), SUM(earning), SUM(seconds), SUM(experience), SUM(deaths), COUNT(DISTINCT guid) "
+        "FROM guildbot_metric WHERE job = 'level' AND hour >= NOW() - INTERVAL %u HOUR GROUP BY hour ORDER BY hour", hours);
+    if (byHour)
+    {
+        do
+        {
+            Field* f = byHour->Fetch();
+            uint32 earning = f[1].GetUInt32(), seconds = f[2].GetUInt32();
+            std::ostringstream line;
+            line << f[0].GetCppString() << "  " << (seconds ? earning * 100 / seconds : 0) << "% of " << seconds / MINUTE << " min, "
+                 << f[3].GetUInt32() << " xp, " << f[4].GetUInt32() << " deaths, " << f[5].GetUInt32() << " characters";
+            out.push_back(line.str());
+        } while (byHour->NextRow());
+    }
+
+    out.push_back("by character, the same hours:");
+    auto byCharacter = CharacterDatabase.PQuery(
+        "SELECT c.name, SUM(m.earning), SUM(m.seconds), SUM(m.experience), SUM(m.deaths) "
+        "FROM guildbot_metric m JOIN characters c ON c.guid = m.guid "
+        "WHERE m.job = 'level' AND m.hour >= NOW() - INTERVAL %u HOUR GROUP BY m.guid ORDER BY SUM(m.earning) / SUM(m.seconds)", hours);
+    if (byCharacter)
+    {
+        do
+        {
+            Field* f = byCharacter->Fetch();
+            uint32 earning = f[1].GetUInt32(), seconds = f[2].GetUInt32();
+            std::ostringstream line;
+            line << "  " << f[0].GetCppString() << "  " << (seconds ? earning * 100 / seconds : 0) << "% of " << seconds / MINUTE << " min, "
+                 << f[3].GetUInt32() << " xp, " << f[4].GetUInt32() << " deaths";
+            out.push_back(line.str());
+        } while (byCharacter->NextRow());
+    }
+    return out;
 }
 
 void GuildBotMgr::LoadOrders()
@@ -665,6 +782,7 @@ void GuildBotMgr::CheckJobs()
         bool dead = sServerFacade.UnitIsDead(bot);
         if (dead && !c.dead)
             Event(guid, "died", std::to_string(bot->GetZoneId()));
+        Measure(c, bot, dead && !c.dead);
         c.dead = dead;
 
         // Cut off from its group, say outside a dungeon its party is in: it plays as a solo character until it is back.
@@ -1079,6 +1197,8 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         return HandleState(rest);
     if (sub == "debug")
         return HandleDebug(rest);
+    if (sub == "metrics")
+        return HandleMetrics(rest);
     if (sub == "tank")
         return HandleTank(rest);
     if (sub == "bench")
@@ -1098,6 +1218,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         "guildbot bench ...                     GM test benches only: level, gear, consumables (guildbot bench help)",
         "guildbot state <name>                  what it is doing, as the state table holds it",
         "guildbot debug <name>                  the engine's view: strategies, last action, target, power, movement",
+        "guildbot metrics [hours]               how much of their time levelling characters earn experience, by hour",
     };
 }
 
