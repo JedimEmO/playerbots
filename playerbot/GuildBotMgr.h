@@ -98,6 +98,7 @@ private:
         uint64 lastProgress = 0;     // level and experience, as one number
         time_t progressAt = 0;       // when it last changed
         bool stalled = false;
+        time_t recoveredAt = 0;     // when the engine last reset a stalled character
         bool dead = false;
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
     };

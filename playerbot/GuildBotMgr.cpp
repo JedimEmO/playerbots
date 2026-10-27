@@ -23,6 +23,8 @@ namespace
     constexpr time_t LOGIN_RETRY_SECONDS = 60;
     // A levelling character that earns no experience for this long is reported as stalled.
     constexpr time_t STALL_SECONDS = 15 * MINUTE;
+    // A second stall this soon after a reset sends the character home instead.
+    constexpr time_t RECOVERY_WINDOW_SECONDS = 30 * MINUTE;
 
     std::string Trim(const std::string& s)
     {
@@ -602,6 +604,25 @@ void GuildBotMgr::CheckJobs()
             c.stalled = true;
             c.reason = "no experience for " + std::to_string((now - c.progressAt) / MINUTE) + " minutes";
             Event(guid, "stalled", c.reason);
+
+            // Get it going again: first drop what it is doing, which is usually a target it cannot reach;
+            // if it stalls again soon after, go home by hearthstone.
+            PlayerbotAI* ai = bot->GetPlayerbotAI();
+            if (ai && (!c.recoveredAt || now - c.recoveredAt > RECOVERY_WINDOW_SECONDS))
+            {
+                bot->CombatStop();
+                ai->Reset(true);
+                c.recoveredAt = now;
+                c.progressAt = now;
+                Event(guid, "recovery", "reset");
+            }
+            else if (ai)
+            {
+                bool home = ai->DoSpecificAction("hearthstone", ai::Event(), true);
+                c.recoveredAt = now;
+                c.progressAt = now;
+                Event(guid, "recovery", home ? "hearthstone" : "hearthstone not ready");
+            }
         }
 
         if (c.job == "level")
