@@ -208,7 +208,13 @@ void GuildBotMgr::CheckChase(Character& c, Player* bot)
         return;
     leftDestinations[c.guid][entry] = now + LEAVE_DESTINATION_SECONDS;
     travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
-    Event(c.guid, "left_spot", travel->GetDestination() ? travel->GetDestination()->GetTitle() : std::to_string(entry));
+    // The detail is the plain name of what the spot was for: a creature, or a game object for a negative entry.
+    std::string spot = std::to_string(entry);
+    if (CreatureInfo const* info = entry > 0 ? ObjectMgr::GetCreatureTemplate(entry) : nullptr)
+        spot = info->Name;
+    else if (GameObjectInfo const* info = entry < 0 ? ObjectMgr::GetGameObjectInfo(-entry) : nullptr)
+        spot = info->name;
+    Event(c.guid, "left_spot", spot);
 }
 
 uint8 GuildBotMgr::GetTankOrder(uint32 guid) const
