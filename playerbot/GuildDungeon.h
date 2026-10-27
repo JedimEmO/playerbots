@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+class Creature;
 class Map;
 class Player;
 struct AreaTrigger;
@@ -50,6 +51,9 @@ public:
     bool ShouldTravel(Player* bot) const;
     bool IsHolding(Player* bot) const;
     int32 TravelEntry(Player* bot) const;
+    // The next boss itself, for its party's leader at the boss's place: alive, loaded, and this near.
+    // Upstream's grind skips a boss out of sight, such as VanCleef on the deck above, so the leader takes it as its target.
+    Creature* NextBoss(Player* bot, float within) const;
 
     // The entry guard, for every area trigger a bot takes. Two members entering an unbound instance at once
     // can crash the server on the group bind, so a guild character in a group enters a dungeon only first,
@@ -83,6 +87,7 @@ private:
         bool resolved = false;
         bool entered = false;          // the whole party has been inside
         int32 nextBoss = 0;            // the boss the party is on its way to
+        uint32 nextSpawn = 0;          // its spawn
         std::set<int32> killed;        // bosses reported dead
         bool bossesSeen = false;       // the bosses have been looked at once in this run
     };

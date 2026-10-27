@@ -378,7 +378,10 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             continue;
         present++;
         if (!next)
+        {
             next = entry;
+            run.nextSpawn = dungeon.spawns[i];
+        }
     }
 
     run.bossesSeen = true;
@@ -454,6 +457,18 @@ int32 GuildDungeon::TravelEntry(Player* bot) const
     if (it->second.phase == Phase::Bosses)
         return it->second.nextBoss;
     return it->second.dungeon.bosses.front();
+}
+
+Creature* GuildDungeon::NextBoss(Player* bot, float within) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(bot->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Bosses || !it->second.nextSpawn || bot->GetMapId() != it->second.dungeon.mapId)
+        return nullptr;
+    Creature* boss = bot->GetMap()->GetCreature(it->second.nextSpawn);
+    if (!boss || !boss->IsAlive() || !boss->IsInWorld() || bot->GetDistance(boss) > within)
+        return nullptr;
+    return boss;
 }
 
 bool GuildDungeon::MayEnter(Player* bot, uint32 triggerId)

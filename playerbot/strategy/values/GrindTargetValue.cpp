@@ -1,6 +1,7 @@
 
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 #include "GrindTargetValue.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/RandomPlayerbotMgr.h"
@@ -63,6 +64,13 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) +"(hostile) selected.");
        
         return unit;
+    }
+
+    // A guild party's leader at its next boss's place takes the boss, which may be out of sight on a deck above.
+    if (!AI_VALUE(bool, "travel target traveling"))
+    {
+        if (Creature* boss = sGuildDungeon.NextBoss(bot, 100.0f))
+            return boss;
     }
 
     std::list<ObjectGuid> targets = *context->GetValue<std::list<ObjectGuid> >("possible targets");
