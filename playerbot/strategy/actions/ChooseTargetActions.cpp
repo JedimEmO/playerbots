@@ -6,6 +6,7 @@
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 
 bool DpsAssistAction::isUseful()
 {
@@ -39,6 +40,10 @@ bool AttackAnythingAction::isUseful()
         return false;
 
     if(!target->IsPlayer() && bot->isInFront(target,target->GetAttackDistance(bot)*1.5f, M_PI_F*0.5f) && target->CanAttackOnSight(bot) && target->GetLevel() < bot->GetLevel() + 3.0) //Attack before being attacked.
+        return true;
+
+    // A guild party's leader kills what stands between it and its next boss, however far off its travel target is.
+    if (target == sGuildDungeon.KillTarget(bot, 60.0f))
         return true;
 
     if (AI_VALUE(bool, "travel target traveling") && CanFreeMoveValue::CanFreeMoveTo(ai, *AI_VALUE(TravelTarget*,"travel target")->GetPosition()) &&

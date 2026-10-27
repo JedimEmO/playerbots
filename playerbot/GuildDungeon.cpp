@@ -84,16 +84,22 @@ namespace
         { "scarlet_monastery_cathedral", "Scarlet Monastery Cathedral", 610, 3977 },  // High Inquisitor Whitemane
     };
 
-    // Friendly creatures a party has to speak to on its way, as a player would, with the gossip action to pick.
-    // Each is a step among the bosses, in route order; the party takes the one friendly to it.
-    struct Talk { uint32 map; int32 entry; uint32 action; };
+    // Friendly creatures a party has to speak to on its way, as a player would, with the gossip action to pick,
+    // and the door the creature then opens, or 0. Each is a step among the bosses, in route order;
+    // the party takes the one friendly to it.
+    struct Talk { uint32 map; int32 entry; uint32 action; uint32 door; };
     const Talk TALKS[] = {
-        // Shadowfang Keep: the prisoner, freed, unlocks the courtyard door. Horde and Alliance have one each.
-        { 33, 3849, GOSSIP_ACTION_INFO_DEF + 1 },   // Deathstalker Adamant
-        { 33, 3850, GOSSIP_ACTION_INFO_DEF + 1 },   // Sorcerer Ashcrombe
+        // Shadowfang Keep: the prisoner, freed, walks to the Courtyard Door and unlocks it. Horde and Alliance have one each.
+        { 33, 3849, GOSSIP_ACTION_INFO_DEF + 1, 18895 },   // Deathstalker Adamant
+        { 33, 3850, GOSSIP_ACTION_INFO_DEF + 1, 18895 },   // Sorcerer Ashcrombe
     };
-    // A talk step is done once the leader is this near and has spoken.
+    // The leader speaks from this near, out of combat. A step with no door is done then;
+    // one with a door is done when the door is open, and the party waits by the creature while it walks there.
     constexpr float TALK_DISTANCE = 6.0f;
+    // A creature that offers its gossip again with the door still shut is spoken to again after this.
+    constexpr time_t TALK_RETRY_SECONDS = 15;
+    // A creature that walks off and leaves the door shut this long is given up on.
+    constexpr time_t TALK_WAIT_SECONDS = 3 * MINUTE;
 
     // Objects a party uses before a boss, as players would: how many members use it, and the boss it is for.
     // An object that wakes its boss is used for as long as the boss sleeps, unattackable and out of combat,
@@ -267,7 +273,20 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         if (talk ? hostile : !hostile)
             continue;
         if (talk)
+        {
             dungeon.talks[talk->entry] = talk->action;
+            if (talk->door)
+            {
+                auto findDoor = [&](auto const& pair)
+                {
+                    if (pair.second.id != talk->door || pair.second.mapid != dungeon.mapId)
+                        return false;
+                    dungeon.talkDoors[talk->entry] = pair.first;
+                    return true;
+                };
+                sObjectMgr.DoGOData(findDoor);
+            }
+        }
         // The destination's point nearest the arrival: on the dungeon's map if it has one there.
         std::list<uint8> nearest = { 0, 0, 0 };
         WorldPosition* point = dest->GetNextPoint(arrival, nearest);
@@ -696,32 +715,72 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
 
     int32 next = 0;
     uint32 present = 0;
+    std::string talkWait;  // what the party waits for after speaking, such as a prisoner on its way to a door
     for (size_t i = 0; i < dungeon.bosses.size(); ++i)
     {
         int32 entry = dungeon.bosses[i];
-        // A creature to speak to: a step until the leader has, and not a boss to count.
+        // A creature to speak to: a step until it is done, and not a boss to count.
         if (auto talk = dungeon.talks.find(entry); talk != dungeon.talks.end())
         {
             if (run.talked.count(entry))
                 continue;
+            // The door it opens is open: done, whoever opened it.
+            auto doorSpawn = dungeon.talkDoors.find(entry);
+            const bool hasDoor = doorSpawn != dungeon.talkDoors.end();
+            GameObject* door = hasDoor ? map->GetGameObject(doorSpawn->second) : nullptr;
+            const std::string doorName = door ? std::string(door->GetGOInfo()->name) : "door";
+            if (door && door->GetGoState() != GO_STATE_READY)
+            {
+                run.talked.insert(entry);
+                // A door open before this run started, such as after a restart, is not news.
+                if (run.bossesSeen)
+                    update.events.push_back({ "door_open", doorName });
+                continue;
+            }
             Creature* creature = map->GetCreature(dungeon.spawns[i]);
             if (!creature || !creature->IsAlive())
             {
                 run.talked.insert(entry);
                 continue;
             }
-            if (!next && leader->GetDistance(creature) <= TALK_DISTANCE)
+            if (next)
+                continue;
+            next = entry;
+            run.nextSpawn = dungeon.spawns[i];
+
+            const time_t now = time(nullptr);
+            auto spoken = run.talkedAt.find(entry);
+            const bool offers = creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
+            if (hasDoor && !offers)
+            {
+                // Its escort is under way, after the leader spoke or before a restart: the party waits here
+                // while it walks to the door.
+                if (spoken == run.talkedAt.end())
+                    spoken = run.talkedAt.emplace(entry, now).first;
+                if (now - spoken->second >= TALK_WAIT_SECONDS)
+                {
+                    run.talked.insert(entry);
+                    update.events.push_back({ "gave_up", BossName(entry) + " did not open the " + doorName });
+                    next = 0;
+                    run.nextSpawn = 0;
+                    continue;
+                }
+                talkWait = BossName(entry) + " to open the " + doorName;
+                continue;
+            }
+            if (leader->GetDistance(creature) <= TALK_DISTANCE && !leader->IsInCombat() && offers
+                && (spoken == run.talkedAt.end() || now - spoken->second >= TALK_RETRY_SECONDS))
             {
                 // As a player picks the option in its gossip: the script does the rest, such as an escort to a door.
                 sScriptDevAIMgr.OnGossipSelect(leader, creature, GOSSIP_SENDER_MAIN, talk->second, nullptr);
-                run.talked.insert(entry);
+                run.talkedAt[entry] = now;
                 update.events.push_back({ "talked", BossName(entry) });
-                continue;
-            }
-            if (!next)
-            {
-                next = entry;
-                run.nextSpawn = dungeon.spawns[i];
+                if (!hasDoor)
+                {
+                    run.talked.insert(entry);
+                    next = 0;
+                    run.nextSpawn = 0;
+                }
             }
             continue;
         }
@@ -890,7 +949,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (target && target->IsActive() && target->GetEntry() != next)
             target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
     }
-    if (!killing.empty())
+    if (!talkWait.empty())
+        update.reason = "waiting for " + talkWait + " in " + dungeon.name + ", " + count;
+    else if (!killing.empty())
         update.reason = "killing " + killing + " before " + BossName(next) + " in " + dungeon.name + ", " + count;
     else
         update.reason = (dungeon.talks.count(next) ? "on the way to speak to " : "on the way to ") + BossName(next) + " in " + dungeon.name + ", " + count;
@@ -1272,7 +1333,8 @@ Creature* GuildDungeon::NextBoss(Player* bot, float within) const
         || !bot->IsInWorld())
         return nullptr;
     // An object to use first, such as the altar that wakes the boss: the leader stays at it.
-    if (it->second.useSpawn)
+    // A creature to speak to is no target either.
+    if (it->second.useSpawn || it->second.dungeon.talks.count(it->second.nextBoss))
         return nullptr;
     Creature* boss = bot->GetMap()->GetCreature(it->second.nextSpawn);
     if (!boss || !boss->IsAlive() || !boss->IsInWorld() || bot->GetDistance(boss) > within)

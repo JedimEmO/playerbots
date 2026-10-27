@@ -122,6 +122,7 @@ private:
         std::vector<int32> bosses;     // boss entries, nearest the entrance first
         std::vector<uint32> spawns;    // each boss's spawn on the map, by database guid; 0 if none is known
         std::map<int32, uint32> talks; // steps that are friendly creatures to speak to, by entry: the gossip action to pick
+        std::map<int32, uint32> talkDoors; // the spawn of the door each of them opens, by entry
         int32 lastBoss = 0;            // the boss whose death ends the run
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
         ai::PlaceTravelDestination* exit = nullptr;  // outside, where the way out leads; kept in exits
@@ -145,6 +146,7 @@ private:
         uint32 nextSpawn = 0;          // its spawn
         std::set<int32> killed;        // bosses reported dead
         std::set<int32> talked;        // talk steps done
+        std::map<int32, time_t> talkedAt; // when the leader last spoke to each, by entry
         std::set<uint32> used;         // use steps done, by the object's spawn
         uint32 useSpawn = 0;           // the use step the leader is on its way to or at, or 0
         std::map<uint32, time_t> usedAt; // when everyone a use step needs last used it, by the object's spawn
