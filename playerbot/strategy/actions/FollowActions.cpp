@@ -13,9 +13,9 @@ using namespace ai;
 
 bool FollowAction::Execute(Event& event)
 {
-    // A guild character whose leader is across a dungeon's entrance: the travel map's route to it runs through it.
+    // A guild character whose leader is across a dungeon's entrance, or far off: it travels, by the travel map's routes.
     WorldLocation leaderPlace;
-    if (GuildDungeon::LeaderAcrossEntrance(bot, leaderPlace))
+    if (GuildDungeon::FollowByTravel(bot, leaderPlace))
         return MoveTo(leaderPlace);
 
     bool moved = false;
@@ -44,9 +44,9 @@ bool FollowAction::isUseful()
     if (!ai->CanMove())
         return false;
 
-    // A guild character whose leader is across a dungeon's entrance walks in or out after it.
+    // A guild character whose leader is across a dungeon's entrance, or far off, travels to it.
     WorldLocation leaderPlace;
-    if (GuildDungeon::LeaderAcrossEntrance(bot, leaderPlace))
+    if (GuildDungeon::FollowByTravel(bot, leaderPlace))
         return true;
 
     float distance = 0;

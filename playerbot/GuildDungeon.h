@@ -88,6 +88,9 @@ public:
     // reach on another map, so follow moves there instead, and the route the travel map gives runs through the
     // entrance or the way out. False when it is not in that position.
     static bool LeaderAcrossEntrance(Player* bot, WorldLocation& leaderPlace);
+    // Where a guild character in a group travels instead of following, when following cannot work:
+    // its leader across a dungeon's entrance (the stone, when the dungeon has one), or far off on the same map.
+    static bool FollowByTravel(Player* bot, WorldLocation& place);
     // The one-at-a-time entry guard, for the trigger and the stone alike; guild characters also go after their leader.
     static bool MayEnterMap(Player* player, uint32 mapId);
 

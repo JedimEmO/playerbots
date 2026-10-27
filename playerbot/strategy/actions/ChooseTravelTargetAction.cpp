@@ -8,6 +8,7 @@
 #include "playerbot/strategy/values/GuildValues.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildBotMgr.h"
 #include "Guilds/GuildMgr.h"
 #include <iomanip>
 
@@ -761,6 +762,12 @@ bool RequestTravelTargetAction::Execute(Event& event)
 
 bool RequestTravelTargetAction::isUseful() {
     if (bot->InBattleGround())
+        return false;
+
+    // A guild character grinds only on the level job, however the request comes: short of money too.
+    // A dungeon leader waiting for its party walked off to a grind spot, out of Shadowfang Keep.
+    if (getQualifier() == std::to_string(uint32(TravelDestinationPurpose::Grind)) && sGuildBotMgr.IsGuildBot(bot)
+        && sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) != "level")
         return false;
 
     if (!ai->AllowActivity(TRAVEL_ACTIVITY))

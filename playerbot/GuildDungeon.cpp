@@ -44,6 +44,8 @@ namespace
     // At the stone: the leader uses it within this, and a member this near it follows the leader in by it.
     constexpr float AT_STONE = 8.0f;
     constexpr float NEAR_STONE = 40.0f;
+    // A follower farther than this from its leader on the same map travels to it, by the travel map's routes.
+    constexpr float FOLLOW_BY_TRAVEL = 150.0f;
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
@@ -523,6 +525,17 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
         update.reason = why;
         return update;
     }
+    // Back outside after the party has been in, after a death or a wrong turn, it goes back in to them:
+    // they are inside, and will not come near out here.
+    if (run.entered && !why.empty())
+    {
+        why.clear();
+        if (run.phase != Phase::Go)
+        {
+            run.phase = Phase::Go;
+            update.strategiesChanged = true;
+        }
+    }
 
     if (run.phase == Phase::Check && why.empty())
         run.phase = Phase::Go;
@@ -538,7 +551,7 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     // Once on the way, a member falling behind does not stop the leader: it waits at the entrance
     // until the party is near, as upstream's travel does for dungeon destinations.
     if (run.phase == Phase::Go)
-        update.reason = "travelling to " + dungeon.name + (why.empty() ? "" : "; " + why);
+        update.reason = (run.entered ? "going back into " : "travelling to ") + dungeon.name + (why.empty() ? "" : "; " + why);
     else
         update.reason = why;
     return update;
@@ -917,6 +930,39 @@ bool GuildDungeon::EnterByStone(Player* player, uint32 mapId, std::string& why, 
 
     player->TeleportTo(at->target_mapId, at->target_X, at->target_Y, at->target_Z, at->target_Orientation);
     return true;
+}
+
+bool GuildDungeon::FollowByTravel(Player* bot, WorldLocation& place)
+{
+    Group* group = bot->GetGroup();
+    if (!group || !sGuildBotMgr.IsGuildBot(bot) || !bot->IsAlive() || !bot->IsInWorld())
+        return false;
+    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+    if (!leader || leader == bot || !leader->IsInWorld() || leader->IsBeingTeleported())
+        return false;
+
+    if (leader->GetMapId() != bot->GetMapId())
+    {
+        // The leader inside a dungeon with a stone on this side: to the stone, which takes the follower in.
+        WorldPosition stone;
+        MapEntry const* map = sMapStore.LookupEntry(leader->GetMapId());
+        if (map && map->IsNonRaidDungeon() && StonePlace(leader->GetMapId(), stone) && stone.getMapId() == bot->GetMapId())
+        {
+            if (stone.distance(WorldPosition(bot)) <= NEAR_STONE)
+                return false;
+            place = WorldLocation(stone.getMapId(), stone.getX(), stone.getY(), stone.getZ(), stone.getO());
+            return true;
+        }
+        return LeaderAcrossEntrance(bot, place);
+    }
+
+    // Upstream's follow gives up this far off; a follower that wandered or was taken away travels back.
+    if (bot->GetDistance(leader) > FOLLOW_BY_TRAVEL)
+    {
+        leader->GetPosition(place);
+        return true;
+    }
+    return false;
 }
 
 void GuildDungeon::FollowByStone(Player* member)
