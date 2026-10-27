@@ -122,6 +122,14 @@ bool GuildBotMgr::IsPlayerControlled(Player* player) const
     return it != characters.end() && (it->second.playerControlled || IsRealSession(player));
 }
 
+bool GuildBotMgr::StaysWithParty(Player* bot) const
+{
+    if (!bot || !bot->GetGroup() || !IsGuildBot(bot))
+        return false;
+    const std::string job = GetActiveJob(bot->GetGUIDLow());
+    return job == "dungeon" || job == "party";
+}
+
 std::string GuildBotMgr::GetActiveJob(uint32 guid) const
 {
     auto it = characters.find(guid);
@@ -919,6 +927,7 @@ void GuildBotMgr::ApplyOrders()
 
         c.appliedSeq = c.jobSeq;
         c.reason.clear();
+        c.runsDone = 0;
         sGuildDungeon.Stop(guid);
         c.progressAt = 0;
         c.stalled = false;
@@ -1072,10 +1081,22 @@ void GuildBotMgr::CheckJobs()
             }
             else if (update.status == "done")
             {
-                c.status = "done";
-                Event(guid, "job_done", "dungeon " + c.reason);
+                // With `runs`, the next run starts from the stone at the next check; 0 runs has no end.
+                ++c.runsDone;
+                const std::string runsArg = ArgValue(c, "runs");
+                const uint32 runs = runsArg.empty() ? 1 : uint32(atoi(runsArg.c_str()));
+                if (runs == 0 || c.runsDone < runs)
+                {
+                    c.reason = "run " + std::to_string(c.runsDone) + (runs ? " of " + std::to_string(runs) : "") + " done: " + c.reason;
+                    Event(guid, "dungeon_again", c.reason);
+                }
+                else
+                {
+                    c.status = "done";
+                    Event(guid, "job_done", "dungeon " + c.reason);
+                }
             }
-            if ((update.strategiesChanged || c.status != "working") && bot->GetPlayerbotAI())
+            if ((update.strategiesChanged || update.status != "working") && bot->GetPlayerbotAI())
                 bot->GetPlayerbotAI()->ResetStrategies(false);
             continue;
         }

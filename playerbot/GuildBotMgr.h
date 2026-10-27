@@ -45,6 +45,11 @@ public:
     // A guild character on its own: in no group, or in one with no other member alive near it.
     // Its strategies are then a solo character's, so a healer cut off from its party fights for itself.
     bool IsAlone(Player* bot) const;
+    // A guild character in a party run, on the dungeon or the party job: it stays with its party, so upstream's
+    // unstuck does not take it home by hearthstone, and the dungeon job brings it back instead.
+    bool StaysWithParty(Player* bot) const;
+    // A line in the character's event log, from the engine's other parts.
+    void RecordEvent(uint32 guid, const std::string& kind, const std::string& detail) { Event(guid, kind, detail); }
     // The farm job's item and amount (0 for no limit), for the guild order value. False when not farming.
     bool GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const;
     // True for the item the character's job is collecting, which it must keep.
@@ -130,6 +135,7 @@ private:
         bool alone = false;         // in a group but with no member near, as its strategies were last built
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
         time_t invitedAt = 0;       // when the dungeon leader last invited its companion
+        uint32 runsDone = 0;        // dungeon runs finished on this order, for `runs`
 
         // The hourly measure, counted every check and written every few minutes; see guildbot_metric.
         uint32 xpLevel = 0, xpValue = 0;  // level and experience at the last check

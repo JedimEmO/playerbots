@@ -43,10 +43,16 @@ namespace
     constexpr time_t STRANDED_SECONDS = 3 * MINUTE;
     constexpr time_t HEARTH_RETRY_SECONDS = MINUTE;
     // At the stone: the leader uses it within this, and a member this near it follows the leader in by it.
+    // The member's reach is wide: some stones stand on a ledge above the road, out of reach of the paths
+    // below, where a member that fought its way off the ledge cannot climb back.
     constexpr float AT_STONE = 8.0f;
-    constexpr float NEAR_STONE = 40.0f;
+    constexpr float NEAR_STONE = 120.0f;
     // A follower farther than this from its leader on the same map travels to it, by the travel map's routes.
     constexpr float FOLLOW_BY_TRAVEL = 150.0f;
+
+    // Why the stone last turned each member away, so the event log has each new reason once.
+    std::mutex refusalLock;
+    std::map<uint32, std::string> stoneRefusals;
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
@@ -1081,6 +1087,11 @@ void GuildDungeon::FollowByStone(Player* member)
     std::string why;
     EnterByStone(member, leader->GetMapId(), why,
         EntranceNear(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ()));
+    std::lock_guard<std::mutex> guard(refusalLock);
+    std::string& last = stoneRefusals[member->GetGUIDLow()];
+    if (!why.empty() && why != last)
+        sGuildBotMgr.RecordEvent(member->GetGUIDLow(), "refused", why);
+    last = why;
 }
 
 TravelDestination* GuildDungeon::UseDestination(Player* bot) const
