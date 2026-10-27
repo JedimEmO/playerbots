@@ -16,8 +16,12 @@ std::map<uint32, uint32> GuildDungeon::lastEntry;
 std::mutex GuildDungeon::exitLock;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::exits;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::stones;
-std::map<uint32, WorldPosition> GuildDungeon::stonePlaces;
-bool GuildDungeon::stonesIndexed = false;
+namespace
+{
+    // Where each dungeon's meeting stone stands, by dungeon map; built once from the spawns.
+    std::map<uint32, WorldPosition> stonePlaces;
+    bool stonesIndexed = false;
+}
 
 namespace
 {

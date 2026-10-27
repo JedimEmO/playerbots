@@ -14,7 +14,7 @@ class Creature;
 class Map;
 class Player;
 struct AreaTrigger;
-namespace ai { class TravelDestination; class PlaceTravelDestination; }
+namespace ai { class TravelDestination; class PlaceTravelDestination; class WorldPosition; }
 
 // The dungeon job: a party of guild characters runs a five-player dungeon. The leader, normally the tank,
 // has the job; the others are on the party job with it as their leader. See docs/dungeons.md.
@@ -73,7 +73,7 @@ public:
     // The dungeon a stone's area names, or 0.
     static uint32 StoneMap(uint32 areaId);
     // Where the dungeon's stone stands; false when it has none.
-    static bool StonePlace(uint32 mapId, WorldPosition& place);
+    static bool StonePlace(uint32 mapId, ai::WorldPosition& place);
     // A guild character in a group, at the stone of the dungeon its leader is in: it goes in after the leader.
     static void FollowByStone(Player* member);
     // The stone, for the leader on its way to the dungeon; null when the dungeon has none.
@@ -142,8 +142,7 @@ private:
     static std::mutex exitLock;
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> exits;  // by dungeon map, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> stones; // by dungeon map, never freed
-    static std::map<uint32, WorldPosition> stonePlaces;                         // by dungeon map
-    static bool stonesIndexed;
+
     static std::mutex entryLock;
     static std::map<uint32, uint32> lastEntry;  // by group id: when a member last took the entrance, in ms
 };
