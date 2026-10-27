@@ -531,13 +531,10 @@ void GuildBotMgr::CheckJobs()
 
         if (c.job == "party")
         {
-            std::string why = KeepParty(c, bot);
-            if (why != c.reason)
-            {
-                c.reason = why;
-                if (why.empty())
-                    Event(guid, "party", "joined " + c.partyLeader);
-            }
+            bool wasJoined = !c.partyLeader.empty();
+            c.reason = KeepParty(c, bot);
+            if (!wasJoined && !c.partyLeader.empty())
+                Event(guid, "party", "joined " + c.partyLeader);
             continue;
         }
 
