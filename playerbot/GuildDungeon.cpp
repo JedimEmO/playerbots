@@ -255,7 +255,7 @@ std::string GuildDungeon::CheckParty(Player* leader, const Dungeon& dungeon, boo
             return who + " is level " + std::to_string(member->GetLevel()) + "; " + dungeon.name + " needs " + std::to_string(minLevel);
         }
 
-        // The core's own check at the entrance: level, key, quest, and the five new instances an hour.
+        // The core's own check at the entrance: level, key, quest, and the new instances an account may enter in an hour.
         uint32 misc = 0;
         switch (member->GetAreaTriggerLockStatus(dungeon.entrance, misc))
         {
@@ -277,7 +277,7 @@ std::string GuildDungeon::CheckParty(Player* leader, const Dungeon& dungeon, boo
             return who + " has not done quest " + std::to_string(misc) + " for " + dungeon.name;
         case AREA_LOCKSTATUS_TOO_MANY_INSTANCE:
             failed = true;
-            return who + "'s account entered five instances in the last hour";
+            return who + "'s account has entered its limit of new instances this hour";
         default:
             failed = true;
             return who + " may not enter " + dungeon.name;
