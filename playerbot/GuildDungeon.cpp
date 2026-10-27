@@ -172,15 +172,17 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
                 WorldPosition(back->target_mapId, back->target_X, back->target_Y, back->target_Z, back->target_Orientation),
                 "out of " + dungeon.name);
         dungeon.exit = exit.get();
+    }
 
-        WorldPosition stonePlace;
-        if (StonePlace(dungeon.mapId, stonePlace))
-        {
-            auto& stone = stones[dungeon.mapId];
-            if (!stone)
-                stone = std::make_unique<PlaceTravelDestination>(stonePlace, "the meeting stone of " + dungeon.name);
-            dungeon.stone = stone.get();
-        }
+    // The meeting stone; StonePlace takes the same lock, so this comes after it is let go.
+    WorldPosition stonePlace;
+    if (StonePlace(dungeon.mapId, stonePlace))
+    {
+        std::lock_guard<std::mutex> guard(exitLock);
+        auto& stone = stones[dungeon.mapId];
+        if (!stone)
+            stone = std::make_unique<PlaceTravelDestination>(stonePlace, "the meeting stone of " + dungeon.name);
+        dungeon.stone = stone.get();
     }
 
     // The party must be near the last boss's level: the one the table names, or else the highest.
