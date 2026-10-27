@@ -27,6 +27,8 @@ namespace
     constexpr time_t LOGIN_RETRY_SECONDS = 60;
     // A levelling character that earns no experience for this long is reported as stalled.
     constexpr time_t STALL_SECONDS = 15 * MINUTE;
+    // A group member farther than this from every other is on its own.
+    constexpr float ALONE_DISTANCE = 60.0f;
     // A second stall this soon after a reset sends the character home instead.
     constexpr time_t RECOVERY_WINDOW_SECONDS = 30 * MINUTE;
     // A target the character has not hurt in this long is out of its reach; it is passed over for a while.
@@ -122,6 +124,14 @@ std::string GuildBotMgr::GetActiveJob(uint32 guid) const
         return "idle";
 
     return c.job;
+}
+
+bool GuildBotMgr::IsAlone(Player* bot) const
+{
+    if (!bot->GetGroup())
+        return true;
+    auto it = characters.find(bot->GetGUIDLow());
+    return it != characters.end() && it->second.alone;
 }
 
 BotRoles GuildBotMgr::GetRole(uint32 guid) const
@@ -656,6 +666,26 @@ void GuildBotMgr::CheckJobs()
         if (dead && !c.dead)
             Event(guid, "died", std::to_string(bot->GetZoneId()));
         c.dead = dead;
+
+        // Cut off from its group, say outside a dungeon its party is in: it plays as a solo character until it is back.
+        bool alone = false;
+        if (Group* group = bot->GetGroup(); group && !dead)
+        {
+            alone = true;
+            for (GroupReference* ref = group->GetFirstMember(); ref && alone; ref = ref->next())
+            {
+                Player* member = ref->getSource();
+                if (member && member != bot && member->IsInWorld() && member->IsAlive() && member->GetMapId() == bot->GetMapId() &&
+                    member->GetDistance(bot) <= ALONE_DISTANCE)
+                    alone = false;
+            }
+        }
+        if (alone != c.alone)
+        {
+            c.alone = alone;
+            if (bot->GetPlayerbotAI())
+                bot->GetPlayerbotAI()->ResetStrategies(false);
+        }
 
         const time_t now = time(nullptr);
         uint64 progress = uint64(bot->GetLevel()) * 10000000 + bot->GetUInt32Value(PLAYER_XP);
@@ -1272,7 +1302,10 @@ std::list<std::string> GuildBotMgr::HandleDebug(const std::string& args)
         std::ostringstream target;
         target << "victim " << victim->GetName() << " health " << victim->GetHealth() << "/" << victim->GetMaxHealth()
                << " distance " << uint32(bot->GetDistance(victim)) << " height " << int32(victim->GetPositionZ() - bot->GetPositionZ())
-               << " sight " << (bot->IsWithinLOSInMap(victim) ? "yes" : "no") << " attacking us " << (victim->GetVictim() == bot ? "yes" : "no");
+               << " sight " << (bot->IsWithinLOSInMap(victim) ? "yes" : "no") << " attacking us " << (victim->GetVictim() == bot ? "yes" : "no")
+               << ", its victim " << (victim->GetVictim() ? victim->GetVictim()->GetName() : "none")
+               << ", in combat " << (victim->IsInCombat() ? "yes" : "no") << ", evading " << (victim->GetCombatManager().IsInEvadeMode() ? "yes" : "no")
+               << ", melee reach " << (bot->CanReachWithMeleeAttack(victim) ? "yes" : "no") << ", we fight " << (bot->IsInCombat() ? "yes" : "no");
         out.push_back(target.str());
     }
     else

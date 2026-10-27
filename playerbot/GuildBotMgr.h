@@ -40,6 +40,9 @@ public:
     std::string GetActiveJob(uint32 guid) const;
     // The role the player gave the character, which its talents follow; none if not a guild character.
     BotRoles GetRole(uint32 guid) const;
+    // A guild character on its own: in no group, or in one with no other member alive near it.
+    // Its strategies are then a solo character's, so a healer cut off from its party fights for itself.
+    bool IsAlone(Player* bot) const;
     // The farm job's item and amount (0 for no limit), for the guild order value. False when not farming.
     bool GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const;
     // True for the item the character's job is collecting, which it must keep.
@@ -106,6 +109,7 @@ private:
         bool stalled = false;
         time_t recoveredAt = 0;     // when the engine last reset a stalled character
         bool dead = false;
+        bool alone = false;         // in a group but with no member near, as its strategies were last built
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
     };
 

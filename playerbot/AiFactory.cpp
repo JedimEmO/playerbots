@@ -532,7 +532,8 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
 	{
         combatEngine->addStrategy("roll");
 
-        if (!player->GetGroup())
+        // A guild character cut off from its group plays as one on its own.
+        if (!player->GetGroup() || (sGuildBotMgr.IsGuildBot(player) && sGuildBotMgr.IsAlone(player)))
         {
             combatEngine->addStrategy("flee");
             combatEngine->addStrategy("boost");

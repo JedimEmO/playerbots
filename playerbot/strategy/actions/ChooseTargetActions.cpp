@@ -34,7 +34,7 @@ bool AttackAnythingAction::isUseful()
         return false;
 
     // A healer leaves the pulling to its party; a guild character on its own has no one else to pull.
-    bool alone = !bot->GetGroup() && sGuildBotMgr.IsGuildBot(bot);
+    bool alone = sGuildBotMgr.IsGuildBot(bot) && sGuildBotMgr.IsAlone(bot);
     if (ai->ContainsStrategy(STRATEGY_TYPE_HEAL) && !ai->HasStrategy("offdps", BotState::BOT_STATE_COMBAT) && !alone)
         return false;
 
