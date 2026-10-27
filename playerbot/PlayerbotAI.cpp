@@ -2919,6 +2919,17 @@ bool PlayerbotAI::IsHeal(Player* player, bool inGroup)
     return (botRoles & BOT_ROLE_HEALER) != 0;
 }
 
+bool PlayerbotAI::IsCaster(Player* player, bool inGroup)
+{
+    return IsRanged(player, inGroup) && player->getClass() != CLASS_HUNTER;
+}
+
+bool PlayerbotAI::IsCombo(Player* player)
+{
+    // 768 is Cat Form.
+    return player->getClass() == CLASS_ROGUE || (player->getClass() == CLASS_DRUID && player->HasAura(768));
+}
+
 bool PlayerbotAI::HasTargetExclusions() const
 {
     Engine* engine = engines[(uint8)BotState::BOT_STATE_COMBAT];

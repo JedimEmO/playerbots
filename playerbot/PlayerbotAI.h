@@ -488,6 +488,10 @@ public:
     static uint32 GetGroupTankNum(Player* player);
     bool IsRanged(Player* player, bool inGroup = true);
     bool IsMelee(Player* player, bool inGroup = true);
+    // Ranged and not a hunter: a class whose damage is mostly spells with a cast time.
+    bool IsCaster(Player* player, bool inGroup = true);
+    // A rogue, or a druid in cat form: a class that builds combo points on one target.
+    static bool IsCombo(Player* player);
     Creature* GetCreature(ObjectGuid guid) const;
     Creature* GetAnyTypeCreature(ObjectGuid guid) const;
     Unit* GetUnit(ObjectGuid guid);

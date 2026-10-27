@@ -109,6 +109,7 @@
 #include "AvoidCreatureListValue.h"
 #include "CreatureIdValue.h"
 #include "GroupTankValues.h"
+#include "EstimatedLifetimeValue.h"
 
 namespace ai
 {
@@ -313,6 +314,8 @@ namespace ai
             creators["boss target"] = [](PlayerbotAI* ai) { return new BossTargetValue(ai); };
             creators["main tank"] = [](PlayerbotAI* ai) { return new MainTankValue(ai); };
             creators["assist tank"] = [](PlayerbotAI* ai) { return new AssistTankValue(ai); };
+            creators["estimated lifetime"] = [](PlayerbotAI* ai) { return new EstimatedLifetimeValue(ai); };
+            creators["estimated group dps"] = [](PlayerbotAI* ai) { return new EstimatedGroupDpsValue(ai); };
 
             creators["bg type"] = [](PlayerbotAI* ai) { return new BgTypeValue(ai); };
             creators["rpg bg type"] = [](PlayerbotAI* ai) { return new RpgBgTypeValue(ai); };
