@@ -400,7 +400,11 @@ void GuildBotMgr::CheckChase(Character& c, Player* bot)
         return;
     }
 
-    if (now - chase.since < UNREACHED_TARGET_SECONDS || victim->GetHealth() < victim->GetMaxHealth())
+    // Hurt but no lower all this time, and fighting no one: a creature its blows no longer touch. A Reanimated Corpse
+    // in Scholomance turns invincible at 1 health and lies down until it heals; the tank swung at one for half an
+    // hour while the run stood still.
+    const bool untouchable = victim->GetHealth() < victim->GetMaxHealth() && !victim->GetVictim();
+    if (now - chase.since < UNREACHED_TARGET_SECONDS || (victim->GetHealth() < victim->GetMaxHealth() && !untouchable))
         return;
 
     // Untouched at full health all this time: a creature it cannot get to, in a mine shaft or on a ledge.
