@@ -112,6 +112,8 @@ namespace
         { 70, 2748 },    // Uldaman: Archaedas
         { 209, 7267 },   // Zul'Farrak: Chief Ukorz Sandscalp
         { 349, 12201 },  // Maraudon: Princess Theradras
+        { 109, 5709 },   // Sunken Temple: the Shade of Eranikus, attackable once Jammal'an is dead
+        { 289, 10508 },  // Scholomance: Ras Frostwhisper; Darkmaster Gandling has no spawn until the six rooms' masters die
     };
 
     // Elites placed more than once that are bosses all the same, which the boss travel destinations leave out,
@@ -139,6 +141,23 @@ namespace
         // Maraudon: Vyletongue and Celebras stand nearer the orange arrival than the purple one, so these rows list their bosses.
         { "maraudon_orange", "Maraudon Orange", 3133, 12258, { 13282, 12258 } },          // Noxxion, Razorlash
         { "maraudon_purple", "Maraudon Purple", 3134, 12225, { 12236, 12237, 12225 } },   // Lord Vyletongue, Meshlok the Harvester, Celebras the Cursed
+        // Dire Maul: three wings on one map, each with its own entrance, and more triggers besides (the courtyard, the
+        // east back door, the west side door), so every row lists its bosses.
+        // East: Zevrim Thornhoof, Hydrospawn, Lethtendris, Alzzin the Wildshaper. Pusillin and Old Ironbark spawn friendly.
+        { "dire_maul_east", "Dire Maul East", 3183, 11492, { 11490, 13280, 14327, 11492 } },
+        // West: Tendris Warpwood, Illyanna Ravenoak, Magister Kalendris, Immol'thar, Prince Tortheldrin.
+        { "dire_maul_west", "Dire Maul West", 3186, 11486, { 11489, 11488, 11487, 11496, 11486 } },
+        // North: Guard Mol'dar, Stomper Kreeg, Guard Fengus, Guard Slip'kik, Captain Kromcrush, King Gordok, Cho'Rush.
+        { "dire_maul_north", "Dire Maul North", 3189, 11501, { 14326, 14322, 14321, 14323, 14325, 14324, 11501 } },
+        // Stratholme: the living side by the front gate, the dead side by the service entrance.
+        // Live: The Unforgiven, Cannon Master Willey, Archivist Galford, Malor the Zealous, Grand Crusader Dathrohan.
+        { "stratholme_live", "Stratholme Live", 2216, 10812, { 10516, 10997, 10811, 11032, 10812 } },
+        // Undead: Magistrate Barthilas, Baroness Anastari, Nerub'enkan, Maleki the Pallid, Baron Rivendare.
+        { "stratholme_undead", "Stratholme Undead", 2214, 10440, { 10435, 10436, 10437, 10438, 10440 } },
+        // Blackrock Depths, a first half with no key: the prison, the Dark Iron Highway and the Black Anvil.
+        // High Interrogator Gerstahn, Lord Roccor, Houndmaster Grebmar, Pyromancer Loregrain, Lord Incendius,
+        // Fineous Darkvire, Ambassador Flamelash. Shadowforge City and the Lyceum are behind Shadowforge Key locks.
+        { "blackrock_depths", "Blackrock Depths", 1466, 9156, { 9018, 9025, 9319, 9024, 9017, 9056, 9156 } },
     };
 
     // Friendly creatures a party has to speak to on its way, as a player would, with the gossip action to pick,
@@ -214,6 +233,14 @@ namespace
     const KillFirst KILLS[] = {
         // Shadowfang Keep: Fenrus's death brings Arugal's four voidwalkers, and the Sorcerer's Gate opens when all four die.
         { 33, 4627, 3927, 18972 },
+        // Sunken Temple: the six Atal'ai protectors on the balcony ring, placed by a spawn group, keep Jammal'an's barrier
+        // up and him and Ogom immune until all six are dead.
+        { 109, 5712, 5710, 1090034 },  // Zolo
+        { 109, 5713, 5710, 1090034 },  // Gasher
+        { 109, 5714, 5710, 1090034 },  // Loro
+        { 109, 5715, 5710, 1090034 },  // Hukku
+        { 109, 5716, 5710, 1090034 },  // Zul'Lor
+        { 109, 5717, 5710, 1090034 },  // Mijan
         // Zul'Farrak: Witch Doctor Zum'rah turns hostile when a player comes near and raises Zul'Farrak Zombies from the
         // forty Shallow Graves around him, one every 20 seconds, until he dies. He spawns friendly, so he is no boss of
         // the run; with no boss of its own the row has him killed whenever he is near and hostile.
