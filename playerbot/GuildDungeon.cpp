@@ -71,6 +71,11 @@ namespace
     // A leader more than this below its stone is not at it, however near it is on the map.
     constexpr float STONE_BELOW = 10.0f;
     constexpr float NEAR_STONE = 120.0f;
+    // A stone farther than this, with the party this near the entrance's trigger, is passed by: the party goes in by
+    // the entrance, as the stone would take it in. Dire Maul East's way out after Alzzin puts the party 100 yards from
+    // the east entrance, on the heights 900 yards from the stone.
+    constexpr float STONE_FAR = 500.0f;
+    constexpr float BY_ENTRANCE = 120.0f;
     // A follower farther than this from its leader on the same map travels to it, by the travel map's routes.
     constexpr float FOLLOW_BY_TRAVEL = 150.0f;
     // Or this far above or below it, outside: follow walks under the leader but takes no lift up to it.
@@ -456,6 +461,13 @@ namespace
             length += nodes[i]->linkDistanceTo(nodes[i + 1]);
         }
         return length;
+    }
+
+    // Whether a character stands by an entrance's trigger, on the trigger's own map.
+    bool ByEntrance(Player* player, AreaTrigger const* entrance, float range)
+    {
+        AreaTriggerEntry const* entry = entrance ? sAreaTriggerStore.LookupEntry(entrance->entry) : nullptr;
+        return entry && player->GetMapId() == entry->mapid && player->GetDistance(entry->x, entry->y, entry->z) <= range;
     }
 
     // Whether a point is near a way off the map: an area trigger on it that teleports elsewhere, its radius or box
@@ -1117,8 +1129,12 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     if (run.phase == Phase::Check && (why.empty() || (farOnly && dungeon.stone)))
         run.phase = Phase::Go;
 
-    // With a meeting stone, the leader goes to it and in by it, once the party is with it.
-    if (run.phase == Phase::Go && dungeon.stone && why.empty() && dungeon.stone->DistanceTo(WorldPosition(leader)) <= AT_STONE)
+    // With a meeting stone, the leader goes to it and in by it, once the party is with it. With the stone far off and
+    // the party by the entrance, as after a reset in Dire Maul, it goes in by the entrance instead: no route led from
+    // Dire Maul's exterior down to its stone, and the party stood outside for the rest of the hour.
+    if (run.phase == Phase::Go && dungeon.stone && why.empty()
+        && (dungeon.stone->DistanceTo(WorldPosition(leader)) <= AT_STONE
+            || (dungeon.stone->DistanceTo(WorldPosition(leader)) > STONE_FAR && ByEntrance(leader, dungeon.entrance, BY_ENTRANCE))))
     {
         std::string refused;
         if (!EnterByStone(leader, dungeon.mapId, refused, dungeon.entrance) && !refused.empty())
@@ -2576,13 +2592,15 @@ void GuildDungeon::FollowByStone(Player* member)
     MapEntry const* map = sMapStore.LookupEntry(leader->GetMapId());
     if (!map || !map->IsNonRaidDungeon())
         return;
+    // In by the entrance of the wing the leader is in: by the stone, or by the entrance itself when the member stands by it.
+    AreaTrigger const* entrance = EntranceNear(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ());
     WorldPosition stone;
-    if (!StonePlace(leader->GetMapId(), stone) || stone.getMapId() != member->GetMapId() || stone.distance(WorldPosition(member)) > NEAR_STONE)
+    const bool byStone = StonePlace(leader->GetMapId(), stone) && stone.getMapId() == member->GetMapId()
+        && stone.distance(WorldPosition(member)) <= NEAR_STONE;
+    if (!byStone && !ByEntrance(member, entrance, BY_ENTRANCE))
         return;
-    // In by the entrance of the wing the leader is in.
     std::string why;
-    EnterByStone(member, leader->GetMapId(), why,
-        EntranceNear(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ()));
+    EnterByStone(member, leader->GetMapId(), why, entrance);
     std::lock_guard<std::mutex> guard(refusalLock);
     std::string& last = stoneRefusals[member->GetGUIDLow()];
     if (!why.empty() && why != last)
