@@ -244,6 +244,11 @@ namespace
     // Disciple of Naralex, and once arrived the travel target goes on counting as working there while fights take the
     // leader off, 200 yards from the gong in Razorfen Downs.
     constexpr float APPROACH_RANGE = 60.0f;
+    // A leader whose moves to its next boss all fail where it stands walks to the nearest travel node this near,
+    // at most this often, and the travel restarts once it has stopped there or this long has passed.
+    constexpr float NODE_WALK_RANGE = 300.0f;
+    constexpr time_t NODE_WALK_SECONDS = 2 * MINUTE;
+    constexpr time_t NODE_WALK_HOLD_SECONDS = 30;
     // A boss that fell asleep as the next boss, such as Mograine lying as dead until Whitemane raises him, keeps the leader
     // by it this long, fighting what comes, before the next boss after it comes first.
     constexpr time_t SLEEPER_WAIT_SECONDS = 3 * MINUTE;
@@ -1783,8 +1788,25 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
         const bool forNext = target && (run.nextPlace ? target->GetDestination() == run.nextPlace : target->GetEntry() == next);
         const TravelStatus status = target ? target->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
-        const bool stopped = (status == TravelStatus::TRAVEL_STATUS_WORK || status == TravelStatus::TRAVEL_STATUS_COOLDOWN)
+        bool stopped = (status == TravelStatus::TRAVEL_STATUS_WORK || status == TravelStatus::TRAVEL_STATUS_COOLDOWN)
             && !fighting && bossPlace && bossDistance > APPROACH_RANGE;
+        // Cooled down after its moves failed one after another, with no path from where it stands, the leader first walks
+        // to the nearest travel node: by the way to Old Serra'kis neither the travel map nor the navmesh led on from the
+        // leader's place, and the restarted travel failed there again and again. The travel waits while it walks.
+        if (forNext && stopped && status == TravelStatus::TRAVEL_STATUS_COOLDOWN && target->IsMaxRetry(true)
+            && now - run.nodeWalkAt >= NODE_WALK_SECONDS && leader->IsInWorld() && !leader->IsBeingTeleported())
+        {
+            run.nodeWalkAt = now;
+            if (TravelNode* node = sTravelNodeMap.getNode(WorldPosition(leader), nullptr, NODE_WALK_RANGE))
+                if (node->getPosition()->getMapId() == leader->GetMapId())
+                {
+                    WorldPosition* at = node->getPosition();
+                    leader->GetMotionMaster()->MovePoint(0, at->getX(), at->getY(), at->getZ(), FORCED_MOVEMENT_RUN);
+                    update.events.push_back({ "recovery", "to the nearest node, " + node->getName() });
+                }
+        }
+        if (stopped && now - run.nodeWalkAt < NODE_WALK_HOLD_SECONDS && leader->IsMoving())
+            stopped = false;
         if (target && (forNext ? stopped : target->IsActive()))
             target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
         // Restarted, it also forgets its last path: a path kept from elsewhere ends near the boss and is taken again,
