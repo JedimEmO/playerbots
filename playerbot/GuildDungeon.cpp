@@ -192,6 +192,8 @@ namespace
     // this long after its last use, with nothing of its wave left to hunt, is given up on: some of a wave never come down.
     constexpr uint32 WAVE_GIVE_UPS = 2;
     constexpr time_t WAVE_WAIT_SECONDS = 5 * MINUTE;
+    // An object used several times that is not used again this long after its last use is given up on, whatever holds it.
+    constexpr time_t USE_AGAIN_SECONDS = 10 * MINUTE;
 
     // Creatures with no spawn of their own, brought by an event, that a party kills before a boss, as players would:
     // the creature, the boss, and the door their deaths open. The step is done when none is alive near the leader,
@@ -204,6 +206,14 @@ namespace
         // forty Shallow Graves around him, one every 20 seconds, until he dies. He spawns friendly, so he is no boss of
         // the run; with no boss of its own the row has him killed whenever he is near and hostile.
         { 209, 7271, 0, 0 },
+        // Scarlet Monastery Cathedral: Mograine calls every Abbot, Centurion, Champion, Chaplain, Monk and Wizard within
+        // 80 yards into the fight, some fifty elites at once. As players do, the party clears them before it pulls him.
+        { 189, 4303, 3976, 0 },
+        { 189, 4301, 3976, 0 },
+        { 189, 4302, 3976, 0 },
+        { 189, 4299, 3976, 0 },
+        { 189, 4540, 3976, 0 },
+        { 189, 4300, 3976, 0 },
         // Zul'Farrak: Nekrum Gutchewer and Shadowpriest Sezz'ziz come down the pyramid last; their deaths open the End Door.
         { 209, 7796, 7267, 146084 },
         { 209, 7275, 7267, 146084 },
@@ -1525,6 +1535,14 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 return;
             }
             run.useSpawn = use.spawn;
+            // Not used again long after its last use, shut or not: given up on, and on to the next boss.
+            if (times && now - run.usedAt[use.spawn] >= USE_AGAIN_SECONDS)
+            {
+                run.used.insert(use.spawn);
+                update.events.push_back({ "gave_up", "the " + name + " was not used again, " + std::to_string(times) + " of "
+                    + std::to_string(use.times) + " times" });
+                continue;
+            }
             // Used, and shut until its wave is dead: the party hunts the wave, where it is.
             if (times && object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT) && use.waves[0])
             {
@@ -1597,7 +1615,10 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             }
             Approach(leader, object, use.place, USE_DISTANCE - 1.0f, USE_STAND, run);
             run.headwaySince = now;
-            update.reason = "on the way to use the " + name + " in " + dungeon.name + ", " + count;
+            const std::string state = !object->IsSpawned() ? "not spawned" : object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT) ? "shut"
+                : object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_IN_USE) ? "in use" : "usable";
+            update.reason = "on the way to use the " + name + " (" + state + ", " + std::to_string(uint32(leader->GetDistance(object)))
+                + " yards) in " + dungeon.name + ", used " + std::to_string(times) + " of " + std::to_string(use.times) + " times, " + count;
             return;
         }
         if (use.wakes)
