@@ -62,6 +62,8 @@ namespace
     // on this map: the party passes it over, or fails the run at the last boss.
     constexpr float HEADWAY = 10.0f;
     constexpr time_t NO_HEADWAY_SECONDS = 5 * MINUTE;
+    // A boss the leader has given up on this many times, untouched at full health, is out of reach: passed over.
+    constexpr uint32 GIVE_UPS_TO_PASS = 2;
     // Before each boss the leader waits this long for a member farther off than NEAR_LEADER, then goes on without it.
     constexpr time_t PARTY_WAIT_SECONDS = 3 * MINUTE;
 
@@ -1522,11 +1524,18 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     const bool nearer = bossPlace && (run.headwayBest < 0.0f || bossDistance < run.headwayBest - HEADWAY);
     if (nearer)
         run.headwayBest = bossDistance;
-    if (idle || nearer)
+    // Given up on twice: the leader fought the boss and left it untouched at full health for 45 seconds two times,
+    // out of reach of its blows and spells, such as Lady Sarevess in her pool. Those fights hold the clock above, and
+    // the leader would take the boss again at once, so the party passes it over. Once could be a hiccup on the way in.
+    Creature* bossCreature = map->GetCreature(run.nextSpawn);
+    const bool givenUp = !dungeon.talks.count(next) && bossCreature && bossCreature->IsAlive()
+        && sGuildBotMgr.GiveUps(leader, bossCreature->GetObjectGuid()) >= GIVE_UPS_TO_PASS;
+    if ((idle || nearer) && !givenUp)
         run.headwaySince = now;
-    else if (now - run.headwaySince >= NO_HEADWAY_SECONDS)
+    else if (givenUp || now - run.headwaySince >= NO_HEADWAY_SECONDS)
     {
-        const std::string why = "no nearer to " + BossName(next) + " than " + std::to_string(uint32(run.headwayBest)) + " yards in "
+        const std::string why = givenUp ? "gave up on " + BossName(next) + " twice, untouched at full health"
+            : "no nearer to " + BossName(next) + " than " + std::to_string(uint32(run.headwayBest)) + " yards in "
             + std::to_string(NO_HEADWAY_SECONDS / MINUTE) + " minutes";
         if (next == dungeon.lastBoss)
         {

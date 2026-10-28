@@ -65,6 +65,8 @@ public:
     uint8 GetTankOrder(uint32 guid) const;
     // A creature the character gave up on as out of its reach, for a while; target picking passes over it.
     bool IsIgnoredTarget(Player* bot, ObjectGuid target) const;  // also loot it gave up on
+    // How many times the character has given up on this creature, as out of its reach.
+    uint32 GiveUps(Player* bot, ObjectGuid target) const;
     // Travel destinations, by entry, the character left because it could not work them; set aside for a while.
     std::set<int32> LeftDestinations(Player* bot) const;
     // The experience per second that levelling characters earned at a grind spot, by creature entry, from all of them
@@ -203,6 +205,7 @@ private:
     struct LootChase { ObjectGuid target; time_t since = 0; };
     std::map<uint32, LootChase> lootChases;                     // per character: the loot it is after
     std::map<uint32, std::map<ObjectGuid, time_t>> ignoredTargets; // per character: given up, until
+    std::map<uint32, std::map<ObjectGuid, uint32>> giveUpCounts;  // per character: how often it gave up on each creature
     std::map<uint32, std::vector<time_t>> giveUps;              // per character: recent give-ups
     std::map<uint32, std::map<int32, time_t>> leftDestinations;  // per character: destination entry, until
     struct SpotYield { uint64 work = 0, experience = 0; };

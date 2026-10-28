@@ -204,6 +204,15 @@ bool GuildBotMgr::IsIgnoredTarget(Player* bot, ObjectGuid target) const
     return t != it->second.end() && t->second > time(nullptr);
 }
 
+uint32 GuildBotMgr::GiveUps(Player* bot, ObjectGuid target) const
+{
+    auto it = giveUpCounts.find(bot->GetGUIDLow());
+    if (it == giveUpCounts.end())
+        return 0;
+    auto t = it->second.find(target);
+    return t == it->second.end() ? 0 : t->second;
+}
+
 bool GuildBotMgr::SpotRate(int32 entry, float& experiencePerSecond) const
 {
     std::lock_guard<std::mutex> guard(spotYieldLock);
@@ -341,6 +350,12 @@ void GuildBotMgr::CheckChase(Character& c, Player* bot)
     for (auto it = ignored.begin(); it != ignored.end();)
         it = it->second <= now ? ignored.erase(it) : std::next(it);
     ignored[victim->GetObjectGuid()] = now + IGNORE_TARGET_SECONDS;
+    // The count outlives the ignore, so a boss given up on twice in a run is known as out of reach. Creatures of a
+    // new instance have new guids, so the count is dropped once it holds many.
+    auto& counts = giveUpCounts[c.guid];
+    if (counts.size() > 200)
+        counts.clear();
+    ++counts[victim->GetObjectGuid()];
 
     Event(c.guid, "gave_up", victim->GetName());
     chases.erase(c.guid);
