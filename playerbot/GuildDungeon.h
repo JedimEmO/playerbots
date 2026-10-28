@@ -227,6 +227,7 @@ private:
         // With the leader out, where each member inside last stood still, and since when, by guid.
         struct Still { float x = 0.0f, y = 0.0f, z = 0.0f; time_t since = 0; };
         std::map<uint32, Still> stillInside;
+        bool insideReached = false;    // the leader has come by the way out inside: from now on it goes out
         std::string cleared;           // what the run did, for the job's reason once it is done
     };
 

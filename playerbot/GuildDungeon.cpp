@@ -1763,8 +1763,12 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
             if (PlayerbotAI* ai = leader->GetPlayerbotAI())
             {
                 TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-                // Far inside, the place by the way out; near it, the way out itself, as ExitDestination gives them.
-                TravelDestination* wanted = dungeon.inside && dungeon.inside->DistanceTo(WorldPosition(leader)) > EXIT_NEAR
+                // Far inside, the place by the way out; once the leader has come by it, the way out itself, for good:
+                // a leader that went back to the place each time it drifted off it, fighting by the entrance in
+                // Uldaman, switched every few seconds and never set out.
+                if (dungeon.inside && dungeon.inside->DistanceTo(WorldPosition(leader)) <= EXIT_NEAR)
+                    run.insideReached = true;
+                TravelDestination* wanted = dungeon.inside && !run.insideReached
                     ? static_cast<TravelDestination*>(dungeon.inside) : static_cast<TravelDestination*>(dungeon.exit);
                 if (target && target->IsActive() && target->GetDestination() != wanted)
                     target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
@@ -2190,7 +2194,7 @@ TravelDestination* GuildDungeon::ExitDestination(Player* bot) const
     // out, as from Verdan in Wailing Caverns, and the way out leads to another map, which no walk by the movement maps
     // reaches. The place inside is on the dungeon's own map, so a walk does, and from it the route out is a short one.
     const Dungeon& dungeon = it->second.dungeon;
-    if (dungeon.inside && dungeon.inside->DistanceTo(WorldPosition(bot)) > EXIT_NEAR)
+    if (dungeon.inside && !it->second.insideReached && dungeon.inside->DistanceTo(WorldPosition(bot)) > EXIT_NEAR)
         return dungeon.inside;
     return dungeon.exit;
 }
