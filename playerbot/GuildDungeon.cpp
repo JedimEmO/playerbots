@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <sstream>
 
 using namespace ai;
 
@@ -346,6 +348,32 @@ namespace
             if (slot.guid == guid)
                 return slot.name;
         return "a member";
+    }
+
+    // Where a creature on an escort stands, for the reason while the party waits on it: how far it is from its spawn,
+    // its movement type, the last point of its path it reached, and what holds it there, if anything does.
+    // The reason has room for 255 characters, so the words are short.
+    std::string WalkState(Creature* creature, uint32 spawn)
+    {
+        std::ostringstream out;
+        out << " (";
+        if (CreatureData const* data = sObjectMgr.GetCreatureData(spawn))
+            out << uint32(creature->GetDistance(data->posX, data->posY, data->posZ)) << " yd from spawn, ";
+        MotionMaster* motion = creature->GetMotionMaster();
+        out << "move " << uint32(motion->GetCurrentMovementGeneratorType());
+        std::ostringstream path;
+        motion->GetWaypointPathInformation(path);
+        const std::string pathText = path.str();
+        if (size_t at = pathText.find("WP: "); at != std::string::npos)
+            out << ", point " << std::strtoul(pathText.c_str() + at + 4, nullptr, 10);
+        out << ", combat " << (creature->IsInCombat() ? "yes" : "no");
+        if (Unit* victim = creature->GetVictim())
+            out << " with " << victim->GetName();
+        out << ", paused " << (creature->hasUnitState(UNIT_STAT_WAYPOINT_PAUSED) ? "yes" : "no");
+        out << ", held " << (creature->hasUnitState(UNIT_STAT_NOT_MOVE) ? "yes" : "no");
+        out << ", casting " << (creature->IsNonMeleeSpellCasted(false, false, true, true) ? "yes" : "no");
+        out << ", moving " << (creature->IsStopped() ? "no" : "yes") << ")";
+        return out.str();
     }
 }
 
@@ -1260,7 +1288,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 {
                     HoldNear(leader, creature);
                     run.holding = true;
-                    talkWait = BossName(entry) + " to finish its walk";
+                    talkWait = BossName(entry) + " to finish its walk" + WalkState(creature, dungeon.spawns[i].front());
                 }
                 else
                     talkWait = BossName(entry) + " to open the " + doorName;
