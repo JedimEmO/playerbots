@@ -105,6 +105,15 @@ void LootObject::Refresh(Player* bot, ObjectGuid guid, bool debug)
             return;
         }
 
+        // A door is no loot for a guild character, locked or not: a dungeon's doors open by its events, such as the
+        // Temple Door in Uldaman, and trying to open one held the leader from the Altar of Archaedas, 45 seconds a try.
+        if (go->GetGoType() == GAMEOBJECT_TYPE_DOOR && sGuildBotMgr.IsGuildBot(bot))
+        {
+            if (debug)
+                ai->TellDebug(ai->GetMaster(), "Go is a door.", "debug loot");
+            return;
+        }
+
         bool isQuestItemOnly = false;
 
 #ifdef MANGOSBOT_TWO
