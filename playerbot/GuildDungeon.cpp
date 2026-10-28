@@ -6,6 +6,7 @@
 #include "playerbot/TravelNode.h"
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
+#include "Maps/InstanceData.h"
 #include "AI/ScriptDevAI/ScriptDevAIMgr.h"
 #include "AI/ScriptDevAI/include/sc_gossip.h"
 #include "Grids/GridNotifiers.h"
@@ -146,7 +147,8 @@ namespace
     // so it is used again after a wipe puts the boss back to sleep; any other is used once.
     // An object used several times is used each time it can be, out of combat, and the step is done
     // when the creature its last use brings is dead. One with no boss is due when the leader comes near it.
-    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; bool wakes; uint32 times = 1; uint32 brings = 0; };
+    // A row can name an encounter of the instance script whose state the `used` event reports, before and after the use.
+    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; bool wakes; uint32 times = 1; uint32 brings = 0; uint32 report = 0; };
     const UseObject USES[] = {
         // Blackfathom Deeps: the four Fires of Aku'mai, lit once Kelris is dead, open the way to Aku'mai.
         { 48, 21118, 1, 4829, false },
@@ -154,7 +156,8 @@ namespace
         { 48, 21120, 1, 4829, false },
         { 48, 21121, 1, 4829, false },
         // Uldaman: the Altar of Archaedas is a ritual for three. Its spell wakes him, and he attacks the first user.
-        { 70, 133234, 3, 2748, true },
+        // The event reports TYPE_ARCHAEDAS (2): 0 not started, 1 in progress, 2 failed, 3 done, 4 waking.
+        { 70, 133234, 3, 2748, true, 1, 0, 2 },
         // Razorfen Downs: the Gong brings a wave of Tomb Fiends, then one of Tomb Reavers, then Tuten'kash.
         // It can be rung again once the wave is dead. It comes before Mordresh Fire Eye, since the route between the bosses
         // does not come within 60 yards of it.
@@ -507,6 +510,7 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         step.wakes = use.wakes;
         step.times = std::max(use.times, 1u);
         step.brings = use.brings;
+        step.report = use.report;
         WorldPosition place;
         auto findSpawn = [&](auto const& pair)
         {
@@ -1468,6 +1472,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             // The core's count of the object's users after each use, for the event: a use it took raises it,
             // and a ritual that went off clears it.
             std::string counts;
+            InstanceData* script = map->GetInstanceData();
+            const std::string stateBefore = script && use.report ? std::to_string(script->GetData(use.report)) : "";
             auto useBy = [&](Player* user)
             {
                 WorldPacket packet(CMSG_GAMEOBJ_USE);
@@ -1500,7 +1506,10 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 return;
             }
             run.usedAt[use.spawn] = now;
-            update.events.push_back({ "used", use.users > 1 && !counts.empty() ? name + ", users counted " + counts : name });
+            std::string detail = use.users > 1 && !counts.empty() ? name + ", users counted " + counts : name;
+            if (script && use.report)
+                detail += ", encounter " + std::to_string(use.report) + " state " + stateBefore + " to " + std::to_string(script->GetData(use.report));
+            update.events.push_back({ "used", detail });
             if (!use.wakes)
             {
                 run.used.insert(use.spawn);

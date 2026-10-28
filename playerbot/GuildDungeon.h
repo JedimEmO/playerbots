@@ -168,7 +168,7 @@ private:
         // and whether it wakes the boss, so that the step is due for as long as the boss sleeps.
         // An object used several times, such as a gong, is used each time it can be, and is done when what it brings is dead.
         struct Use { uint32 entry = 0; uint32 spawn = 0; uint32 users = 1; int32 before = 0; bool wakes = false;
-                     uint32 times = 1; uint32 brings = 0; ai::PlaceTravelDestination* place = nullptr; };
+                     uint32 times = 1; uint32 brings = 0; uint32 report = 0; ai::PlaceTravelDestination* place = nullptr; };
         std::vector<Use> uses;
         // Creatures to kill before a boss: their entry, the boss, and the spawn of the door their deaths open, or 0.
         struct Kill { uint32 entry = 0; int32 before = 0; uint32 doorSpawn = 0; };
