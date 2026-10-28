@@ -8,6 +8,8 @@
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/LootStrategyValue.h"
 #include "playerbot/strategy/values/ItemUsageValue.h"
+#include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/SharedValueContext.h"
 
@@ -301,6 +303,16 @@ bool StoreLootAction::Execute(Event& event)
         p >> lootslot_type;     // 0 = can get, 1 = look only, 2 = master get
 
         ItemQualifier itemQualifier(itemid, ((int32)randomPropertyId));
+
+        // Under master loot a guild character that is the master looter gives an item a step of its dungeon needs
+        // to itself, as a player leading the run would; the rest it leaves for the master looter's choice.
+        if (lootslot_type == LOOT_SLOT_MASTER && sGuildBotMgr.IsGuildBot(bot) && GuildDungeon::IsStepItem(bot->GetMapId(), itemid))
+        {
+            WorldPacket give(CMSG_LOOT_MASTER_GIVE, 8 + 1 + 8);
+            give << guid << itemindex << bot->GetObjectGuid();
+            bot->GetSession()->HandleLootMasterGiveOpcode(give);
+            continue;
+        }
 
 		if (lootslot_type != LOOT_SLOT_NORMAL
 #ifndef MANGOSBOT_ZERO

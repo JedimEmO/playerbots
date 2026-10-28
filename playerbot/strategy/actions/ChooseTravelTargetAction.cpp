@@ -318,8 +318,94 @@ inline std::string PrintPartion(uint32 sqPartition)
 }
 
 //Sets the target to the best destination.
+namespace
+{
+    // How a levelling guild character weighs a grind spot: what it expects to earn there in an hour, walk included.
+    // A visit stays about this long, and the walk goes at about this pace, the path being longer than the line.
+    constexpr float GRIND_STAY_SECONDS = 15.0f * MINUTE;
+    constexpr float GRIND_WALK_YARDS_PER_SECOND = 5.0f;
+    // It weighs the active spots of the nearest ranges that have any, this many, and at most this many spots.
+    constexpr uint32 GRIND_RANGES = 2;
+    constexpr size_t GRIND_CANDIDATES = 30;
+}
+
+// A levelling guild character: the active spot with the most experience expected per hour, walk included,
+// among the nearest ranges. A spot no one has worked long enough counts at the average of those that have,
+// so with no rates known this is the nearest active spot. Upstream's 10% skip to a farther range is not used.
+bool ChooseTravelTargetAction::SetBestGrindTarget(Player* requester, TravelTarget* target, PartitionedTravelList& partitionedList)
+{
+    struct Candidate { TravelDestination* destination; WorldPosition* position; float distance; float rate; bool known; };
+    std::vector<Candidate> candidates;
+    const PlayerTravelInfo info(bot);
+    WorldPosition center(requester ? requester : bot);
+    bool distanceCheck = true;
+    uint32 ranges = 0;
+
+    for (auto& [partition, travelPointList] : partitionedList)
+    {
+        bool any = false;
+        for (auto& [destination, position, distance] : travelPointList)
+        {
+            if (distanceCheck)
+            {
+                if (position->distance(center) > distance * 2 && position->distance(center) > 100)
+                    return false;
+                distanceCheck = false;
+            }
+            if (!destination->IsActive(bot, info))
+                continue;
+            any = true;
+            Candidate candidate = { destination, position, distance, 0.0f, false };
+            candidate.known = sGuildBotMgr.SpotRate(destination->GetEntry(), candidate.rate);
+            candidates.push_back(candidate);
+            if (candidates.size() >= GRIND_CANDIDATES)
+                break;
+        }
+        if ((any && ++ranges >= GRIND_RANGES) || candidates.size() >= GRIND_CANDIDATES)
+            break;
+    }
+
+    if (candidates.empty())
+        return false;
+
+    float knownSum = 0.0f;
+    uint32 knownCount = 0;
+    for (const Candidate& candidate : candidates)
+        if (candidate.known)
+        {
+            knownSum += candidate.rate;
+            knownCount++;
+        }
+    const float averageRate = knownCount ? knownSum / knownCount : 1.0f;
+
+    const Candidate* best = nullptr;
+    float bestScore = -1.0f;
+    for (const Candidate& candidate : candidates)
+    {
+        const float rate = candidate.known ? candidate.rate : averageRate;
+        const float walk = candidate.distance / GRIND_WALK_YARDS_PER_SECOND;
+        const float score = rate * GRIND_STAY_SECONDS / (GRIND_STAY_SECONDS + walk);
+        if (score > bestScore)
+        {
+            best = &candidate;
+            bestScore = score;
+        }
+    }
+
+    target->SetTarget(best->destination, best->position);
+    ai->TellDebug(requester, "Grind spot " + best->destination->GetTitle() + " at " + std::to_string(uint32(best->distance)) + "y, "
+        + std::to_string(uint32(bestScore * HOUR)) + " experience an hour expected, of " + std::to_string(candidates.size()) + " spots.", "debug travel");
+    return true;
+}
+
 bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* target, PartitionedTravelList& partitionedList, bool onlyActive)
 {
+    // A levelling guild character weighs its grind spots by experience and walk.
+    if (!target->IsForced() && !partitionedList.empty() && sGuildBotMgr.IsGuildBot(bot)
+        && sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) == "level"
+        && dynamic_cast<GrindTravelDestination*>(std::get<0>(partitionedList.begin()->second.front())))
+        return SetBestGrindTarget(requester, target, partitionedList);
+
     bool distanceCheck = true;
     std::unordered_map<TravelDestination*, bool> isActive;
 

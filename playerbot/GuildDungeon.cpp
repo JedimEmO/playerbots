@@ -13,6 +13,7 @@
 #include "Grids/CellImpl.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstring>
 
@@ -82,7 +83,7 @@ namespace
     const std::map<uint32, int32> LAST_BOSS = {
         { 389, 11519 },  // Ragefire Chasm: Bazzalan
         { 36, 639 },     // The Deadmines: Edwin VanCleef
-        { 43, 5775 },    // Wailing Caverns: Verdan the Everliving; Mutanus comes only with the Naralex escort
+        { 43, 5775 },    // Wailing Caverns: Verdan the Everliving; the Naralex escort, and Mutanus with it, come before the run ends
         { 33, 4275 },    // Shadowfang Keep: Archmage Arugal
         { 48, 4829 },    // Blackfathom Deeps: Aku'mai
         { 34, 1716 },    // The Stockade: Bazil Thredd
@@ -112,11 +113,16 @@ namespace
     // Friendly creatures a party has to speak to on its way, as a player would, with the gossip action to pick,
     // and the door the creature then opens, or 0. Each is a step among the bosses, in route order;
     // the party takes the one friendly to it.
-    struct Talk { uint32 map; int32 entry; uint32 action; uint32 door; };
+    // An escort walks off after speaking, and the party stays with it, fighting what attacks it, until it is gone;
+    // the bosses named after it must be dead before it is spoken to; the wait is how long the party gives it.
+    struct Talk { uint32 map; int32 entry; uint32 action; uint32 door; bool escort = false; time_t wait = 0; std::array<int32, 4> after = {}; };
     const Talk TALKS[] = {
         // Shadowfang Keep: the prisoner, freed, walks to the Courtyard Door and unlocks it. Horde and Alliance have one each.
         { 33, 3849, GOSSIP_ACTION_INFO_DEF + 1, 18895 },   // Deathstalker Adamant
         { 33, 3850, GOSSIP_ACTION_INFO_DEF + 1, 18895 },   // Sorcerer Ashcrombe
+        // Wailing Caverns: with the four Fanglords dead, the Disciple of Naralex walks to Naralex, stopping for waves,
+        // and wakes him; Mutanus the Devourer comes at the end. His gossip starts it at any time, so the Fanglords come first.
+        { 43, 3678, GOSSIP_ACTION_INFO_DEF + 1, 0, true, 20 * MINUTE, { 3671, 3669, 3670, 3673 } },
     };
     // The leader speaks from this near, out of combat. A step with no door is done then;
     // one with a door is done when the door is open, and the party waits by the creature while it walks there.
@@ -129,7 +135,9 @@ namespace
     // Objects a party uses before a boss, as players would: how many members use it, and the boss it is for.
     // An object that wakes its boss is used for as long as the boss sleeps, unattackable and out of combat,
     // so it is used again after a wipe puts the boss back to sleep; any other is used once.
-    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; bool wakes; };
+    // An object used several times is used each time it can be, out of combat, and the step is done
+    // when the creature its last use brings is dead. One with no boss is due when the leader comes near it.
+    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; bool wakes; uint32 times = 1; uint32 brings = 0; };
     const UseObject USES[] = {
         // Blackfathom Deeps: the four Fires of Aku'mai, lit once Kelris is dead, open the way to Aku'mai.
         { 48, 21118, 1, 4829, false },
@@ -138,6 +146,9 @@ namespace
         { 48, 21121, 1, 4829, false },
         // Uldaman: the Altar of Archaedas is a ritual for three. Its spell wakes him, and he attacks the first user.
         { 70, 133234, 3, 2748, true },
+        // Razorfen Downs: the Gong brings a wave of Tomb Fiends, then one of Tomb Reavers, then Tuten'kash.
+        // It can be rung again once the wave is dead.
+        { 129, 148917, 1, 0, false, 3, 7355 },
     };
     // The leader uses an object this near it, and members this near the leader come to it to join.
     constexpr float USE_DISTANCE = 5.0f;
@@ -146,6 +157,8 @@ namespace
     constexpr float USE_STAND = 2.0f;
     // An object that has not woken its boss yet is used again after this.
     constexpr time_t USE_RETRY_SECONDS = 15;
+    // An object with no boss of its own is due when the leader comes this near it.
+    constexpr float USE_NEAR = 60.0f;
 
     // Creatures with no spawn of their own, brought by an event, that a party kills before a boss, as players would:
     // the creature, the boss, and the door their deaths open. The step is done when none is alive near the leader,
@@ -154,9 +167,28 @@ namespace
     const KillFirst KILLS[] = {
         // Shadowfang Keep: Fenrus's death brings Arugal's four voidwalkers, and the Sorcerer's Gate opens when all four die.
         { 33, 4627, 3927, 18972 },
+        // Zul'Farrak: Nekrum Gutchewer and Shadowpriest Sezz'ziz come down the pyramid last; their deaths open the End Door.
+        { 209, 7796, 7267, 146084 },
+        { 209, 7275, 7267, 146084 },
     };
     // The leader looks this far for them.
     constexpr float KILL_RANGE = 60.0f;
+
+    // Items a party uses on an object before a boss, as players would: the item, the object, the boss, the door
+    // the event it starts opens, the creature the party stays by while the event runs, and how long it waits for the door.
+    // The member who carries the item comes to the object and uses it; the step is done when the door is open.
+    struct ItemOnObject { uint32 map; uint32 item; uint32 object; int32 before; uint32 door; uint32 guard; time_t wait; };
+    const ItemOnObject ITEM_USES[] = {
+        // Zul'Farrak: the Executioner's Key, from the Sandfury Executioner by the cages, opens Sergeant Bly's cage.
+        // Trolls then climb the pyramid at Bly's crew, Nekrum and Sezz'ziz last, and their deaths open the End Door to Ukorz.
+        { 209, 8444, 141074, 7267, 146084, 7604, 15 * MINUTE },
+    };
+    // An item use that did not start is tried again after this.
+    constexpr time_t ITEM_RETRY_SECONDS = 15;
+
+    // The leader of an event stays this near the creature it is by, and moves back within it when it is farther.
+    constexpr float HOLD_NEAR = 12.0f;
+    constexpr float HOLD_STAND = 5.0f;
 
     // Letters only, in lower case, without a leading "the": "The Deadmines" and "deadmines" are one name.
     std::string Normalize(const std::string& name)
@@ -329,6 +361,13 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         if (talk)
         {
             dungeon.talks[talk->entry] = talk->action;
+            if (talk->escort)
+                dungeon.talkEscorts.insert(talk->entry);
+            if (talk->wait)
+                dungeon.talkWaits[talk->entry] = talk->wait;
+            for (int32 boss : talk->after)
+                if (boss)
+                    dungeon.talkAfter[talk->entry].push_back(boss);
             if (talk->door)
             {
                 auto findDoor = [&](auto const& pair)
@@ -414,6 +453,8 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         step.users = use.users;
         step.before = use.before;
         step.wakes = use.wakes;
+        step.times = std::max(use.times, 1u);
+        step.brings = use.brings;
         WorldPosition place;
         auto findSpawn = [&](auto const& pair)
         {
@@ -457,6 +498,44 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
             sObjectMgr.DoGOData(findDoor);
         }
         dungeon.kills.push_back(step);
+    }
+
+    // Items to use on objects, where the map has the object's spawn, with the door it opens.
+    for (const ItemOnObject& use : ITEM_USES)
+    {
+        if (use.map != dungeon.mapId)
+            continue;
+        Dungeon::ItemUse step;
+        step.item = use.item;
+        step.before = use.before;
+        step.guard = use.guard;
+        step.wait = use.wait;
+        WorldPosition place;
+        auto findSpawn = [&](auto const& pair)
+        {
+            if (pair.second.mapid != dungeon.mapId)
+                return false;
+            if (pair.second.id == use.door)
+                step.doorSpawn = pair.first;
+            if (pair.second.id == use.object && !step.spawn)
+            {
+                step.spawn = pair.first;
+                place = WorldPosition(pair.second.mapid, pair.second.posX, pair.second.posY, pair.second.posZ, pair.second.orientation);
+            }
+            return false;
+        };
+        sObjectMgr.DoGOData(findSpawn);
+        if (!step.spawn)
+            continue;
+        std::lock_guard<std::mutex> guard(exitLock);
+        auto& destination = usePlaces[step.spawn];
+        if (!destination)
+        {
+            GameObjectInfo const* info = ObjectMgr::GetGameObjectInfo(use.object);
+            destination = std::make_unique<PlaceTravelDestination>(place, std::string("the ") + (info ? info->name : "object") + " in " + dungeon.name);
+        }
+        step.place = destination.get();
+        dungeon.itemUses.push_back(step);
     }
 
     // The meeting stone; StonePlace takes the same lock, so this comes after it is let go.
@@ -797,6 +876,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
 
     int32 next = 0;
     uint32 present = 0;
+    int32 asleep = 0;          // the first boss alive but unattackable, passed over for the next
+    uint32 asleepSpawn = 0;
+    run.holding = false;
     std::string talkWait;  // what the party waits for after speaking, such as a prisoner on its way to a door
     for (size_t i = 0; i < dungeon.bosses.size(); ++i)
     {
@@ -827,27 +909,41 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             }
             if (next)
                 continue;
+            // Not yet: the bosses it comes after are not all dead.
+            if (auto after = dungeon.talkAfter.find(entry); after != dungeon.talkAfter.end()
+                && std::any_of(after->second.begin(), after->second.end(), [&](int32 boss) { return !run.killed.count(boss); }))
+                continue;
             next = entry;
             run.nextSpawn = dungeon.spawns[i];
+            const bool escort = dungeon.talkEscorts.count(entry);
+            auto waitFor = dungeon.talkWaits.find(entry);
+            const time_t wait = waitFor != dungeon.talkWaits.end() ? waitFor->second : TALK_WAIT_SECONDS;
 
             const time_t now = time(nullptr);
             auto spoken = run.talkedAt.find(entry);
             const bool offers = creature->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_GOSSIP);
-            if (hasDoor && !offers)
+            if ((hasDoor || escort) && !offers)
             {
                 // Its escort is under way, after the leader spoke or before a restart: the party waits here
-                // while it walks to the door.
+                // while it walks to the door, or walks with it.
                 if (spoken == run.talkedAt.end())
                     spoken = run.talkedAt.emplace(entry, now).first;
-                if (now - spoken->second >= TALK_WAIT_SECONDS)
+                if (now - spoken->second >= wait)
                 {
                     run.talked.insert(entry);
-                    update.events.push_back({ "gave_up", BossName(entry) + " did not open the " + doorName });
+                    update.events.push_back({ "gave_up", BossName(entry) + (hasDoor ? " did not open the " + doorName : " did not finish its walk") });
                     next = 0;
                     run.nextSpawn = 0;
                     continue;
                 }
-                talkWait = BossName(entry) + " to open the " + doorName;
+                if (escort)
+                {
+                    HoldNear(leader, creature);
+                    run.holding = true;
+                    talkWait = BossName(entry) + " to finish its walk";
+                }
+                else
+                    talkWait = BossName(entry) + " to open the " + doorName;
                 continue;
             }
             if (leader->GetDistance(creature) <= TALK_DISTANCE && !leader->IsInCombat() && offers
@@ -857,7 +953,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 sScriptDevAIMgr.OnGossipSelect(leader, creature, GOSSIP_SENDER_MAIN, talk->second, nullptr);
                 run.talkedAt[entry] = now;
                 update.events.push_back({ "talked", BossName(entry) });
-                if (!hasDoor)
+                if (!hasDoor && !escort)
                 {
                     run.talked.insert(entry);
                     next = 0;
@@ -879,18 +975,37 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             continue;
         present++;
         // A boss passed over as out of reach is alive, but not the next boss.
-        if (!next && !run.passed.count(entry))
-        {
-            next = entry;
-            run.nextSpawn = dungeon.spawns[i];
-        }
+        if (next || run.passed.count(entry))
+            continue;
+        // A boss alive but unattackable that no object of ours wakes, such as Mograine lying as dead until Whitemane
+        // raises him: the next boss after it comes first, and it is the next boss again once it can be attacked.
+        if (Creature* boss = map->GetCreature(dungeon.spawns[i]))
+            if (boss->IsAlive() && boss->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE)
+                && std::none_of(dungeon.uses.begin(), dungeon.uses.end(), [&](const Dungeon::Use& use) { return use.wakes && use.before == entry; }))
+            {
+                if (!asleep)
+                {
+                    asleep = entry;
+                    asleepSpawn = dungeon.spawns[i];
+                }
+                continue;
+            }
+        next = entry;
+        run.nextSpawn = dungeon.spawns[i];
+    }
+    // Only sleeping bosses left: the first of them is still the next boss, and the run is not cleared.
+    if (!next && asleep)
+    {
+        next = asleep;
+        run.nextSpawn = asleepSpawn;
     }
 
     run.bossesSeen = true;
     std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(present) + " bosses down";
     if (!run.passed.empty())
         count += ", " + std::to_string(run.passed.size()) + " passed over";
-    if (run.killed.count(dungeon.lastBoss) || !next)
+    // A creature to speak to still ahead, such as an escort, keeps the run going past the last boss.
+    if ((run.killed.count(dungeon.lastBoss) && !dungeon.talks.count(next)) || !next)
     {
         // Cleared: out by the way out, and the reset.
         run.cleared = dungeon.name + " cleared to " + BossName(dungeon.lastBoss) + ", " + count;
@@ -979,10 +1094,202 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     // and it and as many members as the object needs use it, as players would.
     // Time at an object is not time without headway to the boss, so the use step's returns restart that clock.
     run.useSpawn = 0;
+
+    // An item to use on an object before the next boss, such as a key on a cage: the member who carries it comes
+    // to the object and uses it, as a player would, and the party then stays by the event's creature until the door opens.
+    for (const Dungeon::ItemUse& use : dungeon.itemUses)
+    {
+        if (use.before != next || run.used.count(use.spawn))
+            continue;
+        GameObject* door = use.doorSpawn ? map->GetGameObject(use.doorSpawn) : nullptr;
+        if (door && door->GetGoState() != GO_STATE_READY)
+        {
+            run.used.insert(use.spawn);
+            if (run.bossesSeen)
+                update.events.push_back({ "door_open", std::string(door->GetGOInfo()->name) });
+            continue;
+        }
+        GameObject* object = map->GetGameObject(use.spawn);
+        ItemPrototype const* proto = sObjectMgr.GetItemPrototype(use.item);
+        if (!object || !proto)
+            continue;
+        const std::string itemName = proto->Name1;
+        const std::string objectName = object->GetGOInfo()->name;
+
+        // Used: the party stays by the event's creature, or the object, while the event runs.
+        if (auto usedAt = run.itemUsedAt.find(use.spawn); usedAt != run.itemUsedAt.end())
+        {
+            if (now - usedAt->second >= use.wait)
+            {
+                run.used.insert(use.spawn);
+                update.events.push_back({ "gave_up", "the " + std::string(door ? door->GetGOInfo()->name : "door") + " did not open" });
+                continue;
+            }
+            WorldObject* by = object;
+            if (use.guard)
+            {
+                std::list<Unit*> found;
+                MaNGOS::AllCreaturesOfEntryInRangeCheck check(object, use.guard, 2 * KILL_RANGE);
+                MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
+                Cell::VisitAllObjects(object, searcher, 2 * KILL_RANGE);
+                for (Unit* unit : found)
+                    if (unit->IsAlive() && unit->IsInWorld())
+                        by = unit;
+            }
+            HoldNear(leader, by);
+            run.holding = true;
+            run.headwaySince = now;
+            update.reason = (killing.empty() ? "holding by " + std::string(by->GetName()) : "killing " + killing)
+                + " while the " + objectName + "'s event runs in " + dungeon.name + ", " + count;
+            return;
+        }
+
+        // Who carries it: nobody yet, and the step waits, say for the creature that drops it.
+        Player* carrier = nullptr;
+        if (Group* group = leader->GetGroup())
+        {
+            for (auto& slot : group->GetMemberSlots())
+                if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                    if (member->IsInWorld() && member->IsAlive() && member->GetMapId() == leader->GetMapId() && member->HasItemCount(use.item, 1))
+                        carrier = member;
+        }
+        else if (leader->HasItemCount(use.item, 1))
+            carrier = leader;
+        if (!carrier)
+            continue;
+
+        run.useSpawn = use.spawn;
+        if (leader->GetDistance(object) > USE_DISTANCE)
+        {
+            if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            {
+                TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+                if (target && target->IsActive() && target->GetDestination() != use.place)
+                    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+            }
+            run.headwaySince = now;
+            update.reason = "on the way to use the " + itemName + " on the " + objectName + " in " + dungeon.name + ", " + count;
+            return;
+        }
+        // A player carries it: it is theirs to use.
+        run.headwaySince = now;
+        if (!sGuildBotMgr.IsGuildBot(carrier))
+        {
+            update.reason = "at the " + objectName + " in " + dungeon.name + ", waiting for " + carrier->GetName() + " to use the " + itemName;
+            return;
+        }
+        // The carrier comes to it (UseSpot), and uses it out of combat, from within reach.
+        if (!object->IsWithinDistInMap(carrier, object->GetInteractionDistance()) || carrier->IsInCombat() || carrier->IsNonMeleeSpellCasted(false)
+            || now - run.itemTriedAt[use.spawn] < ITEM_RETRY_SECONDS)
+        {
+            update.reason = "at the " + objectName + " in " + dungeon.name + ", " + carrier->GetName() + " to use the " + itemName;
+            return;
+        }
+        run.itemTriedAt[use.spawn] = now;
+        Item* item = carrier->GetItemByEntry(use.item);
+        if (!item || carrier->CanUseItem(item) != EQUIP_ERR_OK)
+        {
+            update.reason = "at the " + objectName + " in " + dungeon.name + ", " + carrier->GetName() + " cannot use the " + itemName;
+            return;
+        }
+        // As the client's use of an item on an object does: its spell, cast at the object.
+        SpellCastTargets targets;
+        targets.setGOTarget(object);
+        carrier->CastItemUseSpell(item, targets, 0);
+        // Started when the carrier is casting it, or the object has opened already.
+        if (carrier->IsNonMeleeSpellCasted(false) || object->GetGoState() != GO_STATE_READY)
+        {
+            run.itemUsedAt[use.spawn] = now;
+            update.events.push_back({ "used", itemName + " on the " + objectName });
+        }
+        update.reason = "at the " + objectName + " in " + dungeon.name + ", " + carrier->GetName() + " uses the " + itemName;
+        return;
+    }
+
     for (const Dungeon::Use& use : dungeon.uses)
     {
-        if (use.before != next)
+        if (use.before && use.before != next)
             continue;
+        if (use.times > 1 || use.brings)
+        {
+            if (run.used.count(use.spawn))
+                continue;
+            GameObject* object = map->GetGameObject(use.spawn);
+            const uint32 times = run.useCount[use.spawn];
+            // One with no boss of its own: due once the leader comes near it, and until it is done.
+            if (!use.before && !times && (!object || leader->GetDistance(object) > USE_NEAR))
+                continue;
+            if (!object)
+            {
+                // Not loaded: nothing to do with it, unless it is under way, when the leader stays.
+                if (!times)
+                {
+                    run.used.insert(use.spawn);
+                    continue;
+                }
+                run.headwaySince = now;
+                update.reason = "waiting at an object in " + dungeon.name + ", " + count;
+                return;
+            }
+            const std::string name = object->GetGOInfo()->name;
+            if (times >= use.times)
+            {
+                // Used up: done once what it brings is dead; until then the leader takes it as its target.
+                Unit* brought = nullptr;
+                if (use.brings)
+                {
+                    std::list<Unit*> found;
+                    MaNGOS::AllCreaturesOfEntryInRangeCheck check(object, use.brings, KILL_RANGE);
+                    MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
+                    Cell::VisitAllObjects(object, searcher, KILL_RANGE);
+                    for (Unit* unit : found)
+                        if (unit->IsAlive() && unit->IsInWorld())
+                            brought = unit;
+                }
+                if (!brought)
+                {
+                    run.used.insert(use.spawn);
+                    update.events.push_back({ "used", name + ", done" });
+                    continue;
+                }
+                run.killGuid = brought->GetObjectGuid();
+                run.headwaySince = now;
+                update.reason = "killing " + BossName(use.brings) + " at the " + name + " in " + dungeon.name + ", " + count;
+                return;
+            }
+            run.useSpawn = use.spawn;
+            if (leader->GetDistance(object) <= USE_DISTANCE)
+            {
+                // Each time it can be used, out of combat: its last use brought a wave, and the wave is dead.
+                const bool usable = object->IsSpawned() && !object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT)
+                    && !object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_IN_USE);
+                if (usable && !leader->IsInCombat() && object->CanUseNow(leader))
+                {
+                    WorldPacket packet(CMSG_GAMEOBJ_USE);
+                    packet << object->GetObjectGuid();
+                    leader->GetSession()->HandleGameObjectUseOpcode(packet);
+                    // The script shuts it until the wave it brought is dead; that is a use.
+                    if (object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT) || !object->IsSpawned())
+                    {
+                        run.useCount[use.spawn] = times + 1;
+                        update.events.push_back({ "used", name + ", " + std::to_string(times + 1) + " of " + std::to_string(use.times) });
+                    }
+                }
+                run.headwaySince = now;
+                update.reason = "at the " + name + " in " + dungeon.name + ", used " + std::to_string(run.useCount[use.spawn]) + " of "
+                    + std::to_string(use.times) + " times";
+                return;
+            }
+            if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            {
+                TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+                if (target && target->IsActive() && target->GetDestination() != use.place)
+                    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+            }
+            run.headwaySince = now;
+            update.reason = "on the way to use the " + name + " in " + dungeon.name + ", " + count;
+            return;
+        }
         if (use.wakes)
         {
             // Due while the boss sleeps, unattackable and out of combat; done while it is awake.
@@ -1259,7 +1566,8 @@ bool GuildDungeon::ShouldTravel(Player* bot) const
         return bot->GetMapId() != run.dungeon.mapId;
     if (run.phase == Phase::Leave)
         return bot->GetMapId() == run.dungeon.mapId;
-    return run.phase == Phase::Bosses && run.nextBoss && !run.waiting && bot->GetMapId() == run.dungeon.mapId;
+    // Not while it stays by an event's creature, such as an escort: it moves with that instead.
+    return run.phase == Phase::Bosses && run.nextBoss && !run.waiting && !run.holding && bot->GetMapId() == run.dungeon.mapId;
 }
 
 bool GuildDungeon::IsHolding(Player* bot) const
@@ -1489,7 +1797,27 @@ TravelDestination* GuildDungeon::UseDestination(Player* bot) const
     for (const Dungeon::Use& use : it->second.dungeon.uses)
         if (use.spawn == it->second.useSpawn)
             return use.place;
+    for (const Dungeon::ItemUse& use : it->second.dungeon.itemUses)
+        if (use.spawn == it->second.useSpawn)
+            return use.place;
     return nullptr;
+}
+
+void GuildDungeon::HoldNear(Player* leader, WorldObject* by)
+{
+    // No travel target while it stays: the dungeon's travel would take it on to the next boss.
+    if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+    {
+        TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+        if (target && target->IsActive())
+            target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+    }
+    // In a fight it fights where the fight is; out of one, it goes back by the creature.
+    if (leader->IsInCombat() || leader->GetDistance(by) <= HOLD_NEAR || leader->IsMoving())
+        return;
+    float x, y, z;
+    by->GetNearPoint(leader, x, y, z, leader->GetObjectBoundingRadius(), HOLD_STAND, by->GetAngle(leader));
+    leader->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_RUN);
 }
 
 bool GuildDungeon::UseSpot(Player* leader, Player* member, WorldLocation& place) const
@@ -1507,6 +1835,20 @@ bool GuildDungeon::UseSpot(Player* leader, Player* member, WorldLocation& place)
         auto usedBy = it->second.usedBy.find(use.spawn);
         if (usedBy != it->second.usedBy.end() && usedBy->second.count(member->GetGUIDLow()))
             return false;
+        GameObject* object = member->GetMap()->GetGameObject(use.spawn);
+        if (!object || leader->GetDistance(object) > USE_DISTANCE || member->GetDistance(leader) > USE_JOIN_DISTANCE
+            || member->GetDistance(object) <= USE_STAND)
+            return false;
+        float x, y, z;
+        object->GetNearPoint(member, x, y, z, member->GetObjectBoundingRadius(), USE_STAND, object->GetAngle(member));
+        place = WorldLocation(object->GetMapId(), x, y, z, 0.0f);
+        return true;
+    }
+    // An item to use on the object: the member who carries it comes to it.
+    for (const Dungeon::ItemUse& use : it->second.dungeon.itemUses)
+    {
+        if (use.spawn != it->second.useSpawn || it->second.itemUsedAt.count(use.spawn) || !member->HasItemCount(use.item, 1))
+            continue;
         GameObject* object = member->GetMap()->GetGameObject(use.spawn);
         if (!object || leader->GetDistance(object) > USE_DISTANCE || member->GetDistance(leader) > USE_JOIN_DISTANCE
             || member->GetDistance(object) <= USE_STAND)
@@ -1613,6 +1955,14 @@ bool GuildDungeon::MayEnterMap(Player* bot, uint32 mapId, std::string* why)
         return false;
     lastEntry[group->GetId()] = now;
     return true;
+}
+
+bool GuildDungeon::IsStepItem(uint32 mapId, uint32 itemId)
+{
+    for (const ItemOnObject& use : ITEM_USES)
+        if (use.map == mapId && use.item == itemId)
+            return true;
+    return false;
 }
 
 bool GuildDungeon::KeepsToCorpse(Player* bot)

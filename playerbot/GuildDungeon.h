@@ -90,6 +90,8 @@ public:
     ai::TravelDestination* UseDestination(Player* bot) const;
     // For a member whose leader is at an object that needs more than one user: a place by it, near enough to use it.
     bool UseSpot(Player* leader, Player* member, WorldLocation& place) const;
+    // The leader of an event stays by a creature or object of it, such as an escort: no travel, and back by it out of a fight.
+    static void HoldNear(Player* leader, WorldObject* by);
     // Where a guild character should go when its group's leader is on the other side of a dungeon's entrance,
     // inside while it is outside or outside while it is inside: the leader's place. Its follow target is out of
     // reach on another map, so follow moves there instead, and the route the travel map gives runs through the
@@ -106,6 +108,9 @@ public:
     // it releases, walks to the dungeon's entrance as a ghost and takes it, which revives it inside by the core's rule.
     // It never takes a spirit healer, a repop, or a graveyard elsewhere.
     static bool KeepsToCorpse(Player* bot);
+    // An item a step of a dungeon on this map needs, such as Zul'Farrak's Executioner's Key: a guild character
+    // in a party there needs it in a roll, keeps it, and takes it for itself as master looter.
+    static bool IsStepItem(uint32 mapId, uint32 itemId);
     // For such a ghost outside: the entrance trigger it walks to, its place and how near counts as in it.
     // False when it is not outside, or the trigger is not on its map.
     static bool CorpseEntrance(Player* ghost, WorldLocation& place, uint32& triggerId, float& reach);
@@ -137,17 +142,27 @@ private:
         std::vector<uint32> spawns;    // each boss's spawn on the map, by database guid; 0 if none is known
         std::map<int32, uint32> talks; // steps that are friendly creatures to speak to, by entry: the gossip action to pick
         std::map<int32, uint32> talkDoors; // the spawn of the door each of them opens, by entry
+        std::set<int32> talkEscorts;   // those that walk an escort after speaking: the party stays with them until they are gone
+        std::map<int32, time_t> talkWaits; // how long the party waits for each after speaking, by entry, when not the default
+        std::map<int32, std::vector<int32>> talkAfter; // bosses that must be dead before each is spoken to, by entry
         int32 lastBoss = 0;            // the boss whose death ends the run
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
         ai::PlaceTravelDestination* exit = nullptr;  // outside, where the way out leads; kept in exits
         ai::PlaceTravelDestination* stone = nullptr; // the dungeon's meeting stone, if it has one; kept in stones
         // Objects to use before a boss, as a player would: the object's spawn, how many members use it, the boss,
         // and whether it wakes the boss, so that the step is due for as long as the boss sleeps.
-        struct Use { uint32 entry = 0; uint32 spawn = 0; uint32 users = 1; int32 before = 0; bool wakes = false; ai::PlaceTravelDestination* place = nullptr; };
+        // An object used several times, such as a gong, is used each time it can be, and is done when what it brings is dead.
+        struct Use { uint32 entry = 0; uint32 spawn = 0; uint32 users = 1; int32 before = 0; bool wakes = false;
+                     uint32 times = 1; uint32 brings = 0; ai::PlaceTravelDestination* place = nullptr; };
         std::vector<Use> uses;
         // Creatures to kill before a boss: their entry, the boss, and the spawn of the door their deaths open, or 0.
         struct Kill { uint32 entry = 0; int32 before = 0; uint32 doorSpawn = 0; };
         std::vector<Kill> kills;
+        // Items to use on an object before a boss, as a player would: the item, the object's spawn, the boss,
+        // the door the event it starts opens, the creature the party stays by meanwhile, and how long it waits.
+        struct ItemUse { uint32 item = 0; uint32 spawn = 0; int32 before = 0; uint32 doorSpawn = 0; uint32 guard = 0; time_t wait = 0;
+                         ai::PlaceTravelDestination* place = nullptr; };
+        std::vector<ItemUse> itemUses;
     };
 
     struct Run
@@ -165,6 +180,10 @@ private:
         uint32 useSpawn = 0;           // the use step the leader is on its way to or at, or 0
         std::map<uint32, time_t> usedAt; // when everyone a use step needs last used it, by the object's spawn
         std::map<uint32, std::set<uint32>> usedBy; // who has used it this time, by the object's spawn and the member's guid
+        std::map<uint32, uint32> useCount; // how many times an object used several times has been used, by its spawn
+        std::map<uint32, time_t> itemUsedAt; // when an item use step's item was used, by the object's spawn
+        std::map<uint32, time_t> itemTriedAt; // when it was last tried, by the object's spawn
+        bool holding = false;          // the leader stays by a creature of an event now, and travels nowhere
         ObjectGuid killGuid;           // the creature the leader kills before the next boss, or empty
         std::set<int32> passed;        // bosses passed over as out of reach on this map
         int32 headwayBoss = 0;         // the boss the leader's headway is measured to

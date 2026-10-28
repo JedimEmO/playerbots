@@ -4,6 +4,7 @@
 #include "ChatHelper.h"
 
 #include <map>
+#include <mutex>
 #include <set>
 #include <vector>
 #include <string>
@@ -66,6 +67,9 @@ public:
     bool IsIgnoredTarget(Player* bot, ObjectGuid target) const;  // also loot it gave up on
     // Travel destinations, by entry, the character left because it could not work them; set aside for a while.
     std::set<int32> LeftDestinations(Player* bot) const;
+    // The experience per second that levelling characters earned at a grind spot, by creature entry, from all of them
+    // since the start and from guildbot_spot's last two days before it. False while the spot has too little time worked.
+    bool SpotRate(int32 entry, float& experiencePerSecond) const;
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;
@@ -201,6 +205,11 @@ private:
     std::map<uint32, std::map<ObjectGuid, time_t>> ignoredTargets; // per character: given up, until
     std::map<uint32, std::vector<time_t>> giveUps;              // per character: recent give-ups
     std::map<uint32, std::map<int32, time_t>> leftDestinations;  // per character: destination entry, until
+    struct SpotYield { uint64 work = 0, experience = 0; };
+    std::map<int32, SpotYield> spotYields;                      // per grind spot entry, for all levelling characters
+    mutable std::mutex spotYieldLock;                           // read by travel searches off the world thread
+    void AddSpotYield(int32 entry, uint32 work, uint32 experience);
+    void LoadSpotYields();
     bool assignmentsLoaded = false;   // the first load after a start reports nothing; it is not a change
     bool tablesReady = false;
     uint32 sinceOrders = 0;

@@ -20,6 +20,8 @@ namespace ai
         void setNewTarget(Player* requester, TravelTarget* newTarget, TravelTarget* oldTarget);        
 
         bool SetBestTarget(Player* requester, TravelTarget* target, PartitionedTravelList& travelPartitions, bool onlyActive = true);
+        // A levelling guild character's grind spot, by the experience expected per hour with the walk.
+        bool SetBestGrindTarget(Player* requester, TravelTarget* target, PartitionedTravelList& travelPartitions);
     public:
         static DestinationList FindDestination(PlayerTravelInfo info, std::string name, bool zones = true, bool npcs = true, bool quests = true, bool mobs = true, bool bosses = true, bool gather = true);
         static std::vector<int32> FarmDropEntries(uint32 itemId, uint32 botLevel);

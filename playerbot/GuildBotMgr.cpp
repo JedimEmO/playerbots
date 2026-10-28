@@ -43,6 +43,8 @@ namespace
     // A character this far below the ground at its x and y, with no floor under its feet, has fallen through the world.
     constexpr float UNDER_MAP_DEPTH = 20.0f;
     constexpr float UNDER_MAP_FLOOR_SEARCH = 10.0f;
+    // A grind spot's rate counts once levelling characters have worked it this long, all together.
+    constexpr uint32 SPOT_RATE_MIN_WORK = 10 * MINUTE;
     // A target the character has not hurt in this long is out of its reach; it is passed over for a while.
     constexpr time_t UNREACHED_TARGET_SECONDS = 45;
     constexpr time_t IGNORE_TARGET_SECONDS = 10 * MINUTE;
@@ -202,6 +204,41 @@ bool GuildBotMgr::IsIgnoredTarget(Player* bot, ObjectGuid target) const
     return t != it->second.end() && t->second > time(nullptr);
 }
 
+bool GuildBotMgr::SpotRate(int32 entry, float& experiencePerSecond) const
+{
+    std::lock_guard<std::mutex> guard(spotYieldLock);
+    auto it = spotYields.find(entry);
+    if (it == spotYields.end() || it->second.work < SPOT_RATE_MIN_WORK)
+        return false;
+    experiencePerSecond = float(it->second.experience) / float(it->second.work);
+    return true;
+}
+
+void GuildBotMgr::AddSpotYield(int32 entry, uint32 work, uint32 experience)
+{
+    if (!entry || !work)
+        return;
+    std::lock_guard<std::mutex> guard(spotYieldLock);
+    SpotYield& yield = spotYields[entry];
+    yield.work += work;
+    yield.experience += experience;
+}
+
+void GuildBotMgr::LoadSpotYields()
+{
+    auto result = CharacterDatabase.Query(
+        "SELECT s.entry, SUM(s.work), SUM(s.experience) FROM guildbot_spot s "
+        "JOIN guildbot_metric m ON m.hour = s.hour AND m.guid = s.guid AND m.job = 'level' "
+        "WHERE s.hour >= NOW() - INTERVAL 48 HOUR GROUP BY s.entry");
+    if (!result)
+        return;
+    do
+    {
+        Field* f = result->Fetch();
+        AddSpotYield(f[0].GetInt32(), f[1].GetUInt32(), f[2].GetUInt32());
+    } while (result->NextRow());
+}
+
 std::set<int32> GuildBotMgr::LeftDestinations(Player* bot) const
 {
     std::set<int32> left;
@@ -345,11 +382,18 @@ void GuildBotMgr::CheckEmptyFight(Character& c, Player* bot)
     AiObjectContext* context = ai->GetAiObjectContext();
     const std::list<ObjectGuid> attackers = context->GetValue<std::list<ObjectGuid>>("attackers")->Get();
     bool paused = !context->GetValue<std::list<ObjectGuid>>("possible attack targets")->Get().empty();
-    // A creature under crowd control is a fight paused, not an empty one.
+    // A creature under crowd control is a fight paused, not an empty one. So is a living attacker within sight:
+    // in a boss pull the possible targets can be empty for a while, out of sight round a corner or before the tank
+    // has a target, and leaving then drops the tank's threat on the boss. Only attackers all dead or far off,
+    // as a creature fallen under the floor, make an empty fight.
     for (ObjectGuid guid : attackers)
         if (Unit* unit = ai->GetUnit(guid))
+        {
             if (PossibleAttackTargetsValue::HasBreakableCC(unit, bot) || PossibleAttackTargetsValue::HasUnBreakableCC(unit, bot))
                 paused = true;
+            if (unit->IsAlive() && bot->IsWithinDistInMap(unit, sPlayerbotAIConfig.sightDistance))
+                paused = true;
+        }
     const time_t now = time(nullptr);
     if (paused)
     {
@@ -667,6 +711,7 @@ void GuildBotMgr::EnsureTables()
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
     sGuildRuns.EnsureTables();
+    LoadSpotYields();
     tablesReady = true;
 }
 
@@ -792,6 +837,9 @@ void GuildBotMgr::WriteMetric(Character& c)
     }
     if (c.metricHour)
         for (auto& [entry, count] : c.spots)
+        {
+            if (c.metricJob == "level")
+                AddSpotYield(entry, count.work, count.experience);
             CharacterDatabase.PExecute(
                 "INSERT INTO guildbot_spot (hour, guid, entry, level, visits, travel, work, experience, money, deaths) "
                 "VALUES (FROM_UNIXTIME(%u), %u, %d, %u, %u, %u, %u, %u, %u, %u) "
@@ -799,6 +847,7 @@ void GuildBotMgr::WriteMetric(Character& c)
                 "travel = travel + VALUES(travel), work = work + VALUES(work), experience = experience + VALUES(experience), "
                 "money = money + VALUES(money), deaths = deaths + VALUES(deaths)",
                 uint32(c.metricHour), c.guid, entry, c.xpLevel, count.visits, count.travel, count.work, count.experience, count.money, count.deaths);
+        }
     c.spots.clear();
     c.seconds = c.earning = c.experience = c.deaths = 0;
     std::fill(std::begin(c.activity), std::end(c.activity), 0);
