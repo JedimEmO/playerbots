@@ -114,6 +114,16 @@ void LootObject::Refresh(Player* bot, ObjectGuid guid, bool debug)
             return;
         }
 
+        // A chest with a trap of its own is no loot for a guild character either. In Zul'Farrak each Shallow Grave's
+        // trap summons a Zul'Farrak Zombie and a Dead Hero, and a party that opened the graves one by one fought
+        // what they raised by the graveyard for fifty minutes, and never came to Hydromancer Velratha.
+        if (go->GetGoType() == GAMEOBJECT_TYPE_CHEST && go->GetGOInfo()->GetLinkedGameObjectEntry() && sGuildBotMgr.IsGuildBot(bot))
+        {
+            if (debug)
+                ai->TellDebug(ai->GetMaster(), "Go is a trapped chest.", "debug loot");
+            return;
+        }
+
         bool isQuestItemOnly = false;
 
 #ifdef MANGOSBOT_TWO
