@@ -10,6 +10,7 @@
 #include "playerbot/strategy/values/ItemUsageValue.h"
 #include "playerbot/strategy/values/PositionValue.h"
 #include "playerbot/strategy/values/TravelValues.h"
+#include "playerbot/GuildDungeon.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include <iomanip>
 
@@ -530,6 +531,10 @@ bool ChooseRpgTargetAction::Execute(Event& event)
 bool ChooseRpgTargetAction::isUseful()
 {
     if (!ai->AllowActivity(RPG_ACTIVITY))
+        return false;
+
+    // A guild dungeon leader inside its dungeon, or by its stone on the way in, keeps to its run.
+    if (sGuildDungeon.NoRpg(bot))
         return false;
 
     GuidPosition guidP = AI_VALUE(GuidPosition, "rpg target");

@@ -1974,6 +1974,24 @@ bool GuildDungeon::IsHolding(Player* bot) const
     return it != runs.end() && (it->second.phase == Phase::Hold || (it->second.phase == Phase::Bosses && it->second.waiting));
 }
 
+bool GuildDungeon::NoRpg(Player* bot) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(bot->GetGUIDLow());
+    if (it == runs.end())
+        return false;
+    const Run& run = it->second;
+    // Inside, the next boss, the steps before it and the way out are all its moves.
+    if (bot->GetMapId() == run.dungeon.mapId)
+        return true;
+    // Near its stone on the way in, it waits there for the party. An rpg target walked the Gnomeregan leader
+    // 57 yards off its stone to the Vator, which took it down below the stone.
+    if (run.dungeon.stone && (run.phase == Phase::Check || run.phase == Phase::Go))
+        if (WorldPosition* at = run.dungeon.stone->GetClosestPoint(WorldPosition(bot)))
+            return at->getMapId() == bot->GetMapId() && at->distance(WorldPosition(bot)) <= NEAR_STONE;
+    return false;
+}
+
 int32 GuildDungeon::TravelEntry(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);

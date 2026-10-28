@@ -6,6 +6,7 @@
 #include "playerbot/ServerFacade.h"
 #include "playerbot/LootObjectStack.h"
 #include "playerbot/strategy/values/PossibleRpgTargetsValue.h"
+#include "playerbot/GuildDungeon.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/TravelMgr.h"
 
@@ -225,6 +226,13 @@ bool MoveToRpgTargetAction::isUseful()
 
     if (!guidP)
         return false;
+
+    // A guild dungeon leader inside its dungeon, or by its stone on the way in, goes to no rpg target it chose before.
+    if (sGuildDungeon.NoRpg(bot))
+    {
+        RESET_AI_VALUE(GuidPosition, "rpg target");
+        return false;
+    }
 
     WorldObject* wo = guidP.GetWorldObject(bot->GetInstanceId());
 

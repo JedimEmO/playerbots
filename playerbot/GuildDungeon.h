@@ -54,6 +54,8 @@ public:
     // and the boss whose destination the travel target takes.
     bool ShouldTravel(Player* bot) const;
     bool IsHolding(Player* bot) const;
+    // The leader picks no rpg target: inside its dungeon, or near its stone on the way in.
+    bool NoRpg(Player* bot) const;
     // The leader's run is in its leave phase, on the way out after the last boss.
     bool IsLeaving(Player* leader) const;
     int32 TravelEntry(Player* bot) const;
