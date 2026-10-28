@@ -45,6 +45,11 @@ namespace
     constexpr float UNDER_MAP_FLOOR_SEARCH = 10.0f;
     // A grind spot's rate counts once levelling characters have worked it this long, all together.
     constexpr uint32 SPOT_RATE_MIN_WORK = 10 * MINUTE;
+    // A levelling character that has worked its spot this long, earning there less than this share of the best rate
+    // known for spots worked by characters within this many levels of it, leaves the spot for LEAVE_DESTINATION_SECONDS.
+    constexpr uint32 STAY_JUDGE_SECONDS = 10 * MINUTE;
+    constexpr float STAY_LEAVE_SHARE = 0.4f;
+    constexpr uint32 STAY_BAND_LEVELS = 3;
     // A target the character has not hurt in this long is out of its reach; it is passed over for a while.
     constexpr time_t UNREACHED_TARGET_SECONDS = 45;
     constexpr time_t IGNORE_TARGET_SECONDS = 10 * MINUTE;
@@ -230,7 +235,23 @@ bool GuildBotMgr::SpotRate(int32 entry, float& experiencePerSecond) const
     return true;
 }
 
-void GuildBotMgr::AddSpotYield(int32 entry, uint32 work, uint32 experience)
+bool GuildBotMgr::BestSpotRate(uint32 level, int32 except, float& experiencePerSecond) const
+{
+    std::lock_guard<std::mutex> guard(spotYieldLock);
+    bool found = false;
+    for (auto& [entry, yield] : spotYields)
+    {
+        if (entry == except || yield.work < SPOT_RATE_MIN_WORK || yield.level + STAY_BAND_LEVELS < level || yield.level > level + STAY_BAND_LEVELS)
+            continue;
+        const float rate = float(yield.experience) / float(yield.work);
+        if (!found || rate > experiencePerSecond)
+            experiencePerSecond = rate;
+        found = true;
+    }
+    return found;
+}
+
+void GuildBotMgr::AddSpotYield(int32 entry, uint32 work, uint32 experience, uint32 level)
 {
     if (!entry || !work)
         return;
@@ -238,12 +259,13 @@ void GuildBotMgr::AddSpotYield(int32 entry, uint32 work, uint32 experience)
     SpotYield& yield = spotYields[entry];
     yield.work += work;
     yield.experience += experience;
+    yield.level = std::max(yield.level, level);
 }
 
 void GuildBotMgr::LoadSpotYields()
 {
     auto result = CharacterDatabase.Query(
-        "SELECT s.entry, SUM(s.work), SUM(s.work_experience) FROM guildbot_spot s "
+        "SELECT s.entry, SUM(s.work), SUM(s.work_experience), MAX(s.level) FROM guildbot_spot s "
         "JOIN guildbot_metric m ON m.hour = s.hour AND m.guid = s.guid AND m.job = 'level' "
         // Rows from before work_experience existed have it 0 with experience earned; they would read as worthless spots.
         "WHERE s.hour >= NOW() - INTERVAL 48 HOUR AND (s.work_experience > 0 OR s.experience = 0) GROUP BY s.entry");
@@ -252,7 +274,7 @@ void GuildBotMgr::LoadSpotYields()
     do
     {
         Field* f = result->Fetch();
-        AddSpotYield(f[0].GetInt32(), f[1].GetUInt32(), f[2].GetUInt32());
+        AddSpotYield(f[0].GetInt32(), f[1].GetUInt32(), f[2].GetUInt32(), f[3].GetUInt32());
     } while (result->NextRow());
 }
 
@@ -521,6 +543,38 @@ void GuildBotMgr::CheckApproach(Character& c, Player* bot)
         travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_READY);
         travel->SetExpireIn(uint32(c.approachUntil - now) * IN_MILLISECONDS);
     }
+}
+
+void GuildBotMgr::CheckStay(Character& c, Player* bot)
+{
+    if (c.job != "level" || c.status != "working" || !bot->IsAlive() || !c.stay.entry || c.stay.work < STAY_JUDGE_SECONDS)
+        return;
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai)
+        return;
+    ai::TravelTarget* travel = ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get();
+    if (!travel || travel->IsForced() || travel->GetEntry() != c.stay.entry
+        || !dynamic_cast<ai::GrindTravelDestination*>(travel->GetDestination()))
+        return;
+
+    // What this spot gives this character, against the best spot near its level that others have worked.
+    float best;
+    if (!BestSpotRate(bot->GetLevel(), c.stay.entry, best) || best <= 0.0f)
+        return;
+    const float rate = float(c.stay.experience) / float(c.stay.work);
+    if (rate >= best * STAY_LEAVE_SHARE)
+        return;
+
+    const time_t now = time(nullptr);
+    const int32 entry = c.stay.entry;
+    leftDestinations[c.guid][entry] = now + LEAVE_DESTINATION_SECONDS;
+    travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
+    c.stay = Character::Stay();
+    std::string spot = std::to_string(entry);
+    if (CreatureInfo const* info = entry > 0 ? ObjectMgr::GetCreatureTemplate(entry) : nullptr)
+        spot = info->Name;
+    Event(c.guid, "left_spot", spot + ": " + std::to_string(uint32(rate * HOUR)) + " experience an hour there, the best near its level "
+        + std::to_string(uint32(best * HOUR)));
 }
 
 void GuildBotMgr::CheckGhostUnderMap(Character& c, Player* bot)
@@ -914,6 +968,14 @@ void GuildBotMgr::Measure(Character& c, Player* bot, bool died)
                 count.money += bot->GetMoney() - c.lastMoney;
             if (died)
                 count.deaths++;
+            // The stay: a new one when it works a different spot; a gap with no spot, between renewals, continues it.
+            if (spot != c.stay.entry)
+                c.stay = Character::Stay{ spot, 0, 0 };
+            if (activity != ACTIVITY_TRAVEL)
+            {
+                c.stay.work += uint32(step);
+                c.stay.experience += gained;
+            }
         }
         c.lastSpot = spot;
     }
@@ -949,7 +1011,7 @@ void GuildBotMgr::WriteMetric(Character& c)
         for (auto& [entry, count] : c.spots)
         {
             if (c.metricJob == "level")
-                AddSpotYield(entry, count.work, count.workExperience);
+                AddSpotYield(entry, count.work, count.workExperience, c.xpLevel);
             CharacterDatabase.PExecute(
                 "INSERT INTO guildbot_spot (hour, guid, entry, level, visits, travel, work, experience, work_experience, money, deaths) "
                 "VALUES (FROM_UNIXTIME(%u), %u, %d, %u, %u, %u, %u, %u, %u, %u, %u) "
@@ -1264,6 +1326,7 @@ void GuildBotMgr::CheckJobs()
         CheckEmptyFight(c, bot);
         CheckApproach(c, bot);
         CheckGhostUnderMap(c, bot);
+        CheckStay(c, bot);
         CheckLoot(c, bot);
 
         bool dead = sServerFacade.UnitIsDead(bot);

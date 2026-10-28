@@ -72,6 +72,9 @@ public:
     // The experience per second that levelling characters earned at a grind spot, by creature entry, from all of them
     // since the start and from guildbot_spot's last two days before it. False while the spot has too little time worked.
     bool SpotRate(int32 entry, float& experiencePerSecond) const;
+    // The best such rate among the spots characters near this level have worked long enough, other than the one given.
+    // False when none has.
+    bool BestSpotRate(uint32 level, int32 except, float& experiencePerSecond) const;
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;
@@ -160,6 +163,10 @@ private:
         struct SpotCount { uint32 travel = 0, work = 0, experience = 0, workExperience = 0, deaths = 0, money = 0, visits = 0; };
         std::map<int32, SpotCount> spots;
         int32 lastSpot = 0;               // the spot at the last check, to count visits
+        // Its stay at the grind spot it is working now, across the travel target's renewals there: the seconds
+        // at the spot and the experience earned there, to judge the spot by what it gives this character.
+        struct Stay { int32 entry = 0; uint32 work = 0, experience = 0; };
+        Stay stay;
         uint32 lastMoney = 0;             // money at the last check, for the coin looted at a spot
     };
 
@@ -181,6 +188,8 @@ private:
     void CheckApproach(Character& c, Player* bot);
     // A ghost fallen through the world goes to the graveyard by its dungeon's entrance, or the nearest one.
     void CheckGhostUnderMap(Character& c, Player* bot);
+    // A levelling character that has worked its spot a while for far less than the best spot near its level leaves it.
+    void CheckStay(Character& c, Player* bot);
     void CheckLoot(Character& c, Player* bot);
     static uint32 ZoneOf(Player* bot);
     // Count this check into the hourly measure, and write the counts when the hour or job changes, or every few minutes.
@@ -219,10 +228,10 @@ private:
     std::map<uint32, std::map<ObjectGuid, uint32>> giveUpCounts;  // per character: how often it gave up on each creature
     std::map<uint32, std::vector<time_t>> giveUps;              // per character: recent give-ups
     std::map<uint32, std::map<int32, time_t>> leftDestinations;  // per character: destination entry, until
-    struct SpotYield { uint64 work = 0, experience = 0; };
+    struct SpotYield { uint64 work = 0, experience = 0; uint32 level = 0; };  // level: the highest that worked it
     std::map<int32, SpotYield> spotYields;                      // per grind spot entry, for all levelling characters
     mutable std::mutex spotYieldLock;                           // read by travel searches off the world thread
-    void AddSpotYield(int32 entry, uint32 work, uint32 experience);
+    void AddSpotYield(int32 entry, uint32 work, uint32 experience, uint32 level);
     void LoadSpotYields();
     bool assignmentsLoaded = false;   // the first load after a start reports nothing; it is not a change
     bool tablesReady = false;
