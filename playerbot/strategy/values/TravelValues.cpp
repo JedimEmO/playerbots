@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildJobs.h"
 #include "TravelValues.h"
 #include "QuestValues.h"
 #include "SharedValueContext.h"
@@ -446,6 +447,12 @@ bool ShouldTravelNamedValue::Calculate()
     else if (name == "guild order")
     {
         return AI_VALUE(bool, "has guild travel order");
+    }
+    else if (name == "guild job")
+    {
+        // A guild character on a job that goes somewhere, such as paying at a counter. It does not sell and repair first:
+        // a repair could spend the gold it is to pay.
+        return GuildJobs::ShouldTravel(bot);
     }
     else if (name == "dungeon")
     {

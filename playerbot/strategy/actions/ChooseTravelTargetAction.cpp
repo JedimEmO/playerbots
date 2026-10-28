@@ -8,6 +8,7 @@
 #include "playerbot/strategy/values/GuildValues.h"
 #include "playerbot/strategy/values/FreeMoveValues.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildJobs.h"
 #include "playerbot/GuildBotMgr.h"
 #include "Guilds/GuildMgr.h"
 #include <iomanip>
@@ -65,7 +66,8 @@ bool ChooseTravelTargetAction::Execute(Event& event)
         newTarget.SetRelevance(std::max<uint32>(targetRelevance, 199u));
     }
     else if (AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::guild order" ||
-        AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::dungeon")
+        AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::dungeon" ||
+        AI_VALUE2(std::string, "manual string", "future travel condition") == "should travel named::guild job")
     {
         newTarget.SetForced(true);
         newTarget.SetRelevance(std::max<uint32>(targetRelevance, 198u));
@@ -1039,6 +1041,22 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
             }
         );
     }
+    else if (travelName == "guild job")
+    {
+        // A job that goes somewhere, such as paying at a counter: the place the job chose.
+        TravelDestination* counter = GuildJobs::Destination(bot);
+        if (!counter)
+            return false;
+        *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [counter, center]()
+            {
+                PartitionedTravelList list;
+                std::list<uint8> chancesToGoFar = { 10,50,90 };
+                if (WorldPosition* point = counter->GetNextPoint(center, chancesToGoFar))
+                    list[0].push_back(TravelPoint(counter, point, point->distance(center)));
+                return list;
+            });
+        SET_AI_VALUE2(std::string, "manual string", "future travel detail", counter->GetTitle());
+    }
     else if (travelName == "dungeon")
     {
         // On the way to a dungeon with a meeting stone: the stone, which takes the party in.
@@ -1523,6 +1541,7 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
         travelName == "guild meeting" ? "should travel named::guild meeting" :
         travelName == "guild order" ? "should travel named::guild order" :
         travelName == "dungeon" ? "should travel named::dungeon" :
+        travelName == "guild job" ? "should travel named::guild job" :
         event.getSource());
     SET_AI_VALUE2(int, "manual int", "future travel relevance", relevance * 100);
 
@@ -1551,6 +1570,8 @@ bool RequestNamedTravelTargetAction::isAllowed() const
     else if (name == "guild order")
         return true;
     else if (name == "dungeon")
+        return true;
+    else if (name == "guild job")
         return true;
     else if (name == "mount")
     {
