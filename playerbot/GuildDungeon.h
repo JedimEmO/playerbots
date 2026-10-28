@@ -54,6 +54,8 @@ public:
     // and the boss whose destination the travel target takes.
     bool ShouldTravel(Player* bot) const;
     bool IsHolding(Player* bot) const;
+    // The leader's run is in its leave phase, on the way out after the last boss.
+    bool IsLeaving(Player* leader) const;
     int32 TravelEntry(Player* bot) const;
     // The way out, for the leader inside once the last boss is dead; null otherwise.
     ai::TravelDestination* ExitDestination(Player* bot) const;
@@ -222,6 +224,9 @@ private:
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside
         time_t lastHearth = 0;         // when a member stranded inside was last sent home by hearthstone
+        // With the leader out, where each member inside last stood still, and since when, by guid.
+        struct Still { float x = 0.0f, y = 0.0f, z = 0.0f; time_t since = 0; };
+        std::map<uint32, Still> stillInside;
         std::string cleared;           // what the run did, for the job's reason once it is done
     };
 

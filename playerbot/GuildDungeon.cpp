@@ -47,9 +47,11 @@ namespace
     constexpr uint32 ENTRY_GAP_MS = 3 * IN_MILLISECONDS;
     // Out by the way out within this, or the job fails.
     constexpr time_t LEAVE_SECONDS = 15 * MINUTE;
-    // A member still inside this long after the leader came out is stranded, somewhere no route leads out of,
-    // and goes home by hearthstone, as a player would; tried again this often while it is on cooldown.
+    // A member inside that has stood still this long since the leader came out is stranded, somewhere no route leads
+    // out of, and goes home by hearthstone, as a player would; tried again this often while it is on cooldown.
     constexpr time_t STRANDED_SECONDS = 3 * MINUTE;
+    // A member within this of where it stood that long is standing still; one that moves farther is on its way.
+    constexpr float STRANDED_STILL = 10.0f;
     constexpr time_t HEARTH_RETRY_SECONDS = MINUTE;
     // At the stone: the leader uses it within this, and a member this near it follows the leader in by it.
     // The member's reach is wide: some stones stand on a ledge above the road, out of reach of the paths
@@ -1694,7 +1696,13 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
         run.leaderOutAt = 0;
     else if (!run.leaderOutAt)
         run.leaderOutAt = now;
-    const bool stranded = leaderOut && now - run.leaderOutAt >= STRANDED_SECONDS && now - run.lastHearth >= HEARTH_RETRY_SECONDS;
+    // A member inside with the leader out goes home by hearthstone once it has stood still for STRANDED_SECONDS:
+    // left behind where no route leads out, such as caught on the Deadmines ship. One still on its way keeps going,
+    // such as a member waiting for the Vator in Gnomeregan, whom the hearthstone took as it boarded.
+    const bool mayHearth = leaderOut && now - run.lastHearth >= HEARTH_RETRY_SECONDS;
+    bool hearthed = false;
+    if (!leaderOut)
+        run.stillInside.clear();
 
     uint32 inside = 0, guildInside = 0;
     std::string playerInside;
@@ -1710,15 +1718,27 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
                 guildInside++;
             else
                 playerInside = member->GetName();
-            // Left behind where no route leads out, such as caught on the Deadmines ship: home by hearthstone.
             PlayerbotAI* memberAi = member->GetPlayerbotAI();
-            if (stranded && memberAi && sGuildBotMgr.IsGuildBot(member) && member->IsAlive() && !member->IsBeingTeleported())
+            if (leaderOut && memberAi && sGuildBotMgr.IsGuildBot(member) && member->IsAlive() && !member->IsBeingTeleported())
             {
-                bool home = memberAi->DoSpecificAction("hearthstone", Event(), true);
-                update.events.push_back({ "recovery", std::string(member->GetName()) + (home ? " hearthstone out of " : " hearthstone not ready in ") + dungeon.name });
+                Run::Still& still = run.stillInside[member->GetGUIDLow()];
+                if (!still.since || member->GetDistance(still.x, still.y, still.z) > STRANDED_STILL)
+                {
+                    still.x = member->GetPositionX();
+                    still.y = member->GetPositionY();
+                    still.z = member->GetPositionZ();
+                    still.since = now;
+                }
+                else if (mayHearth && now - still.since >= STRANDED_SECONDS)
+                {
+                    bool home = memberAi->DoSpecificAction("hearthstone", Event(), true);
+                    update.events.push_back({ "recovery", std::string(member->GetName()) + (home ? " hearthstone out of " : " hearthstone not ready in ") + dungeon.name });
+                    still.since = now;
+                    hearthed = true;
+                }
             }
         }
-        if (stranded)
+        if (hearthed)
             run.lastHearth = now;
     }
     else if (leader->GetMapId() == dungeon.mapId)
@@ -1818,6 +1838,13 @@ bool GuildDungeon::ShouldTravel(Player* bot) const
         return bot->GetMapId() == run.dungeon.mapId;
     // Not while it stays by an event's creature, such as an escort: it moves with that instead.
     return run.phase == Phase::Bosses && run.nextBoss && !run.waiting && !run.holding && bot->GetMapId() == run.dungeon.mapId;
+}
+
+bool GuildDungeon::IsLeaving(Player* leader) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(leader->GetGUIDLow());
+    return it != runs.end() && it->second.phase == Phase::Leave;
 }
 
 bool GuildDungeon::IsHolding(Player* bot) const
@@ -2007,7 +2034,9 @@ bool GuildDungeon::FollowByTravel(Player* bot, WorldLocation& place)
     // So does one far below or above its leader outside, such as under it at the lift by Gnomeregan, where follow
     // stops beneath the leader: the travel map's route takes the lift.
     MapEntry const* here = sMapStore.LookupEntry(bot->GetMapId());
-    const bool apart = here && !here->IsDungeon() && std::fabs(bot->GetPositionZ() - leader->GetPositionZ()) > FOLLOW_BY_TRAVEL_HEIGHT;
+    // Inside a dungeon only while the leader leaves it, as from Gnomeregan by the Vator: during the run, follow stays as it is.
+    const bool leaving = here && here->IsDungeon() && sGuildDungeon.IsLeaving(leader);
+    const bool apart = here && (!here->IsDungeon() || leaving) && std::fabs(bot->GetPositionZ() - leader->GetPositionZ()) > FOLLOW_BY_TRAVEL_HEIGHT;
     if (bot->GetDistance(leader) > FOLLOW_BY_TRAVEL || apart)
     {
         leader->GetPosition(place);
