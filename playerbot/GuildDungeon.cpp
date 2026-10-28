@@ -156,8 +156,9 @@ namespace
         // Uldaman: the Altar of Archaedas is a ritual for three. Its spell wakes him, and he attacks the first user.
         { 70, 133234, 3, 2748, true },
         // Razorfen Downs: the Gong brings a wave of Tomb Fiends, then one of Tomb Reavers, then Tuten'kash.
-        // It can be rung again once the wave is dead.
-        { 129, 148917, 1, 0, false, 3, 7355 },
+        // It can be rung again once the wave is dead. It comes before Mordresh Fire Eye, since the route between the bosses
+        // does not come within 60 yards of it.
+        { 129, 148917, 1, 7357, false, 3, 7355 },
     };
     // The leader uses an object this near it, and members this near the leader come to it to join.
     constexpr float USE_DISTANCE = 5.0f;
@@ -1464,12 +1465,16 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 return user->IsInWorld() && user->IsAlive() && user->GetMapId() == leader->GetMapId()
                     && object->IsWithinDistInMap(user, object->GetInteractionDistance()) && object->CanUseNow(user);
             };
+            // The core's count of the object's users after each use, for the event: a use it took raises it,
+            // and a ritual that went off clears it.
+            std::string counts;
             auto useBy = [&](Player* user)
             {
                 WorldPacket packet(CMSG_GAMEOBJ_USE);
                 packet << object->GetObjectGuid();
                 user->GetSession()->HandleGameObjectUseOpcode(packet);
                 usedBy.insert(user->GetGUIDLow());
+                counts += (counts.empty() ? "" : " ") + std::to_string(object->GetUniqueUseCount());
             };
             // The leader first: a ritual's first user casts its spell, and a boss it wakes attacks that user.
             if (!usedBy.count(leader->GetGUIDLow()))
@@ -1495,7 +1500,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 return;
             }
             run.usedAt[use.spawn] = now;
-            update.events.push_back({ "used", name });
+            update.events.push_back({ "used", use.users > 1 && !counts.empty() ? name + ", users counted " + counts : name });
             if (!use.wakes)
             {
                 run.used.insert(use.spawn);
@@ -2106,6 +2111,14 @@ bool GuildDungeon::MayEnterMap(Player* bot, uint32 mapId, std::string* why)
         return false;
     lastEntry[group->GetId()] = now;
     return true;
+}
+
+bool GuildDungeon::LetsFinish(uint32 spellId)
+{
+    // Casts an event needs to land, which the party leaves to finish.
+    // Scarlet Monastery: Whitemane cannot die until her Scarlet Resurrection has raised Mograine.
+    static const std::set<uint32> spells = { 9232 };
+    return spells.count(spellId);
 }
 
 bool GuildDungeon::IsStepItem(uint32 mapId, uint32 itemId)

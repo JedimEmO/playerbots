@@ -113,6 +113,9 @@ public:
     // An item a step of a dungeon on this map needs, such as Zul'Farrak's Executioner's Key: a guild character
     // in a party there needs it in a roll, keeps it, and takes it for itself as master looter.
     static bool IsStepItem(uint32 mapId, uint32 itemId);
+    // A spell a creature casts that an event needs to land, such as Whitemane's resurrection of Mograine:
+    // bots do not interrupt it.
+    static bool LetsFinish(uint32 spellId);
     // For such a ghost outside: the entrance trigger it walks to, its place and how near counts as in it.
     // False when it is not outside, or the trigger is not on its map.
     static bool CorpseEntrance(Player* ghost, WorldLocation& place, uint32& triggerId, float& reach);

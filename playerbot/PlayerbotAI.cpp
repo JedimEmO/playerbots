@@ -1,6 +1,7 @@
 #include "PlayerbotMgr.h"
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 #include "playerbot/GuildRuns.h"
 #include <stdarg.h>
 #include <iomanip>
@@ -5932,6 +5933,12 @@ bool PlayerbotAI::IsInterruptableSpellCasting(Unit* target, std::string spell)
 	uint32 spellid = aiObjectContext->GetValue<uint32>("spell id", spell)->Get();
 	if (!spellid || !target->IsNonMeleeSpellCasted(true) || !target->IsInterruptible())
 		return false;
+
+    // A cast an event needs to land, such as Whitemane's resurrection of Mograine, is left to finish.
+    for (CurrentSpellTypes type : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
+        if (Spell* cast = target->GetCurrentSpell(type))
+            if (cast->m_spellInfo && GuildDungeon::LetsFinish(cast->m_spellInfo->Id))
+                return false;
 
 	SpellEntry const *spellInfo = sServerFacade.LookupSpellInfo(spellid);
 	if (!spellInfo)
