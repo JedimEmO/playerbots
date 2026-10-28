@@ -20,6 +20,9 @@
 
 using namespace ai;
 
+// A path point under water this near the floor below it is on the bottom, not in open water.
+static constexpr float WATER_FLOOR_NEAR = 3.0f;
+
 void MovementAction::CreateWp(Player* wpOwner, float x, float y, float z, float o, uint32 entry, bool important)
 {
     float dist = wpOwner->GetDistance(x, y, z);
@@ -1238,9 +1241,14 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     // resolve another map's terrain/VMap. (The old front-map guard did not imply the bot's map.)
     // Keep the "don't surface a deliberate dive" rule, but only for a destination on our own map.
     bool endUnderwater = endPos.getMapId() == bot->GetMapId() && endPos.isUnderWater();
+    // A guild character inside a dungeon keeps a path along the bottom of the water. The travel map's routes there run
+    // on the floor of a pool and up its bank, and lifted to the surface the character swims above a way it cannot
+    // follow, as in the pond on the way to Lord Cobrahn. A point in open water above the floor is still lifted.
+    const bool keepFloor = sGuildBotMgr.IsGuildBot(bot) && bot->GetMap()->IsDungeon();
     for (auto& p : movePath.getPath())
     {
-        if (p.point.getMapId() == bot->GetMapId() && p.point.isUnderWater() && !endUnderwater)
+        if (p.point.getMapId() == bot->GetMapId() && p.point.isUnderWater() && !endUnderwater
+            && !(keepFloor && p.point.currentHeight() < WATER_FLOOR_NEAR))
         {
             p.point.setAtWaterSurface();
         }

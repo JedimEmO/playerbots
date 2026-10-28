@@ -1006,9 +1006,15 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             }
             if (next)
                 continue;
-            // Not yet: the bosses it comes after are not all dead.
+            // Not yet: the bosses it comes after are not all done. One is done when it is dead, passed over as out of
+            // reach, or not in this run at all, such as Lady Anacondra, whom this world has no spawn of.
+            auto done = [&](int32 boss)
+            {
+                return run.killed.count(boss) || run.passed.count(boss)
+                    || std::find(dungeon.bosses.begin(), dungeon.bosses.end(), boss) == dungeon.bosses.end();
+            };
             if (auto after = dungeon.talkAfter.find(entry); after != dungeon.talkAfter.end()
-                && std::any_of(after->second.begin(), after->second.end(), [&](int32 boss) { return !run.killed.count(boss); }))
+                && !std::all_of(after->second.begin(), after->second.end(), done))
                 continue;
             next = entry;
             run.nextSpawn = dungeon.spawns[i].front();
@@ -1075,7 +1081,18 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (next || run.passed.count(entry))
             continue;
         // Of a boss with several spawns, the one the leader is on its way to while it lives, else the living one nearest.
-        const std::vector<uint32>& spawns = dungeon.spawns[i];
+        // A copy the leader has given up on, out of its reach such as in a cell, is left while another copy lives;
+        // with none left but those, the boss is taken as it is, and two give-ups pass it over.
+        const std::vector<uint32>& allSpawns = dungeon.spawns[i];
+        std::vector<uint32> reachable;
+        if (allSpawns.size() > 1)
+            for (uint32 copySpawn : allSpawns)
+            {
+                Creature* copy = map->GetCreature(copySpawn);
+                if (!copy || !sGuildBotMgr.GiveUps(leader, copy->GetObjectGuid()))
+                    reachable.push_back(copySpawn);
+            }
+        const std::vector<uint32>& spawns = !reachable.empty() && LiveSpawn(map, reachable, WorldPosition(leader)) ? reachable : allSpawns;
         const bool onWay = run.nextBoss == entry && std::count(spawns.begin(), spawns.end(), run.nextSpawn)
             && BossSpawned(map, run.nextSpawn) && !BossDead(map, run.nextSpawn);
         const uint32 spawn = onWay ? run.nextSpawn : LiveSpawn(map, spawns, WorldPosition(leader));

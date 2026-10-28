@@ -10,6 +10,7 @@
 #include "AttackersValue.h"
 #include "RtiTargetValue.h"
 #include "EnemyPlayerValue.h"
+#include "playerbot/GuildBotMgr.h"
 
 using namespace ai;
 using namespace MaNGOS;
@@ -319,6 +320,18 @@ bool PossibleAttackTargetsValue::IsValid(Unit* target, Player* player, float ran
 
     if (sServerFacade.GetThreatManager(target).getCurrentVictim())
         return true;
+
+    // In combat with a guild character or its group but attacking nobody, such as a caster in range mode that cannot
+    // reach anyone (Lady Sarevess) or a creature that cannot path to the party (a Defias Watchman in Deadmines): it holds
+    // the party in its threat list, so the party may attack it, or nobody ever does and the fight never ends.
+    if (sGuildBotMgr.IsGuildBot(player) && AttackersValue::InCombat(target, player, false))
+        return true;
+    if (sGuildBotMgr.IsGuildBot(player) && player->GetGroup())
+        for (GroupReference* ref = player->GetGroup()->GetFirstMember(); ref; ref = ref->next())
+            if (Player* member = ref->getSource())
+                if (member != player && member->IsInWorld() && member->GetMapId() == player->GetMapId()
+                    && target->getThreatManager().getThreat(member) > 0.0f)
+                    return true;
 
     if (target->GetGuidValue(UNIT_FIELD_TARGET))
         return true;
