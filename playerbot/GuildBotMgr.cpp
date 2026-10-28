@@ -1003,6 +1003,7 @@ void GuildBotMgr::CheckJobs()
         Measure(c, bot, dead && !c.dead);
         c.dead = dead;
         sGuildRuns.Observe(bot);
+        GuildDungeon::NoteAlive(bot);
         GuildDungeon::FollowByStone(bot);
 
         // Cut off from its group, say outside a dungeon its party is in: it plays as a solo character until it is back.
@@ -1696,6 +1697,14 @@ std::list<std::string> GuildBotMgr::HandleDebug(const std::string& args)
     out.push_back("last action: combat " + ai->GetLastExecutedActionName(BotState::BOT_STATE_COMBAT)
         + ", non combat " + ai->GetLastExecutedActionName(BotState::BOT_STATE_NON_COMBAT));
     out.push_back("last decision: " + ai->GetLastActionDecision(BotState::BOT_STATE_COMBAT));
+
+    std::ostringstream life;
+    life << "map " << bot->GetMapId() << (bot->IsBeingTeleportedFar() ? ", teleporting to map " + std::to_string(bot->GetTeleportDest().mapid) : "")
+         << ", " << (bot->IsAlive() ? "alive" : bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) ? "ghost" : "dead")
+         << ", in combat " << (bot->IsInCombat() ? "yes" : "no");
+    if (Corpse* corpse = bot->GetCorpse())
+        life << ", corpse on map " << corpse->GetMapId();
+    out.push_back(life.str());
 
     std::ostringstream power;
     power << "power " << uint32(bot->GetPowerType()) << " at " << bot->GetPower(bot->GetPowerType()) << "/" << bot->GetMaxPower(bot->GetPowerType())

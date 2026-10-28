@@ -7,6 +7,7 @@
 #include "playerbot/TravelMgr.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/DeadValues.h"
+#include "playerbot/GuildDungeon.h"
 
 using namespace ai;
 
@@ -66,6 +67,31 @@ bool FindCorpseAction::Execute(Event& event)
     Corpse* corpse = bot->GetCorpse();
     if (!corpse)
         return false;
+
+    // A guild character's corpse in a dungeon, the ghost outside: it walks to the entrance and takes it,
+    // which revives it inside, as it does a player; the trigger's guard has it go after its leader.
+    WorldLocation entrance;
+    uint32 triggerId = 0;
+    float reach = 0.0f;
+    if (GuildDungeon::CorpseEntrance(bot, entrance, triggerId, reach))
+    {
+        WorldPosition at(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z);
+        if (WorldPosition(bot).distance(at) > reach)
+        {
+            if (MoveTo(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z, false, false))
+                return true;
+            // No route the travel map knows: straight at it, as the area trigger action goes into a trigger.
+            bot->GetMotionMaster()->MovePoint(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z, FORCED_MOVEMENT_RUN);
+            return true;
+        }
+        if (!GuildDungeon::MayEnter(bot, triggerId))
+            return false;
+        WorldPacket packet(CMSG_AREATRIGGER);
+        packet << triggerId;
+        packet.rpos(0);
+        bot->GetSession()->HandleAreaTriggerOpcode(packet);
+        return true;
+    }
 
     Player* master = ai->GetGroupMaster();
     if (master)
@@ -210,7 +236,8 @@ bool FindCorpseAction::Execute(Event& event)
 
             moved = MoveTo(moveToPos.getMapId(), moveToPos.getX(), moveToPos.getY(), moveToPos.getZ(), false, false);
 
-            if (!moved && !ai->HasActivePlayerMaster()) //We could not move to coprse. Try spirithealer instead.
+            // A guild character keeps to its corpse in a dungeon; it never takes the spirit healer instead.
+            if (!moved && !ai->HasActivePlayerMaster() && !GuildDungeon::KeepsToCorpse(bot)) //We could not move to coprse. Try spirithealer instead.
             {
                 moved = ai->DoSpecificAction("spirit healer", Event(), true);
             }
@@ -335,6 +362,10 @@ bool SpiritHealerAction::Execute(Event& event)
 bool SpiritHealerAction::isUseful()
 {
     if (bot->InBattleGround())
+        return false;
+
+    // A guild character whose corpse lies in a dungeon goes back to it.
+    if (GuildDungeon::KeepsToCorpse(bot))
         return false;
 
     return bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);

@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "DeadValues.h"
 #include "playerbot/TravelMgr.h"
+#include "playerbot/GuildDungeon.h"
 
 using namespace ai;
 
@@ -197,6 +198,10 @@ bool ShouldSpiritHealerValue::Calculate()
     uint8 durability = AI_VALUE(uint8, "durability");
 
     if (ai->HasActivePlayerMaster()) //Only use spirit healers with direct command with active master.
+        return false;
+
+    // A guild character whose corpse lies in a dungeon runs back to it through the entrance.
+    if (GuildDungeon::KeepsToCorpse(bot))
         return false;
 
     //Nothing to lose

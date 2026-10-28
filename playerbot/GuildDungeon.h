@@ -99,7 +99,21 @@ public:
     // its leader across a dungeon's entrance (the stone, when the dungeon has one), or far off on the same map.
     static bool FollowByTravel(Player* bot, WorldLocation& place);
     // The one-at-a-time entry guard, for the trigger and the stone alike; guild characters also go after their leader.
-    static bool MayEnterMap(Player* player, uint32 mapId);
+    // Why not, when it is a reason that lasts: the leader not inside yet, or the group not bound.
+    static bool MayEnterMap(Player* player, uint32 mapId, std::string* why = nullptr);
+
+    // A dead guild character in a group whose corpse lies in a dungeon goes back to it, as a player would:
+    // it releases, walks to the dungeon's entrance as a ghost and takes it, which revives it inside by the core's rule.
+    // It never takes a spirit healer, a repop, or a graveyard elsewhere.
+    static bool KeepsToCorpse(Player* bot);
+    // For such a ghost outside: the entrance trigger it walks to, its place and how near counts as in it.
+    // False when it is not outside, or the trigger is not on its map.
+    static bool CorpseEntrance(Player* ghost, WorldLocation& place, uint32& triggerId, float& reach);
+    // A guild character dead in a dungeon does not release for a while when a party member who can resurrect it
+    // is alive and near; it waits to be resurrected, as a player would.
+    static bool WaitsForResurrect(Player* dead);
+    // Called for every guild character on each check: a living one forgets when it died.
+    static void NoteAlive(Player* bot);
 
     // For the run record: the dungeon on this map, its bosses in order with their spawns, and the last boss.
     struct Bosses { std::string name; std::vector<int32> entries; std::vector<uint32> spawns; int32 last = 0; };

@@ -65,6 +65,17 @@ namespace
     // Why the stone last turned each member away, so the event log has each new reason once.
     std::mutex refusalLock;
     std::map<uint32, std::string> stoneRefusals;
+    // A member by the stone that has not gone in by it after this walks in by the entrance instead.
+    constexpr time_t STONE_WAIT_SECONDS = MINUTE;
+    std::map<uint32, time_t> stoneSince;           // by member guid: since when it has been by the stone, outside
+
+    // A member dead in a dungeon waits this long to be resurrected by a party member this near, then releases.
+    constexpr time_t RESURRECT_WAIT_SECONDS = 2 * MINUTE;
+    constexpr float RESURRECT_NEAR = 60.0f;
+    std::mutex deathLock;
+    std::map<uint32, time_t> deadSince;            // by guid: when it was first seen dead, until it lives again
+    // A ghost not back in its dungeon this long after dying takes the graveyard's way instead.
+    constexpr time_t CORPSE_RUN_SECONDS = 15 * MINUTE;
 
     // The last boss, where the boss destinations alone would not say which it is.
     const std::map<uint32, int32> LAST_BOSS = {
@@ -1369,7 +1380,7 @@ bool GuildDungeon::EnterByStone(Player* player, uint32 mapId, std::string& why, 
     }
 
     // One at a time, and guild characters after their leader: two entering an unbound instance at once can crash the server.
-    if (!MayEnterMap(player, mapId))
+    if (!MayEnterMap(player, mapId, &why))
         return false;
 
     player->TeleportTo(at->target_mapId, at->target_X, at->target_Y, at->target_Z, at->target_Orientation);
@@ -1393,7 +1404,15 @@ bool GuildDungeon::FollowByTravel(Player* bot, WorldLocation& place)
         if (map && map->IsNonRaidDungeon() && StonePlace(leader->GetMapId(), stone) && stone.getMapId() == bot->GetMapId())
         {
             if (stone.distance(WorldPosition(bot)) <= NEAR_STONE)
-                return false;
+            {
+                // By the stone, which takes it in (FollowByStone). One the stone has not taken in after a minute
+                // walks in by the entrance instead, whose trigger has the same guard.
+                std::lock_guard<std::mutex> guard(refusalLock);
+                auto since = stoneSince.emplace(bot->GetGUIDLow(), time(nullptr)).first;
+                if (time(nullptr) - since->second < STONE_WAIT_SECONDS)
+                    return false;
+                return LeaderAcrossEntrance(bot, place);
+            }
             place = WorldLocation(stone.getMapId(), stone.getX(), stone.getY(), stone.getZ(), stone.getO());
             return true;
         }
@@ -1403,6 +1422,11 @@ bool GuildDungeon::FollowByTravel(Player* bot, WorldLocation& place)
     // The leader at an object that needs more than one user, such as an altar: to it, near enough to use it.
     if (sGuildDungeon.UseSpot(leader, bot, place))
         return true;
+
+    {
+        std::lock_guard<std::mutex> guard(refusalLock);
+        stoneSince.erase(bot->GetGUIDLow());
+    }
 
     // Upstream's follow gives up this far off; a follower that wandered or was taken away travels back.
     if (bot->GetDistance(leader) > FOLLOW_BY_TRAVEL)
@@ -1533,7 +1557,7 @@ bool GuildDungeon::MayEnter(Player* bot, uint32 triggerId)
     return MayEnterMap(bot, at->target_mapId);
 }
 
-bool GuildDungeon::MayEnterMap(Player* bot, uint32 mapId)
+bool GuildDungeon::MayEnterMap(Player* bot, uint32 mapId, std::string* why)
 {
     Group* group = bot->GetGroup();
     if (!group)
@@ -1544,9 +1568,17 @@ bool GuildDungeon::MayEnterMap(Player* bot, uint32 mapId)
         // The leader first, a player or a guild character: inside, in the world, and the group bound.
         Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
         if (!leader || !leader->IsInWorld() || leader->IsBeingTeleportedFar() || leader->GetMapId() != mapId)
+        {
+            if (why)
+                *why = "The leader is not inside yet.";
             return false;
+        }
         if (!group->GetBoundInstance(mapId))
+        {
+            if (why)
+                *why = "The group is not bound to the leader's instance.";
             return false;
+        }
     }
 
     // Then one at a time: nobody else on the way in, and a gap since the last one went.
@@ -1564,4 +1596,78 @@ bool GuildDungeon::MayEnterMap(Player* bot, uint32 mapId)
         return false;
     lastEntry[group->GetId()] = now;
     return true;
+}
+
+bool GuildDungeon::KeepsToCorpse(Player* bot)
+{
+    if (!sGuildBotMgr.IsGuildBot(bot) || !bot->GetGroup() || bot->IsAlive())
+        return false;
+    Corpse* corpse = bot->GetCorpse();
+    if (!corpse)
+        return false;
+    MapEntry const* map = sMapStore.LookupEntry(corpse->GetMapId());
+    if (!map || !map->IsNonRaidDungeon())
+        return false;
+    // A ghost that has not got back in after a long while cannot reach the entrance: the graveyard's way, as before.
+    std::lock_guard<std::mutex> guard(deathLock);
+    auto since = deadSince.emplace(bot->GetGUIDLow(), time(nullptr)).first;
+    return time(nullptr) - since->second < CORPSE_RUN_SECONDS;
+}
+
+bool GuildDungeon::CorpseEntrance(Player* ghost, WorldLocation& place, uint32& triggerId, float& reach)
+{
+    if (!ghost->IsInWorld() || !ghost->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) || !KeepsToCorpse(ghost))
+        return false;
+    Corpse* corpse = ghost->GetCorpse();
+    if (corpse->GetMapId() == ghost->GetMapId())
+        return false;
+    // The entrance of the wing the corpse lies in.
+    AreaTrigger const* at = EntranceNear(corpse->GetMapId(), corpse->GetPositionX(), corpse->GetPositionY(), corpse->GetPositionZ());
+    AreaTriggerEntry const* entry = at ? sAreaTriggerStore.LookupEntry(at->entry) : nullptr;
+    if (!entry || entry->mapid != ghost->GetMapId())
+        return false;
+    triggerId = entry->id;
+    place = WorldLocation(entry->mapid, entry->x, entry->y, entry->z, 0.0f);
+    reach = std::max({ entry->radius, entry->box_x / 2.0f, entry->box_y / 2.0f, 2.0f });
+    return true;
+}
+
+bool GuildDungeon::WaitsForResurrect(Player* dead)
+{
+    if (!sGuildBotMgr.IsGuildBot(dead) || dead->IsAlive() || dead->GetCorpse() || !dead->IsInWorld())
+        return false;
+    Group* group = dead->GetGroup();
+    MapEntry const* map = sMapStore.LookupEntry(dead->GetMapId());
+    if (!group || !map || !map->IsNonRaidDungeon())
+        return false;
+
+    const time_t now = time(nullptr);
+    time_t since;
+    {
+        std::lock_guard<std::mutex> guard(deathLock);
+        since = deadSince.emplace(dead->GetGUIDLow(), now).first->second;
+    }
+    if (now - since >= RESURRECT_WAIT_SECONDS)
+        return false;
+
+    // A priest, paladin or shaman of the party, alive and near: it resurrects the dead once the fight is over.
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->getSource();
+        if (!member || member == dead || !member->IsInWorld() || !member->IsAlive() || member->GetMapId() != dead->GetMapId()
+            || member->GetDistance(dead) > RESURRECT_NEAR)
+            continue;
+        const uint8 cls = member->getClass();
+        if (cls == CLASS_PRIEST || cls == CLASS_PALADIN || cls == CLASS_SHAMAN)
+            return true;
+    }
+    return false;
+}
+
+void GuildDungeon::NoteAlive(Player* bot)
+{
+    if (!bot->IsAlive())
+        return;
+    std::lock_guard<std::mutex> guard(deathLock);
+    deadSince.erase(bot->GetGUIDLow());
 }

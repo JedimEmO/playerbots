@@ -6,6 +6,7 @@
 #include "playerbot/strategy/values/LastMovementValue.h"
 #include "ReviveFromCorpseAction.h"
 #include "playerbot/TravelMgr.h"
+#include "playerbot/GuildDungeon.h"
 
 namespace ai
 {
@@ -92,6 +93,10 @@ namespace ai
                 return !bot->GetCorpse() || !bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST);
 
             if (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+                return false;
+
+            // A guild character dead in a dungeon, with a party member near who can resurrect it, waits a while.
+            if (GuildDungeon::WaitsForResurrect(bot))
                 return false;
 
             if (!bot->GetGroup())
@@ -192,6 +197,10 @@ namespace ai
                 return false;
 
             if (ai->HasActivePlayerMaster())
+                return false;
+
+            // A guild character whose corpse lies in a dungeon stays with its party and runs back to it.
+            if (GuildDungeon::KeepsToCorpse(bot))
                 return false;
 
             return true;
