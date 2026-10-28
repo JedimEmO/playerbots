@@ -404,7 +404,9 @@ bool MovementAction::MoveOffTransport(PlayerbotAI* ai, WorldPosition exitPos, bo
 
     transport->RemovePassenger(bot);
 
-    if (doTeleport)
+    // The step onto a transport passes no exit. Teleporting to that empty position put characters at the
+    // middle of the Eastern Kingdoms map after the Great Lift. With no exit, it steps off where it stands.
+    if (doTeleport && exitPos)
     {
         bot->TeleportTo(exitPos.getMapId(), exitPos.getX(), exitPos.getY(), exitPos.getZ(), exitPos.getO(), 0);
         return true;

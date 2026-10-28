@@ -150,6 +150,14 @@ float TravelNodePath::getCost(Unit* unit, uint32 cGold)
                     return -1;
         }
 
+        // A guild character takes no lift in the open world for now. The default transport mode teleports dock to dock,
+        // a cheat it never uses, and the Great Lift's exits misplaced characters by thousands of yards: a route around
+        // one, or none. Inside a dungeon it still rides, as the Vator out of Gnomeregan, whose rides land where they should.
+        if (getPathType() == TravelNodePathType::transport && pathObject && sGuildBotMgr.IsGuildBot(bot) && !bot->GetMap()->IsDungeon())
+            if (GameObjectInfo const* info = sGOStorage.LookupEntry<GameObjectInfo>(pathObject))
+                if (info->type == GAMEOBJECT_TYPE_TRANSPORT)
+                    return -1;
+
         if (getPathType() == TravelNodePathType::flightPath && pathObject)
         {
             if (!bot->IsAlive())
