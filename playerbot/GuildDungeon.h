@@ -94,6 +94,8 @@ public:
     bool UseSpot(Player* leader, Player* member, WorldLocation& place) const;
     // The leader of an event stays by a creature or object of it, such as an escort: no travel, and back by it out of a fight.
     static void HoldNear(Player* leader, WorldObject* by);
+    // The same, staying this near and coming back to this near.
+    static void HoldNear(Player* leader, WorldObject* by, float near, float stand);
     // Where a guild character should go when its group's leader is on the other side of a dungeon's entrance,
     // inside while it is outside or outside while it is inside: the leader's place. Its follow target is out of
     // reach on another map, so follow moves there instead, and the route the travel map gives runs through the
@@ -200,6 +202,10 @@ private:
         std::map<uint32, time_t> itemUsedAt; // when an item use step's item was used, by the object's spawn
         std::map<uint32, time_t> itemTriedAt; // when it was last tried, by the object's spawn
         bool holding = false;          // the leader stays by a creature of an event now, and travels nowhere
+        int32 sleeper = 0;             // a boss that fell asleep as the next boss, such as Mograine lying as dead, or 0
+        uint32 sleeperSpawn = 0;       // its spawn
+        time_t sleeperSince = 0;       // when it fell asleep
+        bool sleeperWaiting = false;   // the leader waits by it now
         ObjectGuid killGuid;           // the creature the leader kills before the next boss, or empty
         std::set<int32> passed;        // bosses passed over as out of reach on this map
         int32 headwayBoss = 0;         // the boss the leader's headway is measured to
@@ -224,6 +230,8 @@ private:
     void TickBosses(Player* leader, Run& run, Update& update);
     // The finish step: out, then the reset.
     void TickLeave(Player* leader, Run& run, Update& update);
+    // To a step's object or creature: by itself within APPROACH_RANGE, which holds it there, and by travel farther off.
+    static void Approach(Player* leader, WorldObject* to, ai::TravelDestination* place, float near, float stand, Run& run);
 
     mutable std::mutex lock;
     std::map<uint32, Run> runs;                 // by leader guid

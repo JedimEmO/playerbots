@@ -251,6 +251,16 @@ bool GuildBotMgr::BestSpotRate(uint32 level, int32 except, float& experiencePerS
     return found;
 }
 
+uint32 GuildBotMgr::SpotCrowd(int32 entry, uint32 exceptGuid) const
+{
+    std::lock_guard<std::mutex> guard(spotYieldLock);
+    uint32 crowd = 0;
+    for (auto& [guid, spot] : spotWorkers)
+        if (spot == entry && guid != exceptGuid)
+            crowd++;
+    return crowd;
+}
+
 void GuildBotMgr::AddSpotYield(int32 entry, uint32 work, uint32 experience, uint32 level)
 {
     if (!entry || !work)
@@ -970,7 +980,14 @@ void GuildBotMgr::Measure(Character& c, Player* bot, bool died)
                 count.deaths++;
             // The stay: a new one when it works a different spot; a gap with no spot, between renewals, continues it.
             if (spot != c.stay.entry)
+            {
                 c.stay = Character::Stay{ spot, 0, 0 };
+                std::lock_guard<std::mutex> guard(spotYieldLock);
+                if (c.job == "level")
+                    spotWorkers[c.guid] = spot;
+                else
+                    spotWorkers.erase(c.guid);
+            }
             if (activity != ACTIVITY_TRAVEL)
             {
                 c.stay.work += uint32(step);

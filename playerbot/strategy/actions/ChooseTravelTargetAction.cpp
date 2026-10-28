@@ -382,7 +382,9 @@ bool ChooseTravelTargetAction::SetBestGrindTarget(Player* requester, TravelTarge
     float bestScore = -1.0f;
     for (const Candidate& candidate : candidates)
     {
-        const float rate = candidate.known ? candidate.rate : averageRate;
+        // A spot others are working already gives each of them a share of its creatures.
+        const float rate = (candidate.known ? candidate.rate : averageRate)
+            / float(1 + sGuildBotMgr.SpotCrowd(candidate.destination->GetEntry(), bot->GetGUIDLow()));
         const float walk = candidate.distance / GRIND_WALK_YARDS_PER_SECOND;
         const float score = rate * GRIND_STAY_SECONDS / (GRIND_STAY_SECONDS + walk);
         if (score > bestScore)

@@ -75,6 +75,8 @@ public:
     // The best such rate among the spots characters near this level have worked long enough, other than the one given.
     // False when none has.
     bool BestSpotRate(uint32 level, int32 except, float& experiencePerSecond) const;
+    // How many other levelling characters are working this grind spot now.
+    uint32 SpotCrowd(int32 entry, uint32 exceptGuid) const;
 
     // Called from AiFactory: the non-combat strategies of a guild character, from its job.
     void AddNonCombatStrategies(Player* player, ai::Engine* engine) const;
@@ -230,6 +232,7 @@ private:
     std::map<uint32, std::map<int32, time_t>> leftDestinations;  // per character: destination entry, until
     struct SpotYield { uint64 work = 0, experience = 0; uint32 level = 0; };  // level: the highest that worked it
     std::map<int32, SpotYield> spotYields;                      // per grind spot entry, for all levelling characters
+    std::map<uint32, int32> spotWorkers;                        // per levelling character: the spot it is working, for SpotCrowd
     mutable std::mutex spotYieldLock;                           // read by travel searches off the world thread
     void AddSpotYield(int32 entry, uint32 work, uint32 experience, uint32 level);
     void LoadSpotYields();

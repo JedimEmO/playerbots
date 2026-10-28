@@ -202,6 +202,13 @@ namespace
     // The leader of an event stays this near the creature it is by, and moves back within it when it is farther.
     constexpr float HOLD_NEAR = 12.0f;
     constexpr float HOLD_STAND = 5.0f;
+    // A step's object or creature this near, the leader walks to by itself. Its travel can stop short, 42 yards from the
+    // Disciple of Naralex, and once arrived the travel target goes on counting as working there while fights take the
+    // leader off, 200 yards from the gong in Razorfen Downs.
+    constexpr float APPROACH_RANGE = 60.0f;
+    // A boss that fell asleep as the next boss, such as Mograine lying as dead until Whitemane raises him, keeps the leader
+    // by it this long, fighting what comes, before the next boss after it comes first.
+    constexpr time_t SLEEPER_WAIT_SECONDS = 3 * MINUTE;
 
     // Letters only, in lower case, without a leading "the": "The Deadmines" and "deadmines" are one name.
     std::string Normalize(const std::string& name)
@@ -1054,6 +1061,12 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     talkWait = BossName(entry) + " to open the " + doorName;
                 continue;
             }
+            // Near but not near enough to speak: the leader walks the rest of the way itself.
+            if (offers && leader->GetDistance(creature) > TALK_DISTANCE && leader->GetDistance(creature) <= APPROACH_RANGE)
+            {
+                HoldNear(leader, creature, TALK_DISTANCE - 1.0f, TALK_DISTANCE / 2.0f);
+                run.holding = true;
+            }
             if (leader->GetDistance(creature) <= TALK_DISTANCE && !leader->IsInCombat() && offers
                 && (spoken == run.talkedAt.end() || now - spoken->second >= TALK_RETRY_SECONDS))
             {
@@ -1114,6 +1127,13 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     asleep = entry;
                     asleepSpawn = spawn;
                 }
+                // It fell asleep as the next boss: an event wakes it, which comes to it.
+                if (run.nextBoss == entry && run.sleeper != entry)
+                {
+                    run.sleeper = entry;
+                    run.sleeperSpawn = spawn;
+                    run.sleeperSince = time(nullptr);
+                }
                 continue;
             }
         next = entry;
@@ -1124,6 +1144,22 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     {
         next = asleep;
         run.nextSpawn = asleepSpawn;
+    }
+    // A boss that fell asleep as the next boss: the leader stays by it for a while, fighting what comes, as the event
+    // that wakes it comes to it. Whitemane runs to Mograine and raises him there.
+    run.sleeperWaiting = false;
+    if (run.sleeper)
+    {
+        Creature* sleeper = map->GetCreature(run.sleeperSpawn);
+        if (!sleeper || !sleeper->IsAlive() || !sleeper->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE))
+            run.sleeper = 0;
+        else if (time(nullptr) - run.sleeperSince < SLEEPER_WAIT_SECONDS)
+        {
+            HoldNear(leader, sleeper);
+            run.holding = true;
+            run.sleeperWaiting = true;
+            talkWait = BossName(run.sleeper) + " to wake";
+        }
     }
     // A boss with several spawns is travelled to at the one chosen above: its boss destination, where it has one,
     // would pick any of them, such as a spot the pool left empty.
@@ -1301,12 +1337,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         run.useSpawn = use.spawn;
         if (leader->GetDistance(object) > USE_DISTANCE)
         {
-            if (PlayerbotAI* ai = leader->GetPlayerbotAI())
-            {
-                TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-                if (target && target->IsActive() && target->GetDestination() != use.place)
-                    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
-            }
+            Approach(leader, object, use.place, USE_DISTANCE - 1.0f, USE_STAND, run);
             run.headwaySince = now;
             update.reason = "on the way to use the " + itemName + " on the " + objectName + " in " + dungeon.name + ", " + count;
             return;
@@ -1400,6 +1431,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             run.useSpawn = use.spawn;
             if (leader->GetDistance(object) <= USE_DISTANCE)
             {
+                // At it, it stays by it between uses, out of a fight, instead of fighting its way off.
+                HoldNear(leader, object, USE_DISTANCE - 1.0f, USE_STAND);
+                run.holding = true;
                 // Each time it can be used, out of combat: its last use brought a wave, and the wave is dead.
                 const bool usable = object->IsSpawned() && !object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT)
                     && !object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_IN_USE);
@@ -1420,12 +1454,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     + std::to_string(use.times) + " times";
                 return;
             }
-            if (PlayerbotAI* ai = leader->GetPlayerbotAI())
-            {
-                TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-                if (target && target->IsActive() && target->GetDestination() != use.place)
-                    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
-            }
+            Approach(leader, object, use.place, USE_DISTANCE - 1.0f, USE_STAND, run);
             run.headwaySince = now;
             update.reason = "on the way to use the " + name + " in " + dungeon.name + ", " + count;
             return;
@@ -1449,6 +1478,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         run.useSpawn = use.spawn;
         if (leader->GetDistance(object) <= USE_DISTANCE)
         {
+            // At it, it stays by it between uses, out of a fight, instead of fighting its way off.
+            HoldNear(leader, object, USE_DISTANCE - 1.0f, USE_STAND);
+            run.holding = true;
             // Everyone has used it and the boss still sleeps: again, after a while.
             std::set<uint32>& usedBy = run.usedBy[use.spawn];
             if (usedBy.size() >= use.users)
@@ -1519,12 +1551,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             update.reason = "used the " + name + " in " + dungeon.name + ", waiting for " + BossName(next) + " to wake";
             return;
         }
-        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
-        {
-            TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-            if (target && target->IsActive() && target->GetDestination() != use.place)
-                target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
-        }
+        Approach(leader, object, use.place, USE_DISTANCE - 1.0f, USE_STAND, run);
         run.headwaySince = now;
         update.reason = "on the way to use the " + name + " in " + dungeon.name + ", " + count;
         return;
@@ -1675,6 +1702,11 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
         if (reset && instanceId)
             sGuildRuns.InstanceReset(instanceId);
     }
+    // The way out is behind it. Its travel target there stays active and forced otherwise, and no new travel is asked
+    // for while one is active, so the next run's way to the dungeon never starts: Ragefire Chasm's leader spent the
+    // half hour after its second run on errands around Orgrimmar with "out of Ragefire Chasm" still its target.
+    if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+        sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
     update.status = "done";
     update.reason = run.cleared + (reset ? ", and reset" : ", but the reset failed");
     if (reset)
@@ -1970,6 +2002,33 @@ TravelDestination* GuildDungeon::UseDestination(Player* bot) const
 
 void GuildDungeon::HoldNear(Player* leader, WorldObject* by)
 {
+    HoldNear(leader, by, HOLD_NEAR, HOLD_STAND);
+}
+
+void GuildDungeon::Approach(Player* leader, WorldObject* to, TravelDestination* place, float near, float stand, Run& run)
+{
+    if (leader->GetDistance(to) <= APPROACH_RANGE)
+    {
+        HoldNear(leader, to, near, stand);
+        run.holding = true;
+        return;
+    }
+    // Farther off it travels. A travel target to the same place that counts as working there, or waits out its cooldown,
+    // while the leader is far from it starts again; one elsewhere goes.
+    if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+    {
+        TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+        if (!target)
+            return;
+        const TravelStatus status = target->GetStatus();
+        if (target->GetDestination() != place ? target->IsActive()
+            : status == TravelStatus::TRAVEL_STATUS_WORK || status == TravelStatus::TRAVEL_STATUS_COOLDOWN)
+            target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+    }
+}
+
+void GuildDungeon::HoldNear(Player* leader, WorldObject* by, float near, float stand)
+{
     // No travel target while it stays: the dungeon's travel would take it on to the next boss.
     if (PlayerbotAI* ai = leader->GetPlayerbotAI())
     {
@@ -1978,10 +2037,10 @@ void GuildDungeon::HoldNear(Player* leader, WorldObject* by)
             target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
     }
     // In a fight it fights where the fight is; out of one, it goes back by the creature.
-    if (leader->IsInCombat() || leader->GetDistance(by) <= HOLD_NEAR || leader->IsMoving())
+    if (leader->IsInCombat() || leader->GetDistance(by) <= near || leader->IsMoving())
         return;
     float x, y, z;
-    by->GetNearPoint(leader, x, y, z, leader->GetObjectBoundingRadius(), HOLD_STAND, by->GetAngle(leader));
+    by->GetNearPoint(leader, x, y, z, leader->GetObjectBoundingRadius(), stand, by->GetAngle(leader));
     leader->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_RUN);
 }
 
@@ -2044,7 +2103,8 @@ Creature* GuildDungeon::NextBoss(Player* bot, float within) const
         return nullptr;
     // An object to use first, such as the altar that wakes the boss: the leader stays at it.
     // A creature to speak to is no target either.
-    if (it->second.useSpawn || it->second.dungeon.talks.count(it->second.nextBoss))
+    // Nor while it waits by a boss that fell asleep, which an event wakes.
+    if (it->second.useSpawn || it->second.dungeon.talks.count(it->second.nextBoss) || it->second.sleeperWaiting)
         return nullptr;
     Creature* boss = bot->GetMap()->GetCreature(it->second.nextSpawn);
     if (!boss || !boss->IsAlive() || !boss->IsInWorld() || bot->GetDistance(boss) > within)
