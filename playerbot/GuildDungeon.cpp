@@ -57,6 +57,8 @@ namespace
     constexpr float NEAR_STONE = 120.0f;
     // A follower farther than this from its leader on the same map travels to it, by the travel map's routes.
     constexpr float FOLLOW_BY_TRAVEL = 150.0f;
+    // Or this far above or below it, outside: follow walks under the leader but takes no lift up to it.
+    constexpr float FOLLOW_BY_TRAVEL_HEIGHT = 20.0f;
     // A boss the travel map has no route to sorts after every boss it has a route to.
     constexpr float NO_ROUTE = 1000000.0f;
     // A boss the leader comes no nearer to by this much in this long, alive and out of combat, is out of reach
@@ -148,7 +150,10 @@ namespace
     // An object used several times is used each time it can be, out of combat, and the step is done
     // when the creature its last use brings is dead. One with no boss is due when the leader comes near it.
     // A row can name an encounter of the instance script whose state the `used` event reports, before and after the use.
-    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; bool wakes; uint32 times = 1; uint32 brings = 0; uint32 report = 0; };
+    // The creatures each use but the last brings, which must all die before it can be used again, can be named too:
+    // the party hunts them between uses, since some never come to the object.
+    struct UseObject { uint32 map; uint32 entry; uint32 users; int32 before; bool wakes; uint32 times = 1; uint32 brings = 0; uint32 report = 0;
+                       std::array<uint32, 2> waves = {}; };
     const UseObject USES[] = {
         // Blackfathom Deeps: the four Fires of Aku'mai, lit once Kelris is dead, open the way to Aku'mai.
         { 48, 21118, 1, 4829, false },
@@ -161,7 +166,8 @@ namespace
         // Razorfen Downs: the Gong brings a wave of Tomb Fiends, then one of Tomb Reavers, then Tuten'kash.
         // It can be rung again once the wave is dead. It comes before Mordresh Fire Eye, since the route between the bosses
         // does not come within 60 yards of it.
-        { 129, 148917, 1, 7357, false, 3, 7355 },
+        // The waves are Tomb Fiends and Tomb Reavers, from two corridors 46 and 82 yards off.
+        { 129, 148917, 1, 7357, false, 3, 7355, 0, { 7349, 7351 } },
     };
     // The leader uses an object this near it, and members this near the leader come to it to join.
     constexpr float USE_DISTANCE = 5.0f;
@@ -172,6 +178,8 @@ namespace
     constexpr time_t USE_RETRY_SECONDS = 15;
     // An object with no boss of its own is due when the leader comes this near it.
     constexpr float USE_NEAR = 60.0f;
+    // The party looks this far from an object for the wave its last use brought.
+    constexpr float WAVE_RANGE = 120.0f;
 
     // Creatures with no spawn of their own, brought by an event, that a party kills before a boss, as players would:
     // the creature, the boss, and the door their deaths open. The step is done when none is alive near the leader,
@@ -518,6 +526,7 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         step.times = std::max(use.times, 1u);
         step.brings = use.brings;
         step.report = use.report;
+        step.waves = use.waves;
         WorldPosition place;
         auto findSpawn = [&](auto const& pair)
         {
@@ -1010,8 +1019,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     update.events.push_back({ "door_open", doorName });
                 continue;
             }
+            // Gone: dead, or despawned at the end of its walk. One not loaded, far off, is gone only if its spawn says so.
             Creature* creature = map->GetCreature(dungeon.spawns[i].front());
-            if (!creature || !creature->IsAlive())
+            if (creature ? !creature->IsAlive() : BossDead(map, dungeon.spawns[i].front()))
             {
                 run.talked.insert(entry);
                 continue;
@@ -1030,6 +1040,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 continue;
             next = entry;
             run.nextSpawn = dungeon.spawns[i].front();
+            // Not loaded: the leader travels to it, and its grid loads on the way.
+            if (!creature)
+                continue;
             const bool escort = dungeon.talkEscorts.count(entry);
             auto waitFor = dungeon.talkWaits.find(entry);
             const time_t wait = waitFor != dungeon.talkWaits.end() ? waitFor->second : TALK_WAIT_SECONDS;
@@ -1429,6 +1442,33 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 return;
             }
             run.useSpawn = use.spawn;
+            // Used, and shut until its wave is dead: the party hunts the wave, where it is.
+            if (times && object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT) && use.waves[0])
+            {
+                Unit* nearest = nullptr;
+                for (uint32 wave : use.waves)
+                {
+                    if (!wave)
+                        continue;
+                    std::list<Unit*> found;
+                    MaNGOS::AllCreaturesOfEntryInRangeCheck check(object, wave, WAVE_RANGE);
+                    MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
+                    Cell::VisitAllObjects(object, searcher, WAVE_RANGE);
+                    for (Unit* unit : found)
+                        if (unit->IsAlive() && unit->IsInWorld() && (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest)))
+                            nearest = unit;
+                }
+                if (nearest)
+                {
+                    run.killGuid = nearest->GetObjectGuid();
+                    HoldNear(leader, nearest, KILL_RANGE / 2.0f, HOLD_STAND);
+                    run.holding = true;
+                    run.headwaySince = now;
+                    update.reason = "killing the " + name + "'s wave, " + std::string(nearest->GetName()) + ", in " + dungeon.name + ", used "
+                        + std::to_string(times) + " of " + std::to_string(use.times) + " times";
+                    return;
+                }
+            }
             if (leader->GetDistance(object) <= USE_DISTANCE)
             {
                 // At it, it stays by it between uses, out of a fight, instead of fighting its way off.
@@ -1942,7 +1982,11 @@ bool GuildDungeon::FollowByTravel(Player* bot, WorldLocation& place)
     }
 
     // Upstream's follow gives up this far off; a follower that wandered or was taken away travels back.
-    if (bot->GetDistance(leader) > FOLLOW_BY_TRAVEL)
+    // So does one far below or above its leader outside, such as under it at the lift by Gnomeregan, where follow
+    // stops beneath the leader: the travel map's route takes the lift.
+    MapEntry const* here = sMapStore.LookupEntry(bot->GetMapId());
+    const bool apart = here && !here->IsDungeon() && std::fabs(bot->GetPositionZ() - leader->GetPositionZ()) > FOLLOW_BY_TRAVEL_HEIGHT;
+    if (bot->GetDistance(leader) > FOLLOW_BY_TRAVEL || apart)
     {
         leader->GetPosition(place);
         return true;

@@ -146,6 +146,9 @@ private:
         bool alone = false;         // in a group but with no member near, as its strategies were last built
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
         time_t invitedAt = 0;       // when the dungeon leader last invited its companion
+        float stillX = 0.0f, stillY = 0.0f, stillZ = 0.0f; // a party member left behind: where it last stood still
+        time_t stillSince = 0;      // since when it has stood there, or 0
+        bool behindReset = false;   // its last recovery left behind was a reset, so the next is the hearthstone
         time_t emptyFightSince = 0; // since when it has been in the AI's combat state with nothing to attack, or 0
         std::vector<time_t> emptyFightExits; // when it last left such fights, for a dungeon leader held outside
         time_t approachUntil = 0;   // a dungeon leader going straight to its stone through such fights, until then
@@ -181,6 +184,8 @@ private:
     void WriteState(const Character& c, Player* bot);
     void ApplyRole(Character& c, Player* bot);
     void CheckChase(Character& c, Player* bot);
+    // A party member its dungeon leader waits for outside, standing still where its own moves cannot get it out.
+    void CheckLeftBehind(Character& c, Player* bot);
     // In the AI's combat state with nothing to attack for a while: it leaves the fight where it stands.
     void CheckEmptyFight(Character& c, Player* bot);
     // Leave the fight where it stands: what holds it is passed over, targets and threat dropped.

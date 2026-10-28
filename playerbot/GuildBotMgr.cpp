@@ -30,6 +30,11 @@ namespace
     constexpr time_t LOGIN_RETRY_SECONDS = 60;
     // A levelling character that earns no experience for this long is reported as stalled.
     constexpr time_t STALL_SECONDS = 15 * MINUTE;
+    // A party member outside, this far from its dungeon leader and no more than a few yards from where it stood this
+    // long ago, is left behind where its own moves cannot get it out, such as halfway up the lift by Gnomeregan.
+    constexpr float LEFT_BEHIND_DISTANCE = 100.0f;
+    constexpr float LEFT_BEHIND_STILL = 5.0f;
+    constexpr time_t LEFT_BEHIND_SECONDS = 5 * MINUTE;
     // A character that gained experience this recently is earning it, for the hourly measure.
     constexpr time_t EARNING_WINDOW_SECONDS = 5 * MINUTE;
     // The measure's counts reach the table this often, and at every change of hour or job.
@@ -606,6 +611,57 @@ void GuildBotMgr::CheckGhostUnderMap(Character& c, Player* bot)
         out = SendToGraveyard(bot);
     if (out)
         Event(c.guid, "recovery", "under the map");
+}
+
+void GuildBotMgr::CheckLeftBehind(Character& c, Player* bot)
+{
+    Group* group = bot->GetGroup();
+    Player* leader = group ? sObjectMgr.GetPlayer(group->GetLeaderGuid()) : nullptr;
+    MapEntry const* map = sMapStore.LookupEntry(bot->GetMapId());
+    const bool behind = c.job == "party" && leader && leader != bot && leader->IsInWorld() && IsGuildBot(leader)
+        && GetActiveJob(leader->GetGUIDLow()) == "dungeon" && bot->IsAlive() && !bot->IsInCombat()
+        && map && !map->IsDungeon() && leader->GetMapId() == bot->GetMapId() && bot->GetDistance(leader) > LEFT_BEHIND_DISTANCE;
+    const time_t now = time(nullptr);
+    if (!behind)
+    {
+        c.stillSince = 0;
+        c.behindReset = false;
+        return;
+    }
+    if (!c.stillSince || bot->GetDistance(c.stillX, c.stillY, c.stillZ) > LEFT_BEHIND_STILL)
+    {
+        c.stillX = bot->GetPositionX();
+        c.stillY = bot->GetPositionY();
+        c.stillZ = bot->GetPositionZ();
+        c.stillSince = now;
+        return;
+    }
+    if (now - c.stillSince < LEFT_BEHIND_SECONDS)
+        return;
+    c.stillSince = now;
+
+    // As the stall recovery does for a levelling character: under the map, the nearest graveyard; else a reset first,
+    // and if that does not get it moving, home by hearthstone, which for a party is by its dungeon's stone.
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai)
+        return;
+    if (UnderTheMap(bot) && SendToGraveyard(bot))
+    {
+        ai->Reset(true);
+        Event(c.guid, "recovery", "left behind, under the map");
+    }
+    else if (!c.behindReset)
+    {
+        ai->Reset(true);
+        c.behindReset = true;
+        Event(c.guid, "recovery", "left behind, reset");
+    }
+    else
+    {
+        const bool home = ai->DoSpecificAction("hearthstone", ai::Event(), true);
+        c.behindReset = false;
+        Event(c.guid, "recovery", home ? "left behind, hearthstone" : "left behind, hearthstone not ready");
+    }
 }
 
 uint8 GuildBotMgr::GetTankOrder(uint32 guid) const
@@ -1340,6 +1396,7 @@ void GuildBotMgr::CheckJobs()
 
         ApplyRole(c, bot);
         CheckChase(c, bot);
+        CheckLeftBehind(c, bot);
         CheckEmptyFight(c, bot);
         CheckApproach(c, bot);
         CheckGhostUnderMap(c, bot);
