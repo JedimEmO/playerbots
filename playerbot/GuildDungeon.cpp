@@ -3,6 +3,7 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildRuns.h"
 #include "playerbot/TravelMgr.h"
+#include "playerbot/TravelNode.h"
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
 #include "AI/ScriptDevAI/ScriptDevAIMgr.h"
@@ -52,6 +53,14 @@ namespace
     constexpr float NEAR_STONE = 120.0f;
     // A follower farther than this from its leader on the same map travels to it, by the travel map's routes.
     constexpr float FOLLOW_BY_TRAVEL = 150.0f;
+    // A boss the travel map has no route to sorts after every boss it has a route to.
+    constexpr float NO_ROUTE = 1000000.0f;
+    // A boss the leader comes no nearer to by this much in this long, alive and out of combat, is out of reach
+    // on this map: the party passes it over, or fails the run at the last boss.
+    constexpr float HEADWAY = 10.0f;
+    constexpr time_t NO_HEADWAY_SECONDS = 5 * MINUTE;
+    // Before each boss the leader waits this long for a member farther off than NEAR_LEADER, then goes on without it.
+    constexpr time_t PARTY_WAIT_SECONDS = 3 * MINUTE;
 
     // Why the stone last turned each member away, so the event log has each new reason once.
     std::mutex refusalLock;
@@ -75,13 +84,17 @@ namespace
     };
 
     // A dungeon with wings, each its own entrance on one map, is run a wing at a time, by the wing's name.
-    // Its bosses are those nearest the wing's arrival; the table names the wing's entrance and last boss.
-    struct Wing { const char* name; const char* title; uint32 trigger; int32 lastBoss; };
+    // The table names the wing's entrance and last boss. Its bosses are those the row lists, or with no list,
+    // those nearest the wing's arrival.
+    struct Wing { const char* name; const char* title; uint32 trigger; int32 lastBoss; std::vector<int32> bosses; };
     const Wing WINGS[] = {
-        { "scarlet_monastery_graveyard", "Scarlet Monastery Graveyard", 45, 4543 },   // Bloodmage Thalnos
-        { "scarlet_monastery_library", "Scarlet Monastery Library", 614, 6487 },      // Arcanist Doan
-        { "scarlet_monastery_armory", "Scarlet Monastery Armory", 612, 3975 },        // Herod
-        { "scarlet_monastery_cathedral", "Scarlet Monastery Cathedral", 610, 3977 },  // High Inquisitor Whitemane
+        { "scarlet_monastery_graveyard", "Scarlet Monastery Graveyard", 45, 4543, {} },   // Bloodmage Thalnos
+        { "scarlet_monastery_library", "Scarlet Monastery Library", 614, 6487, {} },      // Arcanist Doan
+        { "scarlet_monastery_armory", "Scarlet Monastery Armory", 612, 3975, {} },        // Herod
+        { "scarlet_monastery_cathedral", "Scarlet Monastery Cathedral", 610, 3977, {} },  // High Inquisitor Whitemane
+        // Maraudon: Vyletongue and Celebras stand nearer the orange arrival than the purple one, so these rows list their bosses.
+        { "maraudon_orange", "Maraudon Orange", 3133, 12258, { 13282, 12258 } },          // Noxxion, Razorlash
+        { "maraudon_purple", "Maraudon Purple", 3134, 12225, { 12236, 12237, 12225 } },   // Lord Vyletongue, Meshlok the Harvester, Celebras the Cursed
     };
 
     // Friendly creatures a party has to speak to on its way, as a player would, with the gossip action to pick,
@@ -170,6 +183,34 @@ namespace
                 return &wing;
         return nullptr;
     }
+
+    // The walk from one place to another over the travel map's links, between the nodes nearest each,
+    // or a negative number when the travel map has no route between them.
+    float RouteLength(const WorldPosition& from, const WorldPosition& to)
+    {
+        std::shared_lock<std::shared_timed_mutex> guard(sTravelNodeMap.m_nMapMtx);
+        std::vector<TravelNode*> starts = sTravelNodeMap.getNodes(from, 50.0f);
+        std::vector<TravelNode*> goals = sTravelNodeMap.getNodes(to, 50.0f);
+        if (starts.empty() || goals.empty())
+            return -1.0f;
+        TravelNode* start = starts.front();
+        TravelNode* goal = goals.front();
+        float length = from.distance(*start->getPosition()) + goal->getPosition()->distance(to);
+        if (start == goal)
+            return length;
+        // With no unit, the search adds no hearthstone or teleport spell to the route.
+        TravelNodeRoute route = sTravelNodeMap.getRoute(start, goal, nullptr);
+        std::vector<TravelNode*>& nodes = route.getNodes();
+        if (nodes.size() < 2)
+            return -1.0f;
+        for (size_t i = 0; i + 1 < nodes.size(); ++i)
+        {
+            if (!nodes[i]->hasLinkTo(nodes[i + 1]))
+                return -1.0f;
+            length += nodes[i]->linkDistanceTo(nodes[i + 1]);
+        }
+        return length;
+    }
 }
 
 std::vector<AreaTrigger const*> GuildDungeon::Entrances(uint32 mapId)
@@ -250,8 +291,9 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     dungeon.entrance = wing ? sObjectMgr.GetAreaTrigger(wing->trigger) : sObjectMgr.GetMapEntranceTrigger(dungeon.mapId);
     const bool wings = Entrances(dungeon.mapId).size() > 1;
 
-    // The bosses are the boss travel destinations on the dungeon's map: its elites with one spawn.
-    // Nearest the arrival point first; the boss step will order them by route.
+    // The bosses are the boss travel destinations on the dungeon's map: its elites with one spawn,
+    // in route order from the arrival over the travel map. A boss the travel map has no route to comes after
+    // those it has, nearest first, and the last boss goes last below.
     const AreaTrigger* at = dungeon.entrance;
     WorldPosition arrival(dungeon.mapId, at->target_X, at->target_Y, at->target_Z, at->target_Orientation);
     std::vector<std::pair<float, int32>> bosses;
@@ -292,12 +334,20 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         WorldPosition* point = dest->GetNextPoint(arrival, nearest);
         if (!point || point->getMapId() != dungeon.mapId)
             continue;
-        // In a dungeon with wings, only the bosses of this run's wing: nearest its arrival of all the entrances'.
-        if (wings && EntranceNear(dungeon.mapId, point->getX(), point->getY(), point->getZ()) != dungeon.entrance)
+        // In a dungeon with wings, only the bosses of this run's wing: those its row lists,
+        // or else those nearest its arrival of all the entrances'.
+        if (wing && !wing->bosses.empty())
+        {
+            if (std::find(wing->bosses.begin(), wing->bosses.end(), dest->GetEntry()) == wing->bosses.end())
+                continue;
+        }
+        else if (wings && EntranceNear(dungeon.mapId, point->getX(), point->getY(), point->getZ()) != dungeon.entrance)
             continue;
-        bosses.push_back({ point->distance(arrival), dest->GetEntry() });
+        const float route = RouteLength(arrival, *point);
+        bosses.push_back({ route >= 0.0f ? route : NO_ROUTE + point->distance(arrival), dest->GetEntry() });
     }
     std::sort(bosses.begin(), bosses.end());
+    std::set<int32> routed;  // the bosses the travel map has a route to
     for (auto& [distance, entry] : bosses)
     {
         // Its spawn on the map tells whether it is dead in an instance; a boss with no spawn of its own,
@@ -315,6 +365,8 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
             continue;
         dungeon.bosses.push_back(entry);
         dungeon.spawns.push_back(spawn);
+        if (distance < NO_ROUTE)
+            routed.insert(entry);
     }
 
     if (dungeon.bosses.empty())
@@ -424,9 +476,18 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     }
     if (!dungeon.bossLevel)
         dungeon.bossLevel = highest;
-    // Without a table entry, the boss farthest from the entrance ends the run.
+    // Without a table entry, the boss with the longest route from the entrance ends the run,
+    // and a boss the travel map has no route to only when it has a route to none.
     if (!dungeon.lastBoss)
+    {
         dungeon.lastBoss = dungeon.bosses.back();
+        for (auto it = dungeon.bosses.rbegin(); it != dungeon.bosses.rend(); ++it)
+            if (routed.count(*it))
+            {
+                dungeon.lastBoss = *it;
+                break;
+            }
+    }
 
     // The last boss goes last, or the bosses farther from the entrance than it, such as Cookie, are never visited.
     for (size_t i = 0; i + 1 < dungeon.bosses.size(); ++i)
@@ -607,9 +668,15 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
             {
                 run.phase = Phase::Bosses;
                 run.nextBoss = 0;
+                // The clocks start afresh, as after a wipe: time outside is not time without headway.
+                run.headwayBoss = 0;
+                run.waitBoss = 0;
+                run.waiting = false;
                 update.strategiesChanged = true;
             }
             TickBosses(leader, run, update);
+            if (update.status != "working")
+                runs.erase(leader->GetGUIDLow());
             return update;
         }
 
@@ -712,6 +779,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
 {
     const Dungeon& dungeon = run.dungeon;
     Map* map = leader->GetMap();
+    // The leader waits for a member far behind only on a tick that decides so below.
+    const bool wasWaiting = run.waiting;
+    run.waiting = false;
 
     int32 next = 0;
     uint32 present = 0;
@@ -796,7 +866,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (!BossSpawned(map, dungeon.spawns[i]))
             continue;
         present++;
-        if (!next)
+        // A boss passed over as out of reach is alive, but not the next boss.
+        if (!next && !run.passed.count(entry))
         {
             next = entry;
             run.nextSpawn = dungeon.spawns[i];
@@ -804,7 +875,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     }
 
     run.bossesSeen = true;
-    const std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(present) + " bosses down";
+    std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(present) + " bosses down";
+    if (!run.passed.empty())
+        count += ", " + std::to_string(run.passed.size()) + " passed over";
     if (run.killed.count(dungeon.lastBoss) || !next)
     {
         // Cleared: out by the way out, and the reset.
@@ -847,10 +920,53 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         break;
     }
 
+    // A member far behind, alive and on this map, such as one caught in a fight it cannot finish: before each boss
+    // the leader waits for it where it stands for up to PARTY_WAIT_SECONDS, then goes on without it.
+    // Creatures to kill first come before the wait.
+    const time_t now = time(nullptr);
+    if (run.waitBoss != next)
+    {
+        run.waitBoss = next;
+        run.waitSince = 0;
+        run.waitedOut = false;
+    }
+    std::string behind;
+    if (Group* group = leader->GetGroup())
+        for (auto& slot : group->GetMemberSlots())
+            if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                if (member != leader && member->IsInWorld() && member->IsAlive() && member->GetMapId() == leader->GetMapId()
+                    && member->GetDistance(leader) > NEAR_LEADER)
+                {
+                    behind = slot.name;
+                    break;
+                }
+    if (killing.empty() && !behind.empty() && !run.waitedOut)
+    {
+        if (!run.waitSince)
+            run.waitSince = now;
+        if (now - run.waitSince < PARTY_WAIT_SECONDS)
+        {
+            run.waiting = true;
+            if (!wasWaiting)
+            {
+                update.strategiesChanged = true;
+                if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+                    sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+            }
+            run.headwaySince = now;
+            update.reason = "waiting for " + behind + " to catch up before " + BossName(next) + " in " + dungeon.name + ", " + count;
+            return;
+        }
+        run.waitedOut = true;
+        update.events.push_back({ "member_behind", behind + ", going on to " + BossName(next) + " without it" });
+    }
+    if (wasWaiting)
+        update.strategiesChanged = true;
+
     // An object to use before the next boss, such as an altar that wakes it: the leader goes to it first,
     // and it and as many members as the object needs use it, as players would.
+    // Time at an object is not time without headway to the boss, so the use step's returns restart that clock.
     run.useSpawn = 0;
-    const time_t now = time(nullptr);
     for (const Dungeon::Use& use : dungeon.uses)
     {
         if (use.before != next)
@@ -880,6 +996,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             {
                 if (now - run.usedAt[use.spawn] < USE_RETRY_SECONDS)
                 {
+                    run.headwaySince = now;
                     update.reason = "used the " + name + " in " + dungeon.name + ", waiting for " + BossName(next) + " to wake";
                     return;
                 }
@@ -905,6 +1022,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             {
                 if (!canUse(leader))
                 {
+                    run.headwaySince = now;
                     update.reason = "at the " + name + " in " + dungeon.name + ", waiting to use it";
                     return;
                 }
@@ -917,6 +1035,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                             useBy(member);
             if (usedBy.size() < use.users)
             {
+                run.headwaySince = now;
                 update.reason = "at the " + name + " in " + dungeon.name + ", " + std::to_string(usedBy.size()) + " of "
                     + std::to_string(use.users) + " have used it";
                 return;
@@ -928,6 +1047,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 run.used.insert(use.spawn);
                 continue;
             }
+            run.headwaySince = now;
             update.reason = "used the " + name + " in " + dungeon.name + ", waiting for " + BossName(next) + " to wake";
             return;
         }
@@ -937,7 +1057,48 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             if (target && target->IsActive() && target->GetDestination() != use.place)
                 target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
         }
+        run.headwaySince = now;
         update.reason = "on the way to use the " + name + " in " + dungeon.name + ", " + count;
+        return;
+    }
+
+    // No headway: the leader comes no nearer to the next boss by HEADWAY in NO_HEADWAY_SECONDS, alive and out of
+    // combat, so it is out of reach on this map, as Gelihast was from the water below his ledge. The party passes it
+    // over; the last boss is not passed over, and the run fails. A talk step, creatures to kill first, a prisoner
+    // on its way to a door and a fight all restart the clock.
+    WorldPosition bossPlace;
+    if (Creature* boss = map->GetCreature(run.nextSpawn))
+        bossPlace = WorldPosition(boss);
+    else if (CreatureData const* data = sObjectMgr.GetCreatureData(run.nextSpawn))
+        bossPlace = WorldPosition(dungeon.mapId, data->posX, data->posY, data->posZ);
+    if (run.headwayBoss != next)
+    {
+        run.headwayBoss = next;
+        run.headwayBest = -1.0f;
+        run.headwaySince = now;
+    }
+    const bool idle = dungeon.talks.count(next) || !killing.empty() || !talkWait.empty() || leader->IsInCombat()
+        || !leader->IsAlive() || !bossPlace;
+    const float bossDistance = bossPlace ? WorldPosition(leader).distance(bossPlace) : 0.0f;
+    const bool nearer = bossPlace && (run.headwayBest < 0.0f || bossDistance < run.headwayBest - HEADWAY);
+    if (nearer)
+        run.headwayBest = bossDistance;
+    if (idle || nearer)
+        run.headwaySince = now;
+    else if (now - run.headwaySince >= NO_HEADWAY_SECONDS)
+    {
+        const std::string why = "no nearer to " + BossName(next) + " than " + std::to_string(uint32(run.headwayBest)) + " yards in "
+            + std::to_string(NO_HEADWAY_SECONDS / MINUTE) + " minutes";
+        if (next == dungeon.lastBoss)
+        {
+            update.status = "failed";
+            update.reason = why + " in " + dungeon.name + ", the last boss; " + count;
+            return;
+        }
+        run.passed.insert(next);
+        run.headwayBoss = 0;
+        update.events.push_back({ "boss_passed", why });
+        update.reason = "passed over " + BossName(next) + " in " + dungeon.name + ", " + count;
         return;
     }
 
@@ -1082,14 +1243,15 @@ bool GuildDungeon::ShouldTravel(Player* bot) const
         return bot->GetMapId() != run.dungeon.mapId;
     if (run.phase == Phase::Leave)
         return bot->GetMapId() == run.dungeon.mapId;
-    return run.phase == Phase::Bosses && run.nextBoss && bot->GetMapId() == run.dungeon.mapId;
+    return run.phase == Phase::Bosses && run.nextBoss && !run.waiting && bot->GetMapId() == run.dungeon.mapId;
 }
 
 bool GuildDungeon::IsHolding(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(bot->GetGUIDLow());
-    return it != runs.end() && it->second.phase == Phase::Hold;
+    // Holding: by the entrance while the party comes in, or before a boss while a member far behind catches up.
+    return it != runs.end() && (it->second.phase == Phase::Hold || (it->second.phase == Phase::Bosses && it->second.waiting));
 }
 
 int32 GuildDungeon::TravelEntry(Player* bot) const

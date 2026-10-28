@@ -119,7 +119,7 @@ private:
         std::string name;
         uint32 mapId = 0;
         AreaTrigger const* entrance = nullptr;
-        std::vector<int32> bosses;     // boss entries, nearest the entrance first
+        std::vector<int32> bosses;     // boss entries, in route order from the entrance, the last boss last
         std::vector<uint32> spawns;    // each boss's spawn on the map, by database guid; 0 if none is known
         std::map<int32, uint32> talks; // steps that are friendly creatures to speak to, by entry: the gossip action to pick
         std::map<int32, uint32> talkDoors; // the spawn of the door each of them opens, by entry
@@ -152,6 +152,14 @@ private:
         std::map<uint32, time_t> usedAt; // when everyone a use step needs last used it, by the object's spawn
         std::map<uint32, std::set<uint32>> usedBy; // who has used it this time, by the object's spawn and the member's guid
         ObjectGuid killGuid;           // the creature the leader kills before the next boss, or empty
+        std::set<int32> passed;        // bosses passed over as out of reach on this map
+        int32 headwayBoss = 0;         // the boss the leader's headway is measured to
+        float headwayBest = -1.0f;     // the nearest the leader has come to it, in yards, or negative before the first look
+        time_t headwaySince = 0;       // when the leader last came nearer, or last had a reason to stand still
+        int32 waitBoss = 0;            // the boss the leader last waited before for a member far behind
+        time_t waitSince = 0;          // when that wait started, or 0
+        bool waitedOut = false;        // the wait before that boss is over, and the leader went on without the member
+        bool waiting = false;          // the leader waits for a member far behind now, and travels nowhere
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside
