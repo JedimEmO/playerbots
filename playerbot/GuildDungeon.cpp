@@ -48,6 +48,10 @@ namespace
     constexpr uint32 ENTRY_GAP_MS = 3 * IN_MILLISECONDS;
     // Out by the way out within this, or the job fails.
     constexpr time_t LEAVE_SECONDS = 15 * MINUTE;
+    // The leave sets out once no member inside fights or is below this share of its health or, a caster, of its mana,
+    // or this long after the last boss died, whichever comes first.
+    constexpr uint32 LEAVE_REST_PERCENT = 50;
+    constexpr time_t LEAVE_REST_SECONDS = 3 * MINUTE;
     // A member inside that has stood still this long since the leader came out is stranded, somewhere no route leads
     // out of, and goes home by hearthstone, as a player would; tried again this often while it is on cooldown.
     constexpr time_t STRANDED_SECONDS = 3 * MINUTE;
@@ -2001,6 +2005,43 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
                 break;
             }
 
+        // Not while the party still fights or is low: VanCleef's guards were still on the mage as he died, and the leave
+        // set out with the party fighting on his deck. In another run the whole party died three minutes into the way
+        // out, its healer first. The leader stays, with no travel target, while its party drinks and eats.
+        run.leaveResting = false;
+        if (leader->GetMapId() == dungeon.mapId && group && now - run.leaveStarted < LEAVE_REST_SECONDS)
+        {
+            std::string why;
+            for (auto& slot : group->GetMemberSlots())
+            {
+                Player* member = sObjectMgr.GetPlayer(slot.guid);
+                if (!member || !member->IsInWorld() || member->GetMapId() != dungeon.mapId || !member->IsAlive())
+                    continue;
+                const std::string who = member->GetName();
+                if (member->IsInCombat())
+                    why = who + " is fighting";
+                else if (member->GetHealth() * 100 < member->GetMaxHealth() * LEAVE_REST_PERCENT)
+                    why = who + " is hurt";
+                else if (member->GetPowerType() == POWER_MANA && member->GetMaxPower(POWER_MANA)
+                    && member->GetPower(POWER_MANA) * 100 < member->GetMaxPower(POWER_MANA) * LEAVE_REST_PERCENT)
+                    why = who + " is low on mana";
+                if (!why.empty())
+                    break;
+            }
+            if (!why.empty())
+            {
+                run.leaveResting = true;
+                if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+                {
+                    TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+                    if (target && target->IsActive())
+                        target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+                }
+                update.reason = "resting before leaving " + dungeon.name + ", " + why + "; " + run.cleared;
+                return;
+            }
+        }
+
         // The leader inside goes for the way out; any other travel target goes, as at a dead boss.
         if (leader->GetMapId() == dungeon.mapId)
             if (PlayerbotAI* ai = leader->GetPlayerbotAI())
@@ -2462,7 +2503,8 @@ TravelDestination* GuildDungeon::ExitDestination(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(bot->GetGUIDLow());
-    if (it == runs.end() || it->second.phase != Phase::Leave || bot->GetMapId() != it->second.dungeon.mapId)
+    if (it == runs.end() || it->second.phase != Phase::Leave || bot->GetMapId() != it->second.dungeon.mapId
+        || it->second.leaveResting)
         return nullptr;
     // Far inside, the place by the way out comes first. The travel map may have no route from the last boss to the way
     // out, as from Verdan in Wailing Caverns, and the way out leads to another map, which no walk by the movement maps

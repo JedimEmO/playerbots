@@ -237,6 +237,7 @@ private:
         struct Still { float x = 0.0f, y = 0.0f, z = 0.0f; time_t since = 0; };
         std::map<uint32, Still> stillInside;
         bool insideReached = false;    // the leader has come by the way out inside: from now on it goes out
+        bool leaveResting = false;     // the leave waits for the party to finish its fight and rest first
         std::string cleared;           // what the run did, for the job's reason once it is done
     };
 
