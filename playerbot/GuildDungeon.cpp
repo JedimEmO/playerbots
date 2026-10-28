@@ -183,8 +183,9 @@ namespace
     constexpr time_t USE_RETRY_SECONDS = 15;
     // An object with no boss of its own is due when the leader comes this near it.
     constexpr float USE_NEAR = 60.0f;
-    // The party looks this far from an object for the wave its last use brought.
-    constexpr float WAVE_RANGE = 120.0f;
+    // The party looks this far from an object for the wave its last use brought: a wave creature chasing a member
+    // can end up well beyond the corridors it came from.
+    constexpr float WAVE_RANGE = 250.0f;
 
     // Creatures with no spawn of their own, brought by an event, that a party kills before a boss, as players would:
     // the creature, the boss, and the door their deaths open. The step is done when none is alive near the leader,
@@ -1498,6 +1499,11 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 // Each time it can be used, out of combat: its last use brought a wave, and the wave is dead.
                 const bool usable = object->IsSpawned() && !object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT)
                     && !object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_IN_USE);
+                // What holds it back, for the reason: the object's state, or the leader's fight.
+                std::string state = !object->IsSpawned() ? "not spawned"
+                    : object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT) ? "shut"
+                    : object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_IN_USE) ? "in use"
+                    : leader->IsInCombat() ? "in a fight" : !object->CanUseNow(leader) ? "not usable now" : "usable";
                 if (usable && !leader->IsInCombat() && object->CanUseNow(leader))
                 {
                     WorldPacket packet(CMSG_GAMEOBJ_USE);
@@ -1508,10 +1514,13 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     {
                         run.useCount[use.spawn] = times + 1;
                         update.events.push_back({ "used", name + ", " + std::to_string(times + 1) + " of " + std::to_string(use.times) });
+                        state = "rung";
                     }
+                    else
+                        state = "rung, but nothing came of it";
                 }
                 run.headwaySince = now;
-                update.reason = "at the " + name + " in " + dungeon.name + ", used " + std::to_string(run.useCount[use.spawn]) + " of "
+                update.reason = "at the " + name + " in " + dungeon.name + " (" + state + "), used " + std::to_string(run.useCount[use.spawn]) + " of "
                     + std::to_string(use.times) + " times";
                 return;
             }
