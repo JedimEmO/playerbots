@@ -2312,6 +2312,11 @@ std::list<std::string> GuildBotMgr::HandleDebug(const std::string& args)
         if (target && target->GetPosition())
             move << " " << uint32(lastPath.getBack().distance(*target->GetPosition())) << " yd from the target";
     }
+    // A chase is what pulls it off its path: a victim, or a friend it reaches for with a spell.
+    if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+        if (Unit* chased = sServerFacade.GetChaseTarget(bot))
+            move << ", chasing " << chased->GetName() << " at " << uint32(bot->GetDistance(chased)) << " yd"
+                 << (chased->IsPlayer() ? "" : ", no player");
     out.push_back(move.str());
 
     std::ostringstream attackers;
