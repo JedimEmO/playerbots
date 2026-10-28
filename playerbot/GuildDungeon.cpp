@@ -57,6 +57,8 @@ namespace
     // The member's reach is wide: some stones stand on a ledge above the road, out of reach of the paths
     // below, where a member that fought its way off the ledge cannot climb back.
     constexpr float AT_STONE = 8.0f;
+    // A leader more than this below its stone is not at it, however near it is on the map.
+    constexpr float STONE_BELOW = 10.0f;
     constexpr float NEAR_STONE = 120.0f;
     // A follower farther than this from its leader on the same map travels to it, by the travel map's routes.
     constexpr float FOLLOW_BY_TRAVEL = 150.0f;
@@ -931,6 +933,29 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
         if (!EnterByStone(leader, dungeon.mapId, refused, dungeon.entrance) && !refused.empty())
             why = refused;
     }
+
+    // With a meeting stone, the leader waits for its party standing by the stone itself, out of a fight. A stone travel
+    // that counts as done, or waits out its cooldown, while the leader is far from the stone or below it starts again.
+    // In Gnomeregan the leader waiting at its stone went off to the Vator and rode it 62 yards down; its stone travel
+    // stayed in WORK 80 yards off, and the party stood at the foot of the lift for the rest of the hour.
+    if ((run.phase == Phase::Check || run.phase == Phase::Go) && dungeon.stone && leader->IsAlive())
+        if (WorldPosition* at = dungeon.stone->GetClosestPoint(WorldPosition(leader)))
+            if (at->getMapId() == leader->GetMapId())
+            {
+                const float distance = at->distance(WorldPosition(leader));
+                const bool below = leader->GetPositionZ() < at->coord_z - STONE_BELOW;
+                if (run.phase == Phase::Go && (distance > AT_STONE * 2.0f || below))
+                    if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+                    {
+                        TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+                        const TravelStatus status = target ? target->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+                        if (target && target->GetDestination() == dungeon.stone
+                            && (status == TravelStatus::TRAVEL_STATUS_WORK || status == TravelStatus::TRAVEL_STATUS_COOLDOWN))
+                            target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+                    }
+                if (!below && distance > AT_STONE / 2.0f && distance <= AT_STONE * 2.0f && !leader->IsInCombat())
+                    leader->GetMotionMaster()->MovePoint(0, at->coord_x, at->coord_y, at->coord_z, FORCED_MOVEMENT_RUN);
+            }
 
     // Once on the way, a member falling behind does not stop the leader: it waits at the entrance
     // until the party is near, as upstream's travel does for dungeon destinations.
