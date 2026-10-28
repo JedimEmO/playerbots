@@ -116,6 +116,13 @@ namespace
         { 34, { 1696, 1663 } },  // The Stockade: Targorr the Dread, four of him; Dextren Ward, three
     };
 
+    // Bosses the run leaves out: the way toward them leads to a place the party cannot go on from.
+    const std::map<uint32, std::vector<int32>> NOT_BOSSES = {
+        // Blackfathom Deeps: Old Serra'kis. His travel node has no links, and the way toward him from Lady Sarevess
+        // ends on a spot in the water that no path leaves, where the leader stood until the run failed at Aku'mai.
+        { 48, { 4830 } },
+    };
+
     // A dungeon with wings, each its own entrance on one map, is run a wing at a time, by the wing's name.
     // The table names the wing's entrance and last boss. Its bosses are those the row lists, or with no list,
     // those nearest the wing's arrival.
@@ -249,6 +256,11 @@ namespace
     constexpr float NODE_WALK_RANGE = 300.0f;
     constexpr time_t NODE_WALK_SECONDS = 20;
     constexpr time_t NODE_WALK_HOLD_SECONDS = 30;
+    // A walk to the node ends there, after this long, or when it has come no nearer by this much in this long,
+    // as against a wall for a leader inside the scenery.
+    constexpr time_t NODE_WALK_LIMIT_SECONDS = 90;
+    constexpr float NODE_WALK_GAIN = 5.0f;
+    constexpr time_t NODE_WALK_GAIN_SECONDS = 30;
     // The walk is a straight step this long toward the node, without a path: from such a place no path is found at all.
     constexpr float NODE_WALK_STEP = 10.0f;
     // A boss that fell asleep as the next boss, such as Mograine lying as dead until Whitemane raises him, keeps the leader
@@ -319,6 +331,26 @@ namespace
             length += nodes[i]->linkDistanceTo(nodes[i + 1]);
         }
         return length;
+    }
+
+    // Whether a point is near a way off the map: an area trigger on it that teleports elsewhere, its radius or box
+    // and a few yards more.
+    bool NearWayOut(uint32 mapId, float x, float y, float z)
+    {
+        for (uint32 i = 0; i < sAreaTriggerStore.GetNumRows(); ++i)
+        {
+            AreaTriggerEntry const* entry = sAreaTriggerStore.LookupEntry(i);
+            if (!entry || entry->mapid != mapId)
+                continue;
+            AreaTrigger const* at = sObjectMgr.GetAreaTrigger(entry->id);
+            if (!at || at->target_mapId == mapId)
+                continue;
+            const float reach = (entry->radius > 0.0f ? entry->radius : std::max(entry->box_x, entry->box_y) / 2.0f) + 4.0f;
+            const float dx = entry->x - x, dy = entry->y - y, dz = entry->z - z;
+            if (dx * dx + dy * dy + dz * dz <= reach * reach)
+                return true;
+        }
+        return false;
     }
 }
 
@@ -415,6 +447,10 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     for (TravelDestination* dest : sTravelMgr.GetDestinations(PlayerTravelInfo(leader), (uint32)TravelDestinationPurpose::Boss, {}, false, 0))
     {
         if (dest->GetEntry() <= 0)
+            continue;
+        auto notBosses = NOT_BOSSES.find(dungeon.mapId);
+        if (notBosses != NOT_BOSSES.end()
+            && std::find(notBosses->second.begin(), notBosses->second.end(), dest->GetEntry()) != notBosses->second.end())
             continue;
         // Not friends: an escort or a prisoner, such as the Disciple of Naralex or Deathstalker Adamant, is an elite
         // with one spawn too, but friendly, and the party would stand by it waiting for it to die. A neutral boss,
@@ -1792,44 +1828,64 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         const TravelStatus status = target ? target->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
         bool stopped = (status == TravelStatus::TRAVEL_STATUS_WORK || status == TravelStatus::TRAVEL_STATUS_COOLDOWN)
             && !fighting && bossPlace && bossDistance > APPROACH_RANGE;
-        // Cooled down after its moves failed one after another, with no path from where it stands, the leader first steps
-        // toward the nearest travel node that is no way in or out: by the way to Old Serra'kis, and inside the entrance of
-        // Razorfen Kraul, neither the travel map nor the navmesh led on from the leader's place, and a pathed move to the
-        // node did not move it either. The step is straight and short, and only to a point in sight, which puts the
-        // leader back where paths are found. The travel waits while it steps.
-        if (forNext && stopped && status == TravelStatus::TRAVEL_STATUS_COOLDOWN && target->IsMaxRetry(true)
+        // Cooled down after its moves failed one after another, with no path from where it stands, the leader walks to the
+        // nearest travel node that has links and is no way in or out, in straight steps to points in sight, and its
+        // travel waits until it is there. By the way to Old Serra'kis the route itself ended at a place with no path on;
+        // a pathed move did not move the leader, and one step off it was undone by the restarted travel, which led
+        // straight back. Lady Sarevess's and Old Serra'kis's own nodes have no links, so the walk is to Ghamoo-ra's.
+        if (!run.nodeWalking && forNext && stopped && status == TravelStatus::TRAVEL_STATUS_COOLDOWN && target->IsMaxRetry(true)
             && now - run.nodeWalkAt >= NODE_WALK_SECONDS && leader->IsInWorld() && !leader->IsBeingTeleported())
         {
             run.nodeWalkAt = now;
             // No travel map lock here, as for the stuck walk in GuildBotMgr: a route search holds it while it waits
             // for this dungeon's lock, which the tick holds.
-            TravelNode* node = nullptr;
             for (TravelNode* near : sTravelNodeMap.getNodes(WorldPosition(leader), NODE_WALK_RANGE))
-                if (near->getPosition()->getMapId() == leader->GetMapId() && !near->isPortal())
+                if (near->getPosition()->getMapId() == leader->GetMapId() && !near->isPortal() && !near->getLinks()->empty())
                 {
-                    node = near;
+                    run.nodeWalking = true;
+                    run.nodeX = near->getPosition()->getX();
+                    run.nodeY = near->getPosition()->getY();
+                    run.nodeZ = near->getPosition()->getZ();
+                    run.nodeBest = sqrtf((run.nodeX - leader->GetPositionX()) * (run.nodeX - leader->GetPositionX())
+                        + (run.nodeY - leader->GetPositionY()) * (run.nodeY - leader->GetPositionY()));
+                    run.nodeBestAt = now;
+                    update.events.push_back({ "recovery", "to the nearest node, " + near->getName() });
                     break;
                 }
-            if (node)
+        }
+        if (run.nodeWalking)
+        {
+            const float dx = run.nodeX - leader->GetPositionX();
+            const float dy = run.nodeY - leader->GetPositionY();
+            const float length = sqrtf(dx * dx + dy * dy);
+            if (length < run.nodeBest - NODE_WALK_GAIN)
             {
-                WorldPosition* at = node->getPosition();
-                const float dx = at->getX() - leader->GetPositionX();
-                const float dy = at->getY() - leader->GetPositionY();
-                const float length = sqrtf(dx * dx + dy * dy);
-                if (length > 1.0f)
-                {
-                    const float step = length < NODE_WALK_STEP ? length : NODE_WALK_STEP;
-                    float x = leader->GetPositionX() + dx / length * step;
-                    float y = leader->GetPositionY() + dy / length * step;
-                    float z = leader->GetPositionZ();
-                    leader->UpdateAllowedPositionZ(x, y, z);
-                    if (leader->IsWithinLOS(x, y, z + 1.0f))
-                    {
-                        leader->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_RUN, false);
-                        update.events.push_back({ "recovery", "toward the nearest node, " + node->getName() });
-                    }
-                }
+                run.nodeBest = length;
+                run.nodeBestAt = now;
             }
+            if (length <= NODE_WALK_STEP || now - run.nodeWalkAt > NODE_WALK_LIMIT_SECONDS || now - run.nodeBestAt > NODE_WALK_GAIN_SECONDS
+                || fighting || !leader->IsInWorld() || leader->IsBeingTeleported())
+                run.nodeWalking = false;
+            else if (!leader->IsMoving())
+            {
+                float x = leader->GetPositionX() + dx / length * NODE_WALK_STEP;
+                float y = leader->GetPositionY() + dy / length * NODE_WALK_STEP;
+                float z = leader->GetPositionZ();
+                // Swimming, it keeps to the surface; on land, the ground where the step ends.
+                if (!leader->IsInWater())
+                    leader->UpdateAllowedPositionZ(x, y, z);
+                // A point in the leader's sight, or one with the node in sight: by the entrance of Razorfen Kraul the leader
+                // stood where it saw nothing around it. Never into a way out, such as the exit beside the entrance node there.
+                const WorldPosition point(leader->GetMapId(), x, y, z);
+                const bool open = leader->IsWithinLOS(x, y, z + 1.0f)
+                    || point.IsInLineOfSight(WorldPosition(leader->GetMapId(), run.nodeX, run.nodeY, run.nodeZ), 1.0f);
+                if (open && !NearWayOut(leader->GetMapId(), x, y, z) && leader->IsInWorld() && !leader->IsBeingTeleported())
+                    leader->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_RUN, false);
+                else
+                    run.nodeWalking = false;
+            }
+            if (run.nodeWalking)
+                stopped = false;
         }
         if (stopped && now - run.nodeWalkAt < NODE_WALK_HOLD_SECONDS && leader->IsMoving())
             stopped = false;

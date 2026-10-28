@@ -220,7 +220,11 @@ private:
         int32 headwayBoss = 0;         // the boss the leader's headway is measured to
         float headwayBest = -1.0f;     // the nearest the leader has come to it, in yards, or negative before the first look
         time_t headwaySince = 0;       // when the leader last came nearer, or last had a reason to stand still
-        time_t nodeWalkAt = 0;         // when the leader last walked to the nearest travel node, its moves failing
+        time_t nodeWalkAt = 0;         // when the leader last set out for the nearest travel node, its moves failing
+        bool nodeWalking = false;      // it is stepping there now, and its travel waits
+        float nodeX = 0.0f, nodeY = 0.0f, nodeZ = 0.0f; // the node it steps toward
+        float nodeBest = 0.0f;         // the nearest it has come to the node on this walk
+        time_t nodeBestAt = 0;         // when it last came nearer by NODE_WALK_GAIN
         int32 waitBoss = 0;            // the boss the leader last waited before for a member far behind
         time_t waitSince = 0;          // when that wait started, or 0
         bool waitedOut = false;        // the wait before that boss is over, and the leader went on without the member
