@@ -352,6 +352,10 @@ bool ChooseTravelTargetAction::SetBestGrindTarget(Player* requester, TravelTarge
                     return false;
                 distanceCheck = false;
             }
+            // A levelling character walks: a spot across the sea is one it cannot reach, and its high rate would
+            // keep winning while the move to it fails and cools down. The Gadgetzan levellers sat that way for an hour.
+            if (position->getMapId() != bot->GetMapId())
+                continue;
             if (!destination->IsActive(bot, info))
                 continue;
             any = true;
