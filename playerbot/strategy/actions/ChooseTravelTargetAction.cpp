@@ -1018,9 +1018,12 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
     {
         // On the way to a dungeon with a meeting stone: the stone, which takes the party in.
         // Inside, an object to use before the next boss comes first.
+        // Then the spawn of a boss placed more than once that the dungeon job chose.
         TravelDestination* stone = sGuildDungeon.StoneDestination(bot);
         if (!stone)
             stone = sGuildDungeon.UseDestination(bot);
+        if (!stone)
+            stone = sGuildDungeon.BossDestination(bot);
         if (stone)
         {
             *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [stone, center]()

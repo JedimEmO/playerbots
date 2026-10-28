@@ -88,6 +88,8 @@ public:
     ai::TravelDestination* StoneDestination(Player* bot) const;
     // An object the leader has to go to and use before the next boss, such as an altar; null when there is none.
     ai::TravelDestination* UseDestination(Player* bot) const;
+    // The living spawn of a next boss with several spawns, which its boss destination would not pick out; null otherwise.
+    ai::TravelDestination* BossDestination(Player* bot) const;
     // For a member whose leader is at an object that needs more than one user: a place by it, near enough to use it.
     bool UseSpot(Player* leader, Player* member, WorldLocation& place) const;
     // The leader of an event stays by a creature or object of it, such as an escort: no travel, and back by it out of a fight.
@@ -121,12 +123,18 @@ public:
     static void NoteAlive(Player* bot);
 
     // For the run record: the dungeon on this map, its bosses in order with their spawns, and the last boss.
-    struct Bosses { std::string name; std::vector<int32> entries; std::vector<uint32> spawns; int32 last = 0; };
+    struct Bosses { std::string name; std::vector<int32> entries; std::vector<std::vector<uint32>> spawns; int32 last = 0; };
     static bool BossesOf(uint32 mapId, Player* member, Bosses& out);
     // The boss's spawn in this instance is dead: killed, with its respawn time saved, or a corpse now.
     static bool BossDead(Map* map, uint32 spawn);
     // The boss's spawn exists in this instance: false for a pooled rare the pool did not choose.
     static bool BossSpawned(Map* map, uint32 spawn);
+    // A boss with several spawns, a pooled rare or one placed more than once, exists in this instance while any of
+    // them does, and is dead when every one this instance has is dead.
+    static bool BossSpawned(Map* map, const std::vector<uint32>& spawns);
+    static bool BossDead(Map* map, const std::vector<uint32>& spawns);
+    // Its living spawn in this instance nearest a place, or 0.
+    static uint32 LiveSpawn(Map* map, const std::vector<uint32>& spawns, const ai::WorldPosition& near);
 
 private:
     GuildDungeon() = default;
@@ -139,7 +147,8 @@ private:
         uint32 mapId = 0;
         AreaTrigger const* entrance = nullptr;
         std::vector<int32> bosses;     // boss entries, in route order from the entrance, the last boss last
-        std::vector<uint32> spawns;    // each boss's spawn on the map, by database guid; 0 if none is known
+        // Each boss's spawns on the map, by database guid: one, or several for a pooled rare or a boss placed more than once.
+        std::vector<std::vector<uint32>> spawns;
         std::map<int32, uint32> talks; // steps that are friendly creatures to speak to, by entry: the gossip action to pick
         std::map<int32, uint32> talkDoors; // the spawn of the door each of them opens, by entry
         std::set<int32> talkEscorts;   // those that walk an escort after speaking: the party stays with them until they are gone
@@ -173,6 +182,7 @@ private:
         bool entered = false;          // the whole party has been inside
         int32 nextBoss = 0;            // the boss the party is on its way to
         uint32 nextSpawn = 0;          // its spawn
+        ai::PlaceTravelDestination* nextPlace = nullptr; // where that spawn stands, when the boss has several; kept in bossPlaces
         std::set<int32> killed;        // bosses reported dead
         std::set<int32> talked;        // talk steps done
         std::map<int32, time_t> talkedAt; // when the leader last spoke to each, by entry
@@ -215,6 +225,7 @@ private:
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> exits;  // by dungeon map, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> stones; // by dungeon map, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> usePlaces; // by object spawn, never freed
+    static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> bossPlaces; // by creature spawn, never freed
 
     static std::mutex entryLock;
     static std::map<uint32, uint32> lastEntry;  // by group id: when a member last took the entrance, in ms

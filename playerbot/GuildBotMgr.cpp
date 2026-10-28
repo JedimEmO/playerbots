@@ -353,6 +353,10 @@ void GuildBotMgr::CheckChase(Character& c, Player* bot)
     if (recent.size() < GIVE_UPS_TO_LEAVE)
         return;
     recent.clear();
+    // A dungeon leader's travel target inside is its next boss, which the dungeon job hands back at once:
+    // leaving it costs a new route search and nothing else.
+    if (GetActiveJob(c.guid) == "dungeon" && bot->GetMap()->IsDungeon())
+        return;
 
     ai::TravelTarget* travel = context->GetValue<ai::TravelTarget*>("travel target")->Get();
     int32 entry = travel ? travel->GetEntry() : 0;

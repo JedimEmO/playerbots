@@ -71,7 +71,7 @@ private:
         uint32 leader = 0;
         bool playerLed = false;
         std::vector<int32> bosses;
-        std::vector<uint32> spawns;
+        std::vector<std::vector<uint32>> spawns; // each boss's spawns, as the dungeon job keeps them
         int32 lastBoss = 0;
         std::set<int32> killed;
         bool bossesSeen = false;

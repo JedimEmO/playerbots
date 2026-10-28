@@ -25,6 +25,7 @@ std::mutex GuildDungeon::exitLock;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::exits;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::stones;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::usePlaces;
+std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::bossPlaces;
 namespace
 {
     // Where each dungeon's meeting stone stands, by dungeon map; built once from the spawns.
@@ -94,6 +95,12 @@ namespace
         { 70, 2748 },    // Uldaman: Archaedas
         { 209, 7267 },   // Zul'Farrak: Chief Ukorz Sandscalp
         { 349, 12201 },  // Maraudon: Princess Theradras
+    };
+
+    // Elites placed more than once that are bosses all the same, which the boss travel destinations leave out,
+    // since those take an elite with one spawn. The run kills every one of them the instance has.
+    const std::map<uint32, std::vector<int32>> MORE_BOSSES = {
+        { 34, { 1696, 1663 } },  // The Stockade: Targorr the Dread, four of him; Dextren Ward, three
     };
 
     // A dungeon with wings, each its own entrance on one map, is run a wing at a time, by the wing's name.
@@ -404,28 +411,60 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         const float route = RouteLength(arrival, *point);
         bosses.push_back({ route >= 0.0f ? route : NO_ROUTE + point->distance(arrival), dest->GetEntry() });
     }
+    // The bosses the table adds, ordered from the spawn of theirs nearest the arrival.
+    if (auto more = MORE_BOSSES.find(dungeon.mapId); more != MORE_BOSSES.end())
+        for (int32 entry : more->second)
+        {
+            if (std::any_of(bosses.begin(), bosses.end(), [&](auto const& boss) { return boss.second == entry; }))
+                continue;
+            if (wing && !wing->bosses.empty() && std::find(wing->bosses.begin(), wing->bosses.end(), entry) == wing->bosses.end())
+                continue;
+            WorldPosition nearest;
+            float best = -1.0f;
+            auto findNearest = [&](auto const& pair)
+            {
+                if (pair.second.id != uint32(entry) || pair.second.mapid != dungeon.mapId)
+                    return false;
+                WorldPosition place(pair.second.mapid, pair.second.posX, pair.second.posY, pair.second.posZ);
+                if (best < 0.0f || place.distance(arrival) < best)
+                {
+                    best = place.distance(arrival);
+                    nearest = place;
+                }
+                return false;
+            };
+            sObjectMgr.DoCreatureData(findNearest);
+            if (best < 0.0f)
+                continue;
+            if (wings && !(wing && !wing->bosses.empty())
+                && EntranceNear(dungeon.mapId, nearest.getX(), nearest.getY(), nearest.getZ()) != dungeon.entrance)
+                continue;
+            const float route = RouteLength(arrival, nearest);
+            bosses.push_back({ route >= 0.0f ? route : NO_ROUTE + best, entry });
+        }
+
     std::sort(bosses.begin(), bosses.end());
     std::set<int32> routed;  // the bosses the travel map has a route to
     for (auto& [distance, entry] : bosses)
     {
-        // Its spawn on the map tells whether it is dead in an instance; a boss with no spawn of its own,
-        // one a script summons, cannot be told apart and is left out. So is a spawn that picks its creature from
-        // several at each start (creature_spawn_entry): a creature it picked for only one spawn looks like an elite
-        // with one spawn, such as a Defias Convict in the Stockade, and it is trash.
-        uint32 spawn = 0;
-        auto findSpawn = [&](auto const& pair)
+        // Its spawns on the map tell whether it is dead in an instance: all of them, since a pooled rare such as
+        // Bruegal Ironknuckle stands at whichever the pool chose. A boss with no spawn of its own, one a script
+        // summons, cannot be told apart and is left out. So is a spawn that picks its creature from several at each
+        // start (creature_spawn_entry): a creature it picked for only one spawn looks like an elite with one spawn,
+        // such as a Defias Convict in the Stockade, and it is trash.
+        std::vector<uint32> spawns;
+        auto findSpawns = [&](auto const& pair)
         {
-            if (pair.second.id != uint32(entry) || pair.second.mapid != dungeon.mapId
-                || sObjectMgr.GetAllRandomCreatureEntries(pair.first))
-                return false;
-            spawn = pair.first;
-            return true;
+            if (pair.second.id == uint32(entry) && pair.second.mapid == dungeon.mapId
+                && !sObjectMgr.GetAllRandomCreatureEntries(pair.first))
+                spawns.push_back(pair.first);
+            return false;
         };
-        sObjectMgr.DoCreatureData(findSpawn);
-        if (!spawn)
+        sObjectMgr.DoCreatureData(findSpawns);
+        if (spawns.empty())
             continue;
         dungeon.bosses.push_back(entry);
-        dungeon.spawns.push_back(spawn);
+        dungeon.spawns.push_back(spawns);
         if (distance < NO_ROUTE)
             routed.insert(entry);
     }
@@ -719,7 +758,9 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
         {
             for (size_t i = 0; i < run.dungeon.bosses.size(); ++i)
             {
-                if (run.dungeon.bosses[i] != run.dungeon.lastBoss || bind->state->GetCreatureRespawnTime(run.dungeon.spawns[i]) <= time(nullptr))
+                const std::vector<uint32>& spawns = run.dungeon.spawns[i];
+                if (run.dungeon.bosses[i] != run.dungeon.lastBoss || std::none_of(spawns.begin(), spawns.end(),
+                    [&](uint32 spawn) { return bind->state->GetCreatureRespawnTime(spawn) > time(nullptr); }))
                     continue;
                 run.phase = Phase::Leave;
                 run.leaveStarted = time(nullptr);
@@ -876,6 +917,50 @@ bool GuildDungeon::BossSpawned(Map* map, uint32 spawn)
     return !state || state->IsSpawnedPoolObject<Creature>(spawn);
 }
 
+bool GuildDungeon::BossSpawned(Map* map, const std::vector<uint32>& spawns)
+{
+    return std::any_of(spawns.begin(), spawns.end(), [&](uint32 spawn) { return BossSpawned(map, spawn); });
+}
+
+bool GuildDungeon::BossDead(Map* map, const std::vector<uint32>& spawns)
+{
+    bool any = false;
+    for (uint32 spawn : spawns)
+    {
+        if (!BossSpawned(map, spawn))
+            continue;
+        if (!BossDead(map, spawn))
+            return false;
+        any = true;
+    }
+    return any;
+}
+
+uint32 GuildDungeon::LiveSpawn(Map* map, const std::vector<uint32>& spawns, const WorldPosition& near)
+{
+    uint32 live = 0;
+    float best = 0.0f;
+    for (uint32 spawn : spawns)
+    {
+        if (!BossSpawned(map, spawn) || BossDead(map, spawn))
+            continue;
+        WorldPosition place;
+        if (Creature* creature = map->GetCreature(spawn))
+            place = WorldPosition(creature);
+        else if (CreatureData const* data = sObjectMgr.GetCreatureData(spawn))
+            place = WorldPosition(data->mapid, data->posX, data->posY, data->posZ);
+        else
+            continue;
+        const float distance = place.distance(near);
+        if (!live || distance < best)
+        {
+            live = spawn;
+            best = distance;
+        }
+    }
+    return live;
+}
+
 void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
 {
     const Dungeon& dungeon = run.dungeon;
@@ -911,7 +996,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     update.events.push_back({ "door_open", doorName });
                 continue;
             }
-            Creature* creature = map->GetCreature(dungeon.spawns[i]);
+            Creature* creature = map->GetCreature(dungeon.spawns[i].front());
             if (!creature || !creature->IsAlive())
             {
                 run.talked.insert(entry);
@@ -924,7 +1009,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 && std::any_of(after->second.begin(), after->second.end(), [&](int32 boss) { return !run.killed.count(boss); }))
                 continue;
             next = entry;
-            run.nextSpawn = dungeon.spawns[i];
+            run.nextSpawn = dungeon.spawns[i].front();
             const bool escort = dungeon.talkEscorts.count(entry);
             auto waitFor = dungeon.talkWaits.find(entry);
             const time_t wait = waitFor != dungeon.talkWaits.end() ? waitFor->second : TALK_WAIT_SECONDS;
@@ -987,21 +1072,28 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         // A boss passed over as out of reach is alive, but not the next boss.
         if (next || run.passed.count(entry))
             continue;
+        // Of a boss with several spawns, the one the leader is on its way to while it lives, else the living one nearest.
+        const std::vector<uint32>& spawns = dungeon.spawns[i];
+        const bool onWay = run.nextBoss == entry && std::count(spawns.begin(), spawns.end(), run.nextSpawn)
+            && BossSpawned(map, run.nextSpawn) && !BossDead(map, run.nextSpawn);
+        const uint32 spawn = onWay ? run.nextSpawn : LiveSpawn(map, spawns, WorldPosition(leader));
+        if (!spawn)
+            continue;
         // A boss alive but unattackable that no object of ours wakes, such as Mograine lying as dead until Whitemane
         // raises him: the next boss after it comes first, and it is the next boss again once it can be attacked.
-        if (Creature* boss = map->GetCreature(dungeon.spawns[i]))
+        if (Creature* boss = map->GetCreature(spawn))
             if (boss->IsAlive() && boss->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE)
                 && std::none_of(dungeon.uses.begin(), dungeon.uses.end(), [&](const Dungeon::Use& use) { return use.wakes && use.before == entry; }))
             {
                 if (!asleep)
                 {
                     asleep = entry;
-                    asleepSpawn = dungeon.spawns[i];
+                    asleepSpawn = spawn;
                 }
                 continue;
             }
         next = entry;
-        run.nextSpawn = dungeon.spawns[i];
+        run.nextSpawn = spawn;
     }
     // Only sleeping bosses left: the first of them is still the next boss, and the run is not cleared.
     if (!next && asleep)
@@ -1009,6 +1101,20 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         next = asleep;
         run.nextSpawn = asleepSpawn;
     }
+    // A boss with several spawns is travelled to at the one chosen above: its boss destination, where it has one,
+    // would pick any of them, such as a spot the pool left empty.
+    run.nextPlace = nullptr;
+    for (size_t i = 0; i < dungeon.bosses.size() && next && !dungeon.talks.count(next); ++i)
+        if (dungeon.bosses[i] == next && dungeon.spawns[i].size() > 1 && run.nextSpawn)
+            if (CreatureData const* data = sObjectMgr.GetCreatureData(run.nextSpawn))
+            {
+                std::lock_guard<std::mutex> guard(exitLock);
+                auto& place = bossPlaces[run.nextSpawn];
+                if (!place)
+                    place = std::make_unique<PlaceTravelDestination>(WorldPosition(data->mapid, data->posX, data->posY, data->posZ),
+                        BossName(next) + " in " + dungeon.name);
+                run.nextPlace = place.get();
+            }
 
     run.bossesSeen = true;
     std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(present) + " bosses down";
@@ -1440,7 +1546,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     if (PlayerbotAI* ai = leader->GetPlayerbotAI())
     {
         TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-        if (target && target->IsActive() && target->GetEntry() != next)
+        if (target && target->IsActive() && (run.nextPlace ? target->GetDestination() != run.nextPlace : target->GetEntry() != next))
             target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
     }
     if (!talkWait.empty())
@@ -1796,6 +1902,15 @@ void GuildDungeon::FollowByStone(Player* member)
     if (!why.empty() && why != last)
         sGuildBotMgr.RecordEvent(member->GetGUIDLow(), "refused", why);
     last = why;
+}
+
+TravelDestination* GuildDungeon::BossDestination(Player* bot) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(bot->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Bosses || it->second.useSpawn || bot->GetMapId() != it->second.dungeon.mapId)
+        return nullptr;
+    return it->second.nextPlace;
 }
 
 TravelDestination* GuildDungeon::UseDestination(Player* bot) const
