@@ -208,6 +208,9 @@ namespace
     };
     // The leader looks this far for them.
     constexpr float KILL_RANGE = 60.0f;
+    // A creature of a row with no boss of its own that fights the party is looked for this far, and walked to:
+    // Zum'rah raises his zombies from 110 yards off, and they come to the party while he stays by his graves.
+    constexpr float KILL_FAR = 150.0f;
 
     // Items a party uses on an object before a boss, as players would: the item, the object, the boss, the door
     // the event it starts opens, the creature the party stays by while the event runs, and how long it waits for the door.
@@ -1255,19 +1258,39 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             if (GameObject* door = map->GetGameObject(kill.doorSpawn))
                 if (door->GetGoState() != GO_STATE_READY)
                     continue;
+        const float range = kill.before ? KILL_RANGE : KILL_FAR;
         std::list<Unit*> found;
-        MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, kill.entry, KILL_RANGE);
+        MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, kill.entry, range);
         MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
-        Cell::VisitAllObjects(leader, searcher, KILL_RANGE);
+        Cell::VisitAllObjects(leader, searcher, range);
         Unit* nearest = nullptr;
         for (Unit* unit : found)
-            if (unit->IsAlive() && unit->IsInWorld() && (kill.before || leader->CanAttack(unit))
-                && (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest)))
+        {
+            if (!unit->IsAlive() || !unit->IsInWorld())
+                continue;
+            if (!kill.before)
+            {
+                // Hostile, and near, or farther off fighting one of the party.
+                if (!leader->CanAttack(unit))
+                    continue;
+                Unit* victim = unit->GetVictim();
+                const bool fightsUs = victim && victim->IsPlayer() && leader->IsInGroup(static_cast<Player*>(victim));
+                if (leader->GetDistance(unit) > KILL_RANGE && !fightsUs)
+                    continue;
+            }
+            if (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest))
                 nearest = unit;
+        }
         if (!nearest)
             continue;
         run.killGuid = nearest->GetObjectGuid();
         killing = BossName(kill.entry);
+        // Farther than the target picking reaches: the leader goes to it.
+        if (leader->GetDistance(nearest) > KILL_RANGE - 10.0f)
+        {
+            HoldNear(leader, nearest, KILL_RANGE / 2.0f, HOLD_STAND);
+            run.holding = true;
+        }
         break;
     }
 
