@@ -12,6 +12,7 @@
 #include "playerbot/strategy/values/PossibleAttackTargetsValue.h"
 #include "Accounts/AccountMgr.h"
 #include "Entities/Pet.h"
+#include "Maps/GridMap.h"
 #include "Chat/Chat.h"
 
 #include <algorithm>
@@ -71,6 +72,10 @@ namespace
     constexpr size_t EMPTY_FIGHTS_TO_APPROACH = 3;
     constexpr time_t EMPTY_FIGHT_WINDOW_SECONDS = 10 * MINUTE;
     constexpr time_t APPROACH_SECONDS = 10 * MINUTE;
+    // A character fully under water swims up for air after this long standing still out of a fight, or after this
+    // long in any case. Breath lasts 60 seconds, then drowning takes a tenth of its health every 2 seconds.
+    constexpr time_t UNDERWATER_IDLE_SECONDS = 20;
+    constexpr time_t UNDERWATER_SECONDS = 40;
     // A ghost under the world is taken out at most this often.
     constexpr time_t GHOST_UNDER_MAP_SECONDS = MINUTE;
 
@@ -611,6 +616,39 @@ void GuildBotMgr::CheckGhostUnderMap(Character& c, Player* bot)
         out = SendToGraveyard(bot);
     if (out)
         Event(c.guid, "recovery", "under the map");
+}
+
+void GuildBotMgr::CheckBreath(Character& c, Player* bot)
+{
+    if (!bot->IsAlive() || !bot->IsUnderwater() || bot->HasAuraType(SPELL_AURA_WATER_BREATHING))
+    {
+        c.underwaterSince = 0;
+        c.surfacing = false;
+        return;
+    }
+    const time_t now = time(nullptr);
+    if (!c.underwaterSince)
+    {
+        c.underwaterSince = now;
+        return;
+    }
+    // Upstream's movement knows no breath. In Blackfathom Deeps a leader whose travel stopped 15 yards down, by the
+    // way to Old Serra'kis, stood there out of combat and ate as it drowned.
+    const time_t under = now - c.underwaterSince;
+    const bool idle = !bot->IsMoving() && !bot->IsInCombat();
+    if (under < UNDERWATER_SECONDS && (!idle || under < UNDERWATER_IDLE_SECONDS))
+        return;
+    const float surface = bot->GetTerrain()->GetWaterLevel(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+    // No water level here, as with no liquid data: nothing to swim up to.
+    if (surface <= bot->GetPositionZ())
+        return;
+    if (bot->getStandState() != UNIT_STAND_STATE_STAND)
+        bot->SetStandState(UNIT_STAND_STATE_STAND);
+    bot->GetMotionMaster()->Clear();
+    bot->GetMotionMaster()->MovePoint(0, bot->GetPositionX(), bot->GetPositionY(), surface, FORCED_MOVEMENT_RUN);
+    if (!c.surfacing)
+        Event(c.guid, "recovery", "up for air");
+    c.surfacing = true;
 }
 
 void GuildBotMgr::CheckLeftBehind(Character& c, Player* bot)
@@ -1400,6 +1438,7 @@ void GuildBotMgr::CheckJobs()
         CheckEmptyFight(c, bot);
         CheckApproach(c, bot);
         CheckGhostUnderMap(c, bot);
+        CheckBreath(c, bot);
         CheckStay(c, bot);
         CheckLoot(c, bot);
 

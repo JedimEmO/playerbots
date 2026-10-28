@@ -153,6 +153,8 @@ private:
         std::vector<time_t> emptyFightExits; // when it last left such fights, for a dungeon leader held outside
         time_t approachUntil = 0;   // a dungeon leader going straight to its stone through such fights, until then
         time_t underMapAt = 0;      // when a ghost of it was last taken out from under the world
+        time_t underwaterSince = 0; // since when it has been fully under water, or 0
+        bool surfacing = false;     // it has been sent up for air on this dive
         uint32 runsDone = 0;        // dungeon runs finished on this order, for `runs`
 
         // The hourly measure, counted every check and written every few minutes; see guildbot_metric.
@@ -195,6 +197,8 @@ private:
     void CheckApproach(Character& c, Player* bot);
     // A ghost fallen through the world goes to the graveyard by its dungeon's entrance, or the nearest one.
     void CheckGhostUnderMap(Character& c, Player* bot);
+    // Under water too long, it swims straight up for air before it drowns.
+    void CheckBreath(Character& c, Player* bot);
     // A levelling character that has worked its spot a while for far less than the best spot near its level leaves it.
     void CheckStay(Character& c, Player* bot);
     void CheckLoot(Character& c, Player* bot);

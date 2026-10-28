@@ -1689,10 +1689,17 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
 
     // Any travel target but the next boss goes, at a boss that died or one that replaced it, such as a grind spot:
     // upstream asks for no travel target while one is active, so the dungeon's request could not take it back.
+    // The next boss's own travel target goes too when it counts as working there, or waits out its cooldown, while
+    // the leader is far from the boss and out of a fight, as in Approach: after failed moves upstream puts it on
+    // cooldown, and the leader stood idle by the way to Old Serra'kis until it drowned.
     if (PlayerbotAI* ai = leader->GetPlayerbotAI())
     {
         TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-        if (target && target->IsActive() && (run.nextPlace ? target->GetDestination() != run.nextPlace : target->GetEntry() != next))
+        const bool forNext = target && (run.nextPlace ? target->GetDestination() == run.nextPlace : target->GetEntry() == next);
+        const TravelStatus status = target ? target->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+        const bool stopped = (status == TravelStatus::TRAVEL_STATUS_WORK || status == TravelStatus::TRAVEL_STATUS_COOLDOWN)
+            && !fighting && bossPlace && bossDistance > APPROACH_RANGE;
+        if (target && (forNext ? stopped : target->IsActive()))
             target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
     }
     if (!talkWait.empty())
