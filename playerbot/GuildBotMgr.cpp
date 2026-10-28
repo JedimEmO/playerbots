@@ -2,6 +2,7 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildBench.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildJobs.h"
 #include "playerbot/GuildRuns.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
@@ -147,7 +148,7 @@ namespace
     // The jobs the engine knows. Anything else fails with "unknown job".
     bool IsKnownJob(const std::string& job)
     {
-        return job == "idle" || job == "level" || job == "party" || job == "farm" || job == "learn" || job == "dungeon";
+        return job == "idle" || job == "level" || job == "party" || job == "farm" || job == "learn" || job == "dungeon" || GuildJobs::IsJob(job);
     }
 
     // True for a character on a continent well below the terrain at its x and y with no floor near its feet,
@@ -996,7 +997,7 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
         return;
     }
 
-    // idle: stand where it is.
+    // idle, and GuildJobs' pay, reset and craft: stand where it is.
     engine->addStrategy("stay");
 }
 
@@ -1698,6 +1699,22 @@ void GuildBotMgr::CheckJobs()
             }
             if ((update.strategiesChanged || update.status != "working") && bot->GetPlayerbotAI())
                 bot->GetPlayerbotAI()->ResetStrategies(false);
+            continue;
+        }
+
+        if (GuildJobs::IsJob(c.job))
+        {
+            GuildJobs::Update update = sGuildJobs.Tick(bot, c.job, c.jobArgs, c.jobSeq);
+            for (auto& [kind, detail] : update.events)
+                Event(guid, kind, detail);
+            c.reason = update.reason;
+            if (update.status != "working")
+            {
+                c.status = update.status;
+                Event(guid, c.status == "done" ? "job_done" : "job_failed", c.job + " " + c.reason);
+                if (bot->GetPlayerbotAI())
+                    bot->GetPlayerbotAI()->ResetStrategies(false);
+            }
             continue;
         }
 

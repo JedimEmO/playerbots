@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildJobs.h"
 #include "ItemUsageValue.h"
 #include "CraftValues.h"
 #include "MountValues.h"
@@ -89,6 +90,9 @@ ItemUsage ItemUsageValue::Calculate()
 
     // What a guild character's job collects: looted, never sold, banked or destroyed, and rolled need on.
     if (sGuildBotMgr.IsJobItem(bot->GetGUIDLow(), itemId))
+        return ItemUsage::ITEM_USAGE_GUILD_TASK;
+    // The same for what every guild character keeps: the reset currency and the crafts the guild's features cost.
+    if (GuildJobs::AlwaysKeep(itemId) && sGuildBotMgr.IsGuildCharacter(bot->GetGUIDLow()))
         return ItemUsage::ITEM_USAGE_GUILD_TASK;
     // The same for what a step of the dungeon its party is in needs, such as a key to a cage.
     if (sGuildBotMgr.IsGuildBot(bot) && bot->GetGroup() && GuildDungeon::IsStepItem(bot->GetMapId(), itemId))

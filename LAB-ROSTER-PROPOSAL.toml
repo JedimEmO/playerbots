@@ -1,0 +1,139 @@
+# A proposed addition to lab/roster.toml, for the pay, reset and craft jobs (GUILD-JOBS.md).
+# For the session that owns the lab to copy and adapt; nothing here is wired into `lab build` yet.
+#
+# The roster cannot express these characters today. It has groups and levellers only, and `lab build`
+# sets characters up with `bench setup` (level, spells, talents, gear, supplies). These need four things more:
+#
+#   money    copper on the character. Offline, in `place`: UPDATE characters SET money = ... WHERE name = ...
+#   items    items in its bags. There is no console path to a bot's bags: `.send items` goes to the mailbox,
+#            and a character standing on a job never collects mail. It needs a bench command, such as
+#            `.rndbot guildbot bench give <name> <entry>:<count>,...`, using Player::StoreNewItem.
+#   skills   a profession at a skill value, and the recipe spells. Offline in `place` works:
+#            character_skills (guid, skill, value, max) and character_spell (guid, spell, active=1, disabled=0),
+#            or a bench command beside `give`.
+#   binds    a raid lockout for the reset test. `place` deletes character_instance and instance today, so the
+#            binds go in after that: an `instance` row (id, map = 409, resettime a day ahead) and
+#            character_instance rows (guid, instance, permanent = 1) for the characters to unbind.
+#
+# Also add guildbot_job_progress to the tables `place` empties; the craft job keeps its count there.
+# The fields below beyond the leveller's are the proposal: job, args, money, items, skills, spells, binds, enabled.
+
+# pay, all or nothing, the success case: 20g and 2 Thorium Widgets of 30g and 3.
+# Expect: done, `paid 20g, 2 Thorium Widget (ref 1)`, a `paid` event `ref=1 gold=200000 items=15994:2`,
+# money 10g after, 1 Thorium Widget left. A second order with ref=1 is done at once with `already paid ref=1`.
+[[worker]]
+name = "Paygood"
+race = "human"
+class = "warrior"
+account = "LABPAY"
+level = 30
+job = "pay"
+args = "gold=200000 items=15994:2 ref=1"
+money = 300000
+items = ["15994:3"]
+
+# pay, the failure case: 5g of 20g, and 1 of 2 widgets. Expect: failed, `has 5g, needs 20g`,
+# and the money and the widget still there afterwards.
+[[worker]]
+name = "Paypoor"
+race = "orc"
+class = "warrior"
+account = "LABPAYH"
+level = 30
+job = "pay"
+args = "gold=200000 items=15994:2 ref=2"
+money = 50000
+items = ["15994:1"]
+
+# craft with no tools and no object: Bronze Framework (spell 3953: 2 Bronze Bar, 1 Medium Leather, 1 Wool Cloth),
+# reagents for two of three. Expect: working `made 1 of 3 Bronze Framework`, then
+# failed `made 2 of 3 Bronze Framework; out of Bronze Bar, has 0, needs 2`.
+[[worker]]
+name = "Craftbronze"
+race = "gnome"
+class = "warrior"
+account = "LABCRAFT"
+level = 30
+job = "craft"
+args = "item=4382 amount=3"
+skills = ["engineering:150"]
+spells = [3953]
+items = ["2841:4", "2319:2", "2592:2"]
+
+# craft at an anvil, with tools: Thorium Widget (spell 19791: 3 Thorium Bar, 1 Runecloth; Blacksmith Hammer 5956
+# and Arclight Spanner 6219; an anvil). Reagents for two. Placed within a few yards of an anvil, such as at the
+# Great Forge in Ironforge; the tele name is a guess, and a placement by coordinates by an anvil is safer.
+# Expect: done, `made 2 of 2 Thorium Widget`, a `crafted` event `item=15994 spell=19791 made=2`.
+[[worker]]
+name = "Craftwidget"
+race = "dwarf"
+class = "warrior"
+account = "LABCRAFT"
+level = 60
+tele = "Ironforge"
+job = "craft"
+args = "spell=19791 amount=2"
+skills = ["engineering:300"]
+spells = [19791]
+items = ["12359:6", "14047:2", "5956:1", "6219:1"]
+
+# craft away from an anvil: the same recipe, placed in the open. Expect: failed,
+# `made 0 of 1 Thorium Widget; needs an anvil nearby`. Without the hammer it would be `needs a Blacksmith Hammer`.
+[[worker]]
+name = "Craftfield"
+race = "dwarf"
+class = "warrior"
+account = "LABCRAFT"
+level = 60
+tele = "BloodvenomPost"
+job = "craft"
+args = "item=15994 amount=1"
+skills = ["engineering:300"]
+spells = [19791]
+items = ["12359:3", "14047:1", "5956:1", "6219:1"]
+
+# reset: an account of three, two of them bound to Molten Core (map 409), one offline.
+# Expect: done, `reset Molten Core: 2 characters and 0 groups unbound`, a `raid_reset` event
+# `map=409 Molten Core characters=2 groups=0`, and no character_instance rows left for them on map 409.
+[[worker]]
+name = "Resetter"
+race = "human"
+class = "priest"
+account = "LABRESET"
+level = 60
+job = "reset"
+args = "map=409"
+binds = [409]
+
+[[worker]]
+name = "Resetbound"
+race = "human"
+class = "mage"
+account = "LABRESET"
+level = 60
+job = "idle"
+binds = [409]
+enabled = false   # offline throughout: its bind goes from the database
+
+# reset refused: the same order on an account whose other character logged out inside Molten Core.
+# Its saved place is in map 409 (UPDATE characters SET map = 409 and the position of Molten Core's entrance
+# from areatrigger_teleport, in `place`). Expect: failed, `Resetinside is inside Molten Core, offline`,
+# and its bind still there.
+[[worker]]
+name = "Resetrefuse"
+race = "orc"
+class = "priest"
+account = "LABRESETH"
+level = 60
+job = "reset"
+args = "map=409"
+
+[[worker]]
+name = "Resetinside"
+race = "orc"
+class = "mage"
+account = "LABRESETH"
+level = 60
+job = "idle"
+binds = [409]
+enabled = false
