@@ -609,6 +609,11 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     float levelBoost = botPowerLevel / 50.0f; //(0-2.0f)
 
     int32 maxLevel = std::max(botLevel * (0.5f + levelMod), botLevel - 5.0f + levelBoost);
+    // Upstream keeps 3 to 5 levels below for safe coin. A character levelling fights its own level, as a player does:
+    // within 1500 yards of the band 60 Horde in Felwood not one creature type was under the old cap, so they walked
+    // 4000 yards to Azshara for creatures giving half the experience. Two below while it cannot take an equal fight.
+    if (info.WantsExperience())
+        maxLevel = std::max(maxLevel, botLevel - (info.GetBoolValue("can fight equal") ? 0 : 2));
 
     if ((int32)cInfo->MaxLevel > maxLevel) //@lvl5 max = 3, @lvl60 max = 57
         return false;
