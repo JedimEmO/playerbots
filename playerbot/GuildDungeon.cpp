@@ -186,6 +186,10 @@ namespace
     // The party looks this far from an object for the wave its last use brought: a wave creature chasing a member
     // can end up well beyond the corridors it came from.
     constexpr float WAVE_RANGE = 250.0f;
+    // A wave creature the leader gave up on this often, as out of its reach, is hunted no more, and an object still shut
+    // this long after its last use, with nothing of its wave left to hunt, is given up on: some of a wave never come down.
+    constexpr uint32 WAVE_GIVE_UPS = 2;
+    constexpr time_t WAVE_WAIT_SECONDS = 5 * MINUTE;
 
     // Creatures with no spawn of their own, brought by an event, that a party kills before a boss, as players would:
     // the creature, the boss, and the door their deaths open. The step is done when none is alive near the leader,
@@ -1486,8 +1490,17 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
                     Cell::VisitAllObjects(object, searcher, WAVE_RANGE);
                     for (Unit* unit : found)
-                        if (unit->IsAlive() && unit->IsInWorld() && (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest)))
+                        if (unit->IsAlive() && unit->IsInWorld() && !sGuildBotMgr.IsIgnoredTarget(leader, unit->GetObjectGuid())
+                            && sGuildBotMgr.GiveUps(leader, unit->GetObjectGuid()) < WAVE_GIVE_UPS
+                            && (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest)))
                             nearest = unit;
+                }
+                if (!nearest && now - run.usedAt[use.spawn] >= WAVE_WAIT_SECONDS)
+                {
+                    // Shut for good: what is left of its wave is out of reach, and the script opens it only when all are dead.
+                    run.used.insert(use.spawn);
+                    update.events.push_back({ "gave_up", "the " + name + " stays shut: its wave cannot be reached" });
+                    continue;
                 }
                 if (nearest)
                 {
@@ -1522,6 +1535,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     if (object->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT) || !object->IsSpawned())
                     {
                         run.useCount[use.spawn] = times + 1;
+                        run.usedAt[use.spawn] = now;
                         update.events.push_back({ "used", name + ", " + std::to_string(times + 1) + " of " + std::to_string(use.times) });
                         state = "rung";
                     }
