@@ -1307,6 +1307,11 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     }
 
     bool generatePath = !noPath && !bot->IsFlying() && !bot->HasMovementFlag(MOVEFLAG_SWIMMING) && !bot->IsInWater() && !sServerFacade.IsUnderwater(bot);
+    // A guild character inside a dungeon has the core path its moves in water too. Without a path, a move from the
+    // surface to a point on the floor of a pool keeps it swimming on the surface, as over the pond on the way to
+    // Lord Cobrahn, where the leader circled above a route that runs along the bottom and up the far bank.
+    if (!noPath && !bot->IsFlying() && sGuildBotMgr.IsGuildBot(bot) && bot->GetMap()->IsDungeon())
+        generatePath = true;
 
 #ifndef MANGOSBOT_ZERO
     if (bot->IsFreeFlying())
