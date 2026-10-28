@@ -56,6 +56,13 @@ namespace
     constexpr time_t LEAVE_DESTINATION_SECONDS = 30 * MINUTE;
     // In the AI's combat state this long with nothing to attack and nothing under crowd control, the fight is empty.
     constexpr time_t EMPTY_FIGHT_SECONDS = 20;
+    // A dungeon leader outside that leaves this many such fights this close together goes straight to its stone,
+    // for at most this long. Pyrewood's night worgen held the Shadowfang Keep party on the road below the stone.
+    constexpr size_t EMPTY_FIGHTS_TO_APPROACH = 3;
+    constexpr time_t EMPTY_FIGHT_WINDOW_SECONDS = 10 * MINUTE;
+    constexpr time_t APPROACH_SECONDS = 10 * MINUTE;
+    // A ghost under the world is taken out at most this often.
+    constexpr time_t GHOST_UNDER_MAP_SECONDS = MINUTE;
 
     std::string Trim(const std::string& s)
     {
@@ -429,6 +436,27 @@ void GuildBotMgr::CheckEmptyFight(Character& c, Player* bot)
         return;
     c.emptyFightSince = 0;
 
+    LeaveEmptyFight(c, bot, attackers);
+
+    // A dungeon leader held outside, fight after fight: it goes straight to its stone.
+    auto& exits = c.emptyFightExits;
+    exits.erase(std::remove_if(exits.begin(), exits.end(), [&](time_t t) { return now - t > EMPTY_FIGHT_WINDOW_SECONDS; }), exits.end());
+    exits.push_back(now);
+    if (exits.size() >= EMPTY_FIGHTS_TO_APPROACH && !c.approachUntil)
+        if (ai::TravelDestination* stone = sGuildDungeon.StoneDestination(bot))
+        {
+            exits.clear();
+            c.approachUntil = now + APPROACH_SECONDS;
+            Event(c.guid, "recovery", "straight to " + stone->GetTitle());
+        }
+}
+
+void GuildBotMgr::LeaveEmptyFight(Character& c, Player* bot, const std::list<ObjectGuid>& attackers, bool record)
+{
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    AiObjectContext* context = ai->GetAiObjectContext();
+    const time_t now = time(nullptr);
+
     // What holds it is given up on, so its attackers leave it out, and it leaves the fight where it stands.
     // Its threat goes too, as a player's does by vanishing: while it is flagged in combat it cannot eat or drink,
     // and a leader waiting on its mana would stand there.
@@ -456,7 +484,64 @@ void GuildBotMgr::CheckEmptyFight(Character& c, Player* bot)
     context->GetValue<std::list<ObjectGuid>>("attackers", 1)->Reset();
     context->GetValue<bool>("has attackers")->Reset();
     ai->OnCombatEnded();
-    Event(c.guid, "recovery", "left a fight with nothing to attack" + (holder.empty() ? std::string() : ": " + holder));
+    if (record)
+        Event(c.guid, "recovery", "left a fight with nothing to attack" + (holder.empty() ? std::string() : ": " + holder));
+}
+
+void GuildBotMgr::CheckApproach(Character& c, Player* bot)
+{
+    if (!c.approachUntil)
+        return;
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    // The stone is there while it is the leader outside its dungeon, on the way in.
+    ai::TravelDestination* stone = ai && bot->IsAlive() ? sGuildDungeon.StoneDestination(bot) : nullptr;
+    const time_t now = time(nullptr);
+    if (!stone || now >= c.approachUntil)
+    {
+        c.approachUntil = 0;
+        return;
+    }
+
+    AiObjectContext* context = ai->GetAiObjectContext();
+    // Something it can fight comes first.
+    if (bot->GetVictim() || !context->GetValue<std::list<ObjectGuid>>("possible attack targets")->Get().empty())
+        return;
+    // A fight with nothing to attack does not hold it now: it leaves at once, so its travel goes on.
+    if (ai->IsStateActive(BotState::BOT_STATE_COMBAT) || bot->IsInCombat())
+        LeaveEmptyFight(c, bot, context->GetValue<std::list<ObjectGuid>>("attackers")->Get(), false);
+
+    ai::TravelTarget* travel = context->GetValue<ai::TravelTarget*>("travel target")->Get();
+    if (travel->GetDestination() == stone && travel->IsForced() && travel->GetStatus() <= ai::TravelStatus::TRAVEL_STATUS_TRAVEL)
+        return;
+    std::list<uint8> nearest = { 0 };
+    if (WorldPosition* point = stone->GetNextPoint(WorldPosition(bot), nearest, true))
+    {
+        travel->SetTarget(stone, point);
+        travel->SetForced(true);
+        travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_READY);
+        travel->SetExpireIn(uint32(c.approachUntil - now) * IN_MILLISECONDS);
+    }
+}
+
+void GuildBotMgr::CheckGhostUnderMap(Character& c, Player* bot)
+{
+    if (!bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+        return;
+    const time_t now = time(nullptr);
+    if (now - c.underMapAt < GHOST_UNDER_MAP_SECONDS || !UnderTheMap(bot))
+        return;
+    c.underMapAt = now;
+    WorldLocation grave;
+    bool out;
+    if (GuildDungeon::CorpseGraveyard(bot, grave))
+    {
+        bot->GetMotionMaster()->Clear();
+        out = bot->TeleportTo(grave.mapid, grave.coord_x, grave.coord_y, grave.coord_z, grave.orientation);
+    }
+    else
+        out = SendToGraveyard(bot);
+    if (out)
+        Event(c.guid, "recovery", "under the map");
 }
 
 uint8 GuildBotMgr::GetTankOrder(uint32 guid) const
@@ -1177,6 +1262,8 @@ void GuildBotMgr::CheckJobs()
         ApplyRole(c, bot);
         CheckChase(c, bot);
         CheckEmptyFight(c, bot);
+        CheckApproach(c, bot);
+        CheckGhostUnderMap(c, bot);
         CheckLoot(c, bot);
 
         bool dead = sServerFacade.UnitIsDead(bot);

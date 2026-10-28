@@ -267,6 +267,11 @@ bool SpiritHealerAction::Execute(Event& event)
 
     uint32 dCount = AI_VALUE(uint32, "death count");
     GuidPosition grave = AI_VALUE(GuidPosition, "best graveyard");
+    // A guild ghost whose corpse lies in a dungeon, back too late from its corpse run: the graveyard by that dungeon's
+    // entrance, so it revives next to its party's way in rather than at whichever graveyard upstream ranks best.
+    WorldLocation dungeonGrave;
+    if (GuildDungeon::CorpseGraveyard(bot, dungeonGrave))
+        grave = GuidPosition(ObjectGuid(), WorldPosition(dungeonGrave.mapid, dungeonGrave.coord_x, dungeonGrave.coord_y, dungeonGrave.coord_z));
 
     //something went wrong
     if (!grave)

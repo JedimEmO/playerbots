@@ -119,6 +119,9 @@ public:
     // For such a ghost outside: the entrance trigger it walks to, its place and how near counts as in it.
     // False when it is not outside, or the trigger is not on its map.
     static bool CorpseEntrance(Player* ghost, WorldLocation& place, uint32& triggerId, float& reach);
+    // For a guild ghost whose corpse lies in a dungeon: the graveyard of its faction nearest that dungeon's entrance,
+    // where it takes the spirit healer once the corpse run has taken too long. False for any other ghost.
+    static bool CorpseGraveyard(Player* ghost, WorldLocation& place);
     // A guild character dead in a dungeon does not release for a while when a party member who can resurrect it
     // is alive and near; it waits to be resurrected, as a player would.
     static bool WaitsForResurrect(Player* dead);

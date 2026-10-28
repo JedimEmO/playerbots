@@ -7,6 +7,7 @@
 #include "ReviveFromCorpseAction.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildBotMgr.h"
 
 namespace ai
 {
@@ -201,6 +202,10 @@ namespace ai
 
             // A guild character whose corpse lies in a dungeon stays with its party and runs back to it.
             if (GuildDungeon::KeepsToCorpse(bot))
+                return false;
+
+            // A guild ghost is never taken to its race's starting spot: it walks, and takes a spirit healer at the end.
+            if (sGuildBotMgr.IsGuildBot(bot) && bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
                 return false;
 
             return true;

@@ -2145,6 +2145,26 @@ bool GuildDungeon::KeepsToCorpse(Player* bot)
     return time(nullptr) - since->second < CORPSE_RUN_SECONDS;
 }
 
+bool GuildDungeon::CorpseGraveyard(Player* ghost, WorldLocation& place)
+{
+    if (!sGuildBotMgr.IsGuildBot(ghost) || !ghost->IsInWorld() || !ghost->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+        return false;
+    Corpse* corpse = ghost->GetCorpse();
+    MapEntry const* map = corpse ? sMapStore.LookupEntry(corpse->GetMapId()) : nullptr;
+    if (!map || !map->IsNonRaidDungeon())
+        return false;
+    AreaTrigger const* at = EntranceNear(corpse->GetMapId(), corpse->GetPositionX(), corpse->GetPositionY(), corpse->GetPositionZ());
+    AreaTriggerEntry const* entry = at ? sAreaTriggerStore.LookupEntry(at->entry) : nullptr;
+    if (!entry || entry->mapid != ghost->GetMapId())
+        return false;
+    WorldSafeLocsEntry const* grave = ghost->GetMap()->GetGraveyardManager().GetClosestGraveYard(
+        entry->x, entry->y, entry->z, entry->mapid, ghost->GetTeam());
+    if (!grave || grave->map_id != ghost->GetMapId())
+        return false;
+    place = WorldLocation(grave->map_id, grave->x, grave->y, grave->z, grave->o);
+    return true;
+}
+
 bool GuildDungeon::CorpseEntrance(Player* ghost, WorldLocation& place, uint32& triggerId, float& reach)
 {
     if (!ghost->IsInWorld() || !ghost->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST) || !KeepsToCorpse(ghost))

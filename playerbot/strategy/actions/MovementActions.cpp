@@ -247,6 +247,10 @@ bool MovementAction::UseTaxi(PlayerbotAI* ai, uint32 entry, bool needNpc)
     AiObjectContext* context = ai->GetAiObjectContext();
     Player* bot = ai->GetBot();
 
+    // A ghost walks: no flight, wherever a route or a step would take one.
+    if (!bot->IsAlive())
+        return false;
+
     TaxiPathEntry const* tEntry = sTaxiPathStore.LookupEntry(entry);
 
     if (!tEntry)
@@ -541,6 +545,10 @@ bool MovementAction::MinimalMove(PlayerbotAI* ai)
         return false;
 
     if (lastMove.lastPath.empty())
+        return false;
+
+    // A guild ghost walks back to its corpse or its dungeon: no stepping by teleports along the path.
+    if (!bot->IsAlive() && sGuildBotMgr.IsGuildBot(bot))
         return false;
 
     time_t now = time(0);

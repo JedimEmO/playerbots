@@ -142,6 +142,9 @@ private:
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
         time_t invitedAt = 0;       // when the dungeon leader last invited its companion
         time_t emptyFightSince = 0; // since when it has been in the AI's combat state with nothing to attack, or 0
+        std::vector<time_t> emptyFightExits; // when it last left such fights, for a dungeon leader held outside
+        time_t approachUntil = 0;   // a dungeon leader going straight to its stone through such fights, until then
+        time_t underMapAt = 0;      // when a ghost of it was last taken out from under the world
         uint32 runsDone = 0;        // dungeon runs finished on this order, for `runs`
 
         // The hourly measure, counted every check and written every few minutes; see guildbot_metric.
@@ -171,6 +174,13 @@ private:
     void CheckChase(Character& c, Player* bot);
     // In the AI's combat state with nothing to attack for a while: it leaves the fight where it stands.
     void CheckEmptyFight(Character& c, Player* bot);
+    // Leave the fight where it stands: what holds it is passed over, targets and threat dropped.
+    void LeaveEmptyFight(Character& c, Player* bot, const std::list<ObjectGuid>& attackers, bool record = true);
+    // A dungeon leader that keeps being held outside by fights with nothing to attack goes straight to its stone,
+    // leaving each such fight at once, until it is there or a while has passed.
+    void CheckApproach(Character& c, Player* bot);
+    // A ghost fallen through the world goes to the graveyard by its dungeon's entrance, or the nearest one.
+    void CheckGhostUnderMap(Character& c, Player* bot);
     void CheckLoot(Character& c, Player* bot);
     static uint32 ZoneOf(Player* bot);
     // Count this check into the hourly measure, and write the counts when the hour or job changes, or every few minutes.
