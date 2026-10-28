@@ -71,7 +71,11 @@ bool ai::AttackAnythingAction::Execute(Event& event)
             {
                 sPlayerbotAIConfig.logEvent(ai, "AttackAnythingAction", grindName, std::to_string(grindTarget->GetEntry()));
 
-                if (ai->HasStrategy("pull", BotState::BOT_STATE_COMBAT))
+                // A guild leader's next boss within reach is attacked, not pulled. A boss that waits where it is, such
+                // as Twilight Lord Kelris kneeling at his altar, never comes to a pull that fails, and the leader would
+                // pull it again and again with the party standing by it.
+                const bool nextBoss = grindTarget == sGuildDungeon.NextBoss(bot, sPlayerbotAIConfig.sightDistance);
+                if (!nextBoss && ai->HasStrategy("pull", BotState::BOT_STATE_COMBAT))
                 {
                     if (PullStrategy* strategy = PullStrategy::Get(ai))
                     {

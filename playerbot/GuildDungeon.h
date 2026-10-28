@@ -166,6 +166,7 @@ private:
         int32 lastBoss = 0;            // the boss whose death ends the run
         uint32 bossLevel = 0;          // the level of the last boss, which the party must be near
         ai::PlaceTravelDestination* exit = nullptr;  // outside, where the way out leads; kept in exits
+        ai::PlaceTravelDestination* inside = nullptr; // inside, where the entrance puts a party, by the way out; kept in insides
         ai::PlaceTravelDestination* stone = nullptr; // the dungeon's meeting stone, if it has one; kept in stones
         // Objects to use before a boss, as a player would: the object's spawn, how many members use it, the boss,
         // and whether it wakes the boss, so that the step is due for as long as the boss sleeps.
@@ -239,6 +240,7 @@ private:
     std::map<uint32, Run> runs;                 // by leader guid
     static std::mutex exitLock;
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> exits;  // by dungeon map, never freed
+    static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> insides; // by entrance trigger, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> stones; // by dungeon map, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> usePlaces; // by object spawn, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> bossPlaces; // by creature spawn, never freed

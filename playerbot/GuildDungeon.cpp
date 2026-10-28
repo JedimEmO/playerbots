@@ -24,6 +24,7 @@ std::mutex GuildDungeon::entryLock;
 std::map<uint32, uint32> GuildDungeon::lastEntry;
 std::mutex GuildDungeon::exitLock;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::exits;
+std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::insides;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::stones;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::usePlaces;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::bossPlaces;
@@ -59,6 +60,8 @@ namespace
     constexpr float FOLLOW_BY_TRAVEL = 150.0f;
     // Or this far above or below it, outside: follow walks under the leader but takes no lift up to it.
     constexpr float FOLLOW_BY_TRAVEL_HEIGHT = 20.0f;
+    // Leaving, a leader farther than this from where the entrance put the party goes there first, then out.
+    constexpr float EXIT_NEAR = 30.0f;
     // A boss the travel map has no route to sorts after every boss it has a route to.
     constexpr float NO_ROUTE = 1000000.0f;
     // A boss the leader comes no nearer to by this much in this long, alive and out of combat, is out of reach
@@ -397,6 +400,11 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         // A talk step only for the party it is friendly to; any other friendly creature is no step at all.
         if (talk ? !friendly : friendly)
             continue;
+        // Nor is a neutral creature that offers quests or gossip a boss, such as Willix the Importer, whom a party
+        // escorts and cannot fight: the leader would stand by him until the headway rule passed him over.
+        const bool hostile = bossFaction && ownFaction && (bossFaction->IsHostileTo(*ownFaction) || bossFaction->IsHostileToPlayers());
+        if (!talk && !hostile && bossInfo && (bossInfo->NpcFlags & (UNIT_NPC_FLAG_GOSSIP | UNIT_NPC_FLAG_QUESTGIVER)))
+            continue;
         if (talk)
         {
             dungeon.talks[talk->entry] = talk->action;
@@ -515,6 +523,11 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
                 WorldPosition(back->target_mapId, back->target_X, back->target_Y, back->target_Z, back->target_Orientation),
                 "out of " + dungeon.name);
         dungeon.exit = exit.get();
+        // Inside, where the entrance puts a party, beside the way out.
+        auto& in = insides[dungeon.entrance->entry];
+        if (!in)
+            in = std::make_unique<PlaceTravelDestination>(arrival, "the way out of " + dungeon.name);
+        dungeon.inside = in.get();
     }
 
     // Objects to use on the way, where the map has their spawns.
@@ -1730,7 +1743,10 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
             if (PlayerbotAI* ai = leader->GetPlayerbotAI())
             {
                 TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
-                if (target && target->IsActive() && target->GetDestination() != dungeon.exit)
+                // Far inside, the place by the way out; near it, the way out itself, as ExitDestination gives them.
+                TravelDestination* wanted = dungeon.inside && dungeon.inside->DistanceTo(WorldPosition(leader)) > EXIT_NEAR
+                    ? static_cast<TravelDestination*>(dungeon.inside) : static_cast<TravelDestination*>(dungeon.exit);
+                if (target && target->IsActive() && target->GetDestination() != wanted)
                     target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
             }
         update.reason = "leaving " + dungeon.name + ", " + std::to_string(inside) + " inside; " + run.cleared;
@@ -2141,7 +2157,13 @@ TravelDestination* GuildDungeon::ExitDestination(Player* bot) const
     auto it = runs.find(bot->GetGUIDLow());
     if (it == runs.end() || it->second.phase != Phase::Leave || bot->GetMapId() != it->second.dungeon.mapId)
         return nullptr;
-    return it->second.dungeon.exit;
+    // Far inside, the place by the way out comes first. The travel map may have no route from the last boss to the way
+    // out, as from Verdan in Wailing Caverns, and the way out leads to another map, which no walk by the movement maps
+    // reaches. The place inside is on the dungeon's own map, so a walk does, and from it the route out is a short one.
+    const Dungeon& dungeon = it->second.dungeon;
+    if (dungeon.inside && dungeon.inside->DistanceTo(WorldPosition(bot)) > EXIT_NEAR)
+        return dungeon.inside;
+    return dungeon.exit;
 }
 
 Creature* GuildDungeon::NextBoss(Player* bot, float within) const
