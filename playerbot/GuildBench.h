@@ -28,5 +28,6 @@ private:
     static std::list<std::string> Consumables(Player* bot);
     static std::list<std::string> Bags(Player* bot);
     static std::list<std::string> Pet(Player* bot);
-    static std::list<std::string> Keys(Player* bot);
+    // The keys for the dungeon named, or with none named, the one the character's order names.
+    static std::list<std::string> Keys(Player* bot, const std::string& dungeonName = "");
 };

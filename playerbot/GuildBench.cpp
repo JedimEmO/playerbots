@@ -47,8 +47,8 @@ std::list<std::string> GuildBench::Help()
         "  bench consumables <name>                   food, drink, reagents, ammunition, oils and potions for its class",
         "  bench bags <name>                          a Traveler's Backpack in every empty bag slot",
         "  bench pet <name>                           a hunter's pet with its spells",
-        "  bench keys <name>                          the keys to the locked doors of the dungeon its order names",
-        "  bench setup <name> <level> [quality]       all of the above, in that order",
+        "  bench keys <name> [dungeon]                the keys to the locked doors of the dungeon named, or else of its order's",
+        "  bench setup <name> <level> [quality] [dungeon]  all of the above, in that order",
         "All but level need the character online and played by the engine; level works offline as a level change only.",
     };
 }
@@ -79,8 +79,8 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
     bool online = bot && bot->IsInWorld();
 
     std::istringstream restIn(rest);
-    std::string first, second;
-    restIn >> first >> second;
+    std::string first, second, third;
+    restIn >> first >> second >> third;
 
     if (sub == "level" || sub == "setup")
     {
@@ -121,12 +121,21 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
     if (sub == "pet")
         return Pet(bot);
     if (sub == "keys")
-        return Keys(bot);
+        return Keys(bot, first);
 
     if (sub == "setup")
     {
+        // The dungeon may follow the quality, or stand in its place: the lab builds a bench before it gives orders.
+        std::string dungeon = third;
+        if (dungeon.empty() && ParseQuality(second) < 0 && GuildDungeon::Validate(second).empty())
+        {
+            dungeon = second;
+            second.clear();
+        }
         if (ParseQuality(second) < 0)
             return { "unknown quality " + second + "; use green, blue or epic" };
+        if (!dungeon.empty() && !GuildDungeon::Validate(dungeon).empty())
+            return { GuildDungeon::Validate(dungeon) };
 
         // Gear follows the talent tree and needs bag space for what it replaces, so the order matters.
         std::list<std::string> out = Level(bot, name, uint32(atoi(first.c_str())));
@@ -136,7 +145,7 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
         out.splice(out.end(), Gear(bot, second));
         out.splice(out.end(), Consumables(bot));
         out.splice(out.end(), Pet(bot));
-        out.splice(out.end(), Keys(bot));
+        out.splice(out.end(), Keys(bot, dungeon));
         return out;
     }
 
@@ -239,12 +248,15 @@ std::list<std::string> GuildBench::Bags(Player* bot)
     return { std::string(bot->GetName()) + " got " + std::to_string(added) + " Traveler's Backpacks" };
 }
 
-std::list<std::string> GuildBench::Keys(Player* bot)
+std::list<std::string> GuildBench::Keys(Player* bot, const std::string& dungeonName)
 {
-    // The keys a player brings for the dungeon: the bench has no quest chain to earn them by.
-    const std::string dungeon = sGuildBotMgr.GetDungeonOrder(bot->GetGUIDLow());
+    // The keys a player brings for the dungeon: the bench has no quest chain to earn them by. A dungeon named here
+    // comes first: the lab sets a bench up while every character is idle and gives the orders after.
+    const std::string dungeon = !dungeonName.empty() ? dungeonName : sGuildBotMgr.GetDungeonOrder(bot->GetGUIDLow());
     if (dungeon.empty())
-        return { std::string(bot->GetName()) + " has no dungeon order; no keys" };
+        return { std::string(bot->GetName()) + " has no dungeon named or ordered; no keys" };
+    if (!GuildDungeon::Validate(dungeon).empty())
+        return { GuildDungeon::Validate(dungeon) };
     std::vector<uint32> keys = GuildDungeon::DungeonKeys(dungeon);
     if (keys.empty())
         return { std::string(bot->GetName()) + " needs no keys for " + dungeon };
