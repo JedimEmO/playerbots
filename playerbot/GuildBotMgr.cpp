@@ -35,6 +35,9 @@ namespace
     // long ago, is left behind where its own moves cannot get it out, such as halfway up the lift by Gnomeregan.
     constexpr float LEFT_BEHIND_DISTANCE = 100.0f;
     constexpr float LEFT_BEHIND_STILL = 5.0f;
+    // A member outside while its leader is inside counts as stuck when it stays within this of one place: at the foot
+    // of Gnomeregan's lifts it wandered some 25 yards to and fro.
+    constexpr float LEFT_OUTSIDE_STILL = 30.0f;
     constexpr time_t LEFT_BEHIND_SECONDS = 5 * MINUTE;
     // A character that gained experience this recently is earning it, for the hourly measure.
     constexpr time_t EARNING_WINDOW_SECONDS = 5 * MINUTE;
@@ -719,9 +722,14 @@ void GuildBotMgr::CheckLeftBehind(Character& c, Player* bot)
     Group* group = bot->GetGroup();
     Player* leader = group ? sObjectMgr.GetPlayer(group->GetLeaderGuid()) : nullptr;
     MapEntry const* map = sMapStore.LookupEntry(bot->GetMapId());
+    // Left outside: the leader is inside its dungeon and the member in the open world. In Gnomeregan a member that came
+    // out with its leader by a wrong turn could not take the lifts back up to the stone, and the leader held inside
+    // by the Train Depot entrance waiting for it.
+    MapEntry const* leaderMap = leader && leader->IsInWorld() ? sMapStore.LookupEntry(leader->GetMapId()) : nullptr;
+    const bool outside = leaderMap && leaderMap->IsDungeon() && leader->GetMapId() != bot->GetMapId();
     const bool behind = c.job == "party" && leader && leader != bot && leader->IsInWorld() && IsGuildBot(leader)
-        && GetActiveJob(leader->GetGUIDLow()) == "dungeon" && bot->IsAlive() && !bot->IsInCombat()
-        && map && !map->IsDungeon() && leader->GetMapId() == bot->GetMapId() && bot->GetDistance(leader) > LEFT_BEHIND_DISTANCE;
+        && GetActiveJob(leader->GetGUIDLow()) == "dungeon" && bot->IsAlive() && !bot->IsInCombat() && map && !map->IsDungeon()
+        && (outside || (leader->GetMapId() == bot->GetMapId() && bot->GetDistance(leader) > LEFT_BEHIND_DISTANCE));
     const time_t now = time(nullptr);
     if (!behind)
     {
@@ -729,7 +737,7 @@ void GuildBotMgr::CheckLeftBehind(Character& c, Player* bot)
         c.behindReset = false;
         return;
     }
-    if (!c.stillSince || bot->GetDistance(c.stillX, c.stillY, c.stillZ) > LEFT_BEHIND_STILL)
+    if (!c.stillSince || bot->GetDistance(c.stillX, c.stillY, c.stillZ) > (outside ? LEFT_OUTSIDE_STILL : LEFT_BEHIND_STILL))
     {
         c.stillX = bot->GetPositionX();
         c.stillY = bot->GetPositionY();
@@ -750,6 +758,12 @@ void GuildBotMgr::CheckLeftBehind(Character& c, Player* bot)
     {
         ai->Reset(true);
         Event(c.guid, "recovery", "left behind, under the map");
+    }
+    // Left outside, the hearthstone comes first: it takes the member to its dungeon's stone, which takes it in.
+    else if (outside && ai->DoSpecificAction("hearthstone", ai::Event(), true))
+    {
+        c.behindReset = false;
+        Event(c.guid, "recovery", "left outside, hearthstone");
     }
     else if (!c.behindReset)
     {
