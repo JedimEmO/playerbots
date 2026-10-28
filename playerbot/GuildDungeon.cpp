@@ -948,7 +948,9 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     // that counts as done, or waits out its cooldown, while the leader is far from the stone or below it starts again.
     // In Gnomeregan the leader waiting at its stone went off to the Vator and rode it 62 yards down; its stone travel
     // stayed in WORK 80 yards off, and the party stood at the foot of the lift for the rest of the hour.
-    if ((run.phase == Phase::Check || run.phase == Phase::Go) && dungeon.stone && leader->IsAlive())
+    // Not once the stone has taken it: a character teleported far has no map until it lands, and a move then asserts.
+    if ((run.phase == Phase::Check || run.phase == Phase::Go) && dungeon.stone && leader->IsAlive() && leader->IsInWorld()
+        && !leader->IsBeingTeleported())
         if (WorldPosition* at = dungeon.stone->GetClosestPoint(WorldPosition(leader)))
             if (at->getMapId() == leader->GetMapId())
             {
@@ -2282,6 +2284,9 @@ void GuildDungeon::Approach(Player* leader, WorldObject* to, TravelDestination* 
 
 void GuildDungeon::HoldNear(Player* leader, WorldObject* by, float near, float stand)
 {
+    // A character on its way to another map has none until it lands, and a move then asserts.
+    if (!leader->IsInWorld() || leader->IsBeingTeleported() || !by->IsInWorld())
+        return;
     // No travel target while it stays: the dungeon's travel would take it on to the next boss.
     if (PlayerbotAI* ai = leader->GetPlayerbotAI())
     {

@@ -686,7 +686,8 @@ void GuildBotMgr::CheckGhostUnderMap(Character& c, Player* bot)
 
 void GuildBotMgr::CheckBreath(Character& c, Player* bot)
 {
-    if (!bot->IsAlive() || !bot->IsUnderwater() || bot->HasAuraType(SPELL_AURA_WATER_BREATHING))
+    if (!bot->IsAlive() || !bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsUnderwater()
+        || bot->HasAuraType(SPELL_AURA_WATER_BREATHING))
     {
         c.underwaterSince = 0;
         c.surfacing = false;
