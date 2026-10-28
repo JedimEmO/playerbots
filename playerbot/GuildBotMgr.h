@@ -161,6 +161,8 @@ private:
         int32 unreachableHandled = 0;          // the spot whose present cooldown has been counted, once
         int32 retrySpot = 0;                   // the grind spot its travel target's failed-move count belongs to
         time_t underwaterSince = 0; // since when it has been fully under water, or 0
+        time_t stillTravelSince = 0; // since when its travel has counted as travelling with it standing still, or 0
+        float stillTravelX = 0.0f, stillTravelY = 0.0f; // where it stood
         bool surfacing = false;     // it has been sent up for air on this dive
         uint32 runsDone = 0;        // dungeon runs finished on this order, for `runs`
 
@@ -206,6 +208,9 @@ private:
     void CheckGhostUnderMap(Character& c, Player* bot);
     // Under water too long, it swims straight up for air before it drowns.
     void CheckBreath(Character& c, Player* bot);
+    // A dungeon leader whose travel target counts as travelling while it stands still, with no path, has its travel
+    // and last path dropped, so the next move is built afresh.
+    void CheckStillTravel(Character& c, Player* bot);
     // A levelling character that has worked its spot a while for far less than the best spot near its level leaves it.
     void CheckStay(Character& c, Player* bot);
     // A levelling character whose moves to its grind spot keep failing passes over that spot for a while.

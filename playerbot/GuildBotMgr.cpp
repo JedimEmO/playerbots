@@ -90,6 +90,9 @@ namespace
     constexpr time_t APPROACH_SECONDS = 10 * MINUTE;
     // A character fully under water swims up for air after this long standing still out of a fight, or after this
     // long in any case. Breath lasts 60 seconds, then drowning takes a tenth of its health every 2 seconds.
+    // A dungeon leader whose travel counts as travelling while it moves less than this in this long starts its travel again.
+    constexpr float STILL_TRAVEL_MOVED = 3.0f;
+    constexpr time_t STILL_TRAVEL_SECONDS = 30;
     constexpr time_t UNDERWATER_IDLE_SECONDS = 20;
     constexpr time_t UNDERWATER_SECONDS = 40;
     // A ghost under the world is taken out at most this often.
@@ -403,7 +406,11 @@ void GuildBotMgr::CheckChase(Character& c, Player* bot)
     // Hurt but no lower all this time, and fighting no one: a creature its blows no longer touch. A Reanimated Corpse
     // in Scholomance turns invincible at 1 health and lies down until it heals; the tank swung at one for half an
     // hour while the run stood still.
-    const bool untouchable = victim->GetHealth() < victim->GetMaxHealth() && !victim->GetVictim();
+    // One the core keeps from dying counts so whatever it fights: such a corpse holding the mage as its victim
+    // was kept by the rule above, and the run stood still on Lord Alexei Barov.
+    const bool unkillable = victim->GetTypeId() == TYPEID_UNIT
+        && static_cast<Creature*>(victim)->GetSettings().HasFlag(CreatureStaticFlags::UNKILLABLE);
+    const bool untouchable = victim->GetHealth() < victim->GetMaxHealth() && (!victim->GetVictim() || unkillable);
     if (now - chase.since < UNREACHED_TARGET_SECONDS || (victim->GetHealth() < victim->GetMaxHealth() && !untouchable))
         return;
 
@@ -744,6 +751,40 @@ void GuildBotMgr::CheckGhostUnderMap(Character& c, Player* bot)
         out = SendToGraveyard(bot);
     if (out)
         Event(c.guid, "recovery", "under the map");
+}
+
+void GuildBotMgr::CheckStillTravel(Character& c, Player* bot)
+{
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    ai::TravelTarget* travel = ai ? ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get() : nullptr;
+    const bool still = travel && GetActiveJob(c.guid) == "dungeon" && bot->IsAlive() && bot->IsInWorld()
+        && !bot->IsBeingTeleported() && !bot->IsInCombat() && !bot->IsMoving()
+        && travel->GetStatus() == ai::TravelStatus::TRAVEL_STATUS_TRAVEL
+        && ai->GetAiObjectContext()->GetValue<ai::LastMovement&>("last movement")->Get().lastPath.empty();
+    const time_t now = time(nullptr);
+    if (!still || (c.stillTravelSince && bot->GetDistance(c.stillTravelX, c.stillTravelY, bot->GetPositionZ()) > STILL_TRAVEL_MOVED))
+    {
+        c.stillTravelSince = still ? now : 0;
+        c.stillTravelX = bot->GetPositionX();
+        c.stillTravelY = bot->GetPositionY();
+        return;
+    }
+    if (!c.stillTravelSince)
+    {
+        c.stillTravelSince = now;
+        c.stillTravelX = bot->GetPositionX();
+        c.stillTravelY = bot->GetPositionY();
+        return;
+    }
+    if (now - c.stillTravelSince < STILL_TRAVEL_SECONDS)
+        return;
+    // Its moves report success and nothing moves it: the leave in Stratholme and Blackfathom Deeps, and the way to
+    // Ambassador Flamelash in Blackrock Depths, stood so until the run failed. A fresh travel builds a fresh path.
+    c.stillTravelSince = 0;
+    travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
+    ai->GetAiObjectContext()->GetValue<ai::LastMovement&>("last movement")->Get().clear();
+    ai->StopMoving();
+    Event(c.guid, "recovery", "travel stood still");
 }
 
 void GuildBotMgr::CheckBreath(Character& c, Player* bot)
@@ -1606,6 +1647,7 @@ void GuildBotMgr::CheckJobs()
         CheckApproach(c, bot);
         CheckGhostUnderMap(c, bot);
         CheckBreath(c, bot);
+        CheckStillTravel(c, bot);
         CheckStay(c, bot);
         CheckUnreachable(c, bot);
         CheckLoot(c, bot);
