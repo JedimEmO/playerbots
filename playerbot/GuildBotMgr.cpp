@@ -13,6 +13,7 @@
 #include "playerbot/strategy/values/LastMovementValue.h"
 #include "playerbot/strategy/values/PossibleAttackTargetsValue.h"
 #include "Accounts/AccountMgr.h"
+#include "AI/BaseAI/CreatureAI.h"
 #include "Entities/Pet.h"
 #include "Maps/GridMap.h"
 #include "Chat/Chat.h"
@@ -2327,6 +2328,22 @@ std::list<std::string> GuildBotMgr::HandleDebug(const std::string& args)
                << ", in combat " << (victim->IsInCombat() ? "yes" : "no") << ", evading " << (victim->GetCombatManager().IsInEvadeMode() ? "yes" : "no")
                << ", melee reach " << (bot->CanReachWithMeleeAttack(victim) ? "yes" : "no") << ", we fight " << (bot->IsInCombat() ? "yes" : "no");
         out.push_back(target.str());
+        // What a creature victim is doing, for a boss that neither fights back nor dies: its movement type,
+        // what holds it, whether its script has taken it over, and whether it can die.
+        if (victim->IsCreature())
+        {
+            Creature* creature = static_cast<Creature*>(victim);
+            std::ostringstream state;
+            state << "victim state: movement " << uint32(creature->GetMotionMaster()->GetCurrentMovementGeneratorType())
+                  << ", moving " << (creature->IsStopped() ? "no" : "yes")
+                  << ", held " << (creature->hasUnitState(UNIT_STAT_NOT_MOVE) ? "yes" : "no")
+                  << ", casting " << (creature->IsNonMeleeSpellCasted(false) ? "yes" : "no")
+                  << ", unkillable " << (creature->GetSettings().HasFlag(CreatureStaticFlags::UNKILLABLE) ? "yes" : "no");
+            if (UnitAI* unitAi = creature->AI())
+                state << ", script status " << (unitAi->GetCombatScriptStatus() ? "on" : "off")
+                      << ", react " << uint32(unitAi->GetReactState());
+            out.push_back(state.str());
+        }
     }
     else
         out.push_back("no victim");
