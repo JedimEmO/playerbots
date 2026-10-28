@@ -333,7 +333,13 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     const Wing* wing = FindWing(name);
     dungeon.name = wing ? wing->title : sMapStore.LookupEntry(dungeon.mapId)->name[0];
     dungeon.entrance = wing ? sObjectMgr.GetAreaTrigger(wing->trigger) : sObjectMgr.GetMapEntranceTrigger(dungeon.mapId);
-    const bool wings = Entrances(dungeon.mapId).size() > 1;
+    // A dungeon the wing table lists is run a wing at a time. Another with a second entrance, such as Gnomeregan's
+    // train depot, is one dungeon with a back door, and all its bosses belong to the run.
+    bool wings = false;
+    for (const Wing& w : WINGS)
+        if (AreaTrigger const* wingEntrance = sObjectMgr.GetAreaTrigger(w.trigger))
+            if (wingEntrance->target_mapId == dungeon.mapId)
+                wings = true;
 
     // The bosses are the boss travel destinations on the dungeon's map: its elites with one spawn,
     // in route order from the arrival over the travel map. A boss the travel map has no route to comes after
@@ -345,18 +351,19 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     {
         if (dest->GetEntry() <= 0)
             continue;
-        // Only enemies: an escort or a prisoner, such as the Disciple of Naralex or Deathstalker Adamant, is an elite
-        // with one spawn too, but friendly, and the party would stand by it waiting for it to die.
+        // Not friends: an escort or a prisoner, such as the Disciple of Naralex or Deathstalker Adamant, is an elite
+        // with one spawn too, but friendly, and the party would stand by it waiting for it to die. A neutral boss,
+        // such as Kresh, attacks nobody but is a boss all the same.
         CreatureInfo const* bossInfo = ObjectMgr::GetCreatureTemplate(dest->GetEntry());
         FactionTemplateEntry const* bossFaction = bossInfo ? sFactionTemplateStore.LookupEntry(bossInfo->Faction) : nullptr;
         FactionTemplateEntry const* ownFaction = leader->GetFactionTemplateEntry();
-        const bool hostile = bossFaction && ownFaction && (bossFaction->IsHostileTo(*ownFaction) || bossFaction->IsHostileToPlayers());
+        const bool friendly = bossFaction && ownFaction && bossFaction->IsFriendlyTo(*ownFaction) && !bossFaction->IsHostileToPlayers();
         const Talk* talk = nullptr;
         for (const Talk& t : TALKS)
             if (t.map == dungeon.mapId && t.entry == dest->GetEntry())
                 talk = &t;
         // A talk step only for the party it is friendly to; any other friendly creature is no step at all.
-        if (talk ? hostile : !hostile)
+        if (talk ? !friendly : friendly)
             continue;
         if (talk)
         {
@@ -402,11 +409,14 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     for (auto& [distance, entry] : bosses)
     {
         // Its spawn on the map tells whether it is dead in an instance; a boss with no spawn of its own,
-        // one a script summons, cannot be told apart and is left out.
+        // one a script summons, cannot be told apart and is left out. So is a spawn that picks its creature from
+        // several at each start (creature_spawn_entry): a creature it picked for only one spawn looks like an elite
+        // with one spawn, such as a Defias Convict in the Stockade, and it is trash.
         uint32 spawn = 0;
         auto findSpawn = [&](auto const& pair)
         {
-            if (pair.second.id != uint32(entry) || pair.second.mapid != dungeon.mapId)
+            if (pair.second.id != uint32(entry) || pair.second.mapid != dungeon.mapId
+                || sObjectMgr.GetAllRandomCreatureEntries(pair.first))
                 return false;
             spawn = pair.first;
             return true;
