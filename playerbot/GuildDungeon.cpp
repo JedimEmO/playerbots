@@ -8,6 +8,8 @@
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
 #include "Maps/InstanceData.h"
+#include "Maps/SpawnGroup.h"
+#include "Maps/SpawnGroupDefines.h"
 #include "AI/ScriptDevAI/ScriptDevAIMgr.h"
 #include "AI/ScriptDevAI/include/sc_grid_searchers.h"
 #include "AI/ScriptDevAI/include/sc_gossip.h"
@@ -20,6 +22,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <sstream>
 
 using namespace ai;
@@ -121,9 +124,48 @@ namespace
 
     // Elites placed more than once that are bosses all the same, which the boss travel destinations leave out,
     // since those take an elite with one spawn. The run kills every one of them the instance has.
+    // A boss a spawn group places at one of several spawns is one of them too: its creature rows name no creature.
     const std::map<uint32, std::vector<int32>> MORE_BOSSES = {
         { 34, { 1696, 1663 } },  // The Stockade: Targorr the Dread, four of him; Dextren Ward, three
+        { 43, { 3671 } },        // Wailing Caverns: Lady Anacondra, at one of four spawns
     };
+
+    // The spawns of the spawn groups that may place this creature on this map, at rows that name no creature,
+    // such as Lady Anacondra's: Wailing Caverns' group puts her at one of four spawns and Druids of the Fang at the
+    // other three. A group's member with the creature as its own counts, and so does every member that takes one of
+    // its group's creatures, when this is one of them. A lookup of the rows by creature misses them.
+    // The boss each such spawn is for, so that one counts as spawned only while the group has put that boss there,
+    // and the spawns, by instance, where the group has been seen to put it, so that a death there is the boss's.
+    std::mutex groupSpawnLock;
+    std::map<uint32, int32> groupSpawnBoss;
+    std::set<std::pair<uint32, uint32>> groupSpawnSeen;
+
+    std::vector<uint32> GroupSpawns(uint32 mapId, int32 entry)
+    {
+        std::vector<uint32> spawns;
+        std::shared_ptr<SpawnGroupEntryContainer> groups = sObjectMgr.GetSpawnGroupContainer();
+        if (!groups || entry <= 0)
+            return spawns;
+        for (auto const& [id, group] : groups->spawnGroupMap)
+        {
+            if (group.Type != SPAWN_GROUP_CREATURE)
+                continue;
+            const bool takesIt = std::any_of(group.RandomEntries.begin(), group.RandomEntries.end(),
+                [&](SpawnGroupRandomEntry const& random) { return random.Entry == uint32(entry); });
+            for (SpawnGroupDbGuids const& member : group.DbGuids)
+            {
+                CreatureData const* data = sObjectMgr.GetCreatureData(member.DbGuid);
+                if (!data || data->mapid != mapId || data->id != 0)
+                    continue;
+                if (member.OwnEntry ? member.OwnEntry == uint32(entry) : (takesIt && !member.RandomEntry))
+                    spawns.push_back(member.DbGuid);
+            }
+        }
+        std::lock_guard<std::mutex> guard(groupSpawnLock);
+        for (uint32 spawn : spawns)
+            groupSpawnBoss[spawn] = entry;
+        return spawns;
+    }
 
     // Locked doors a guild party opens with a key, as a player would: the leader, with the key in its bags, uses the
     // door as it comes by it. Every other door stays shut to it, and out of its loot: a dungeon's doors open by its
@@ -616,6 +658,16 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
                 return false;
             };
             sObjectMgr.DoCreatureData(findNearest);
+            for (uint32 spawn : GroupSpawns(dungeon.mapId, entry))
+                if (CreatureData const* data = sObjectMgr.GetCreatureData(spawn))
+                {
+                    WorldPosition place(data->mapid, data->posX, data->posY, data->posZ);
+                    if (best < 0.0f || place.distance(arrival) < best)
+                    {
+                        best = place.distance(arrival);
+                        nearest = place;
+                    }
+                }
             if (best < 0.0f)
                 continue;
             if (wings && !(wing && !wing->bosses.empty())
@@ -643,6 +695,8 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
             return false;
         };
         sObjectMgr.DoCreatureData(findSpawns);
+        for (uint32 spawn : GroupSpawns(dungeon.mapId, entry))
+            spawns.push_back(spawn);
         if (spawns.empty())
             continue;
         dungeon.bosses.push_back(entry);
@@ -1134,7 +1188,43 @@ bool GuildDungeon::BossDead(Map* map, uint32 spawn)
 
 bool GuildDungeon::BossSpawned(Map* map, uint32 spawn)
 {
-    if (!map || !spawn || !sPoolMgr.IsPartOfAPool<Creature>(spawn))
+    if (!map || !spawn)
+        return true;
+    // A spawn group's spawn of a boss: spawned while the group has put the boss there, and dead there once the boss
+    // was seen there and a death has been saved for it. A creature of another kind the group put there is not it.
+    // While none of the group's spawns is the boss's by either, as for a moment after a grid unloads and the group
+    // takes its creatures back, each counts, and the leader finds out which it is as it comes near.
+    int32 boss = 0;
+    {
+        std::lock_guard<std::mutex> guard(groupSpawnLock);
+        if (auto it = groupSpawnBoss.find(spawn); it != groupSpawnBoss.end())
+            boss = it->second;
+    }
+    if (boss)
+    {
+        SpawnGroupEntry* groupEntry = map->GetMapDataContainer().GetSpawnGroupByGuid(spawn, TYPEID_UNIT);
+        SpawnGroup* group = groupEntry ? map->GetSpawnManager().GetSpawnGroup(groupEntry->Id) : nullptr;
+        if (!group)
+            return true;
+        MapPersistentState* state = map->GetPersistentState();
+        const time_t now = time(nullptr);
+        auto isBoss = [&](uint32 member)
+        {
+            std::lock_guard<std::mutex> guard(groupSpawnLock);
+            const std::pair<uint32, uint32> key(map->GetInstanceId(), member);
+            if (group->GetGuidEntry(member) == uint32(boss))
+            {
+                groupSpawnSeen.insert(key);
+                return true;
+            }
+            return groupSpawnSeen.count(key) && state && state->GetCreatureRespawnTime(member) > now;
+        };
+        if (isBoss(spawn))
+            return true;
+        return std::none_of(groupEntry->DbGuids.begin(), groupEntry->DbGuids.end(),
+            [&](SpawnGroupDbGuids const& member) { return isBoss(member.DbGuid); });
+    }
+    if (!sPoolMgr.IsPartOfAPool<Creature>(spawn))
         return true;
     MapPersistentState* state = map->GetPersistentState();
     return !state || state->IsSpawnedPoolObject<Creature>(spawn);
@@ -1249,7 +1339,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             if (next)
                 continue;
             // Not yet: the bosses it comes after are not all done. One is done when it is dead, passed over as out of
-            // reach, or not in this run at all, such as Lady Anacondra, whom this world has no spawn of.
+            // reach, or not in this run at all, as in a world with no spawn of it.
             auto done = [&](int32 boss)
             {
                 return run.killed.count(boss) || run.passed.count(boss)
