@@ -890,6 +890,11 @@ void TravelTarget::SetTarget(TravelDestination* tDestination1, WorldPosition* wP
     if (dynamic_cast<TemporaryTravelDestination*>(tDestination) && tDestination1 != tDestination)
         delete tDestination;
 
+    // The failed moves count for the destination they were made to; a new one starts from none. Kept from target
+    // to target, a few failures once left every later destination in cooldown at its first failed move.
+    if (tDestination1 != tDestination)
+        moveRetryCount = 0;
+
     wPosition = wPosition1;
     tDestination = tDestination1;
 

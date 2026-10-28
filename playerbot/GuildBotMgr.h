@@ -153,6 +153,10 @@ private:
         std::vector<time_t> emptyFightExits; // when it last left such fights, for a dungeon leader held outside
         time_t approachUntil = 0;   // a dungeon leader going straight to its stone through such fights, until then
         time_t underMapAt = 0;      // when a ghost of it was last taken out from under the world
+        std::map<int32, time_t> unreachableAt; // grind spots its moves to have failed, and when they last did
+        std::vector<time_t> unreachableTimes;  // when any spot's moves last failed, to tell a stuck character
+        time_t stuckNotedAt = 0;               // when that was last recorded
+        int32 unreachableHandled = 0;          // the spot whose present cooldown has been counted, once
         time_t underwaterSince = 0; // since when it has been fully under water, or 0
         bool surfacing = false;     // it has been sent up for air on this dive
         uint32 runsDone = 0;        // dungeon runs finished on this order, for `runs`

@@ -65,6 +65,11 @@ namespace
     constexpr size_t GIVE_UPS_TO_LEAVE = 3;
     constexpr time_t GIVE_UP_WINDOW_SECONDS = 10 * MINUTE;
     constexpr time_t LEAVE_DESTINATION_SECONDS = 30 * MINUTE;
+    // A grind spot whose moves fail twice this close together is out of reach; failures at this many spots within
+    // the window mean the character is stuck where it stands instead.
+    constexpr time_t UNREACHABLE_AGAIN_SECONDS = HOUR;
+    constexpr time_t UNREACHABLE_WINDOW_SECONDS = 10 * MINUTE;
+    constexpr size_t UNREACHABLE_SPOTS_STUCK = 3;
     // In the AI's combat state this long with nothing to attack and nothing under crowd control, the fight is empty.
     constexpr time_t EMPTY_FIGHT_SECONDS = 20;
     // A dungeon leader outside that leaves this many such fights this close together goes straight to its stone,
@@ -575,17 +580,46 @@ void GuildBotMgr::CheckUnreachable(Character& c, Player* bot)
     ai::TravelTarget* travel = ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get();
     // Cooling down after its moves failed: no route there, a lift it does not take or a shore it cannot climb.
     // Without this the same spot wins again at the next choice, as Hfortmage's Lost One Fisherman did for a quarter hour.
-    if (!travel || travel->GetStatus() != ai::TravelStatus::TRAVEL_STATUS_COOLDOWN || !travel->IsMaxRetry(true)
-        || !dynamic_cast<ai::GrindTravelDestination*>(travel->GetDestination()))
+    if (!travel || travel->GetStatus() != ai::TravelStatus::TRAVEL_STATUS_COOLDOWN)
+    {
+        c.unreachableHandled = 0;
+        return;
+    }
+    if (!travel->IsMaxRetry(true) || !dynamic_cast<ai::GrindTravelDestination*>(travel->GetDestination()))
         return;
     const int32 entry = travel->GetEntry();
-    if (!entry)
+    // Each cooldown counts once, not on every check while it lasts.
+    if (!entry || entry == c.unreachableHandled)
         return;
+    c.unreachableHandled = entry;
     const time_t now = time(nullptr);
     auto& left = leftDestinations[c.guid];
     auto it = left.find(entry);
     if (it != left.end() && it->second > now)
         return;
+
+    // Moves to several spots failing close together say the character is stuck, not that the spots are out of reach:
+    // Afortdru in Feralas set 27 spots aside in six minutes. The stall recovery sees to a stuck character.
+    auto& times = c.unreachableTimes;
+    times.erase(std::remove_if(times.begin(), times.end(), [&](time_t t) { return now - t > UNREACHABLE_WINDOW_SECONDS; }), times.end());
+    times.push_back(now);
+    if (times.size() >= UNREACHABLE_SPOTS_STUCK)
+    {
+        if (now - c.stuckNotedAt > UNREACHABLE_WINDOW_SECONDS)
+        {
+            c.stuckNotedAt = now;
+            Event(c.guid, "recovery", "no way from here");
+        }
+        return;
+    }
+
+    // A spot is out of reach on its second failure within the hour; one failure can be a bad path once.
+    auto failed = c.unreachableAt.find(entry);
+    const bool again = failed != c.unreachableAt.end() && now - failed->second <= UNREACHABLE_AGAIN_SECONDS;
+    c.unreachableAt[entry] = now;
+    if (!again)
+        return;
+
     left[entry] = now + LEAVE_DESTINATION_SECONDS;
     travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
     std::string spot = std::to_string(entry);
