@@ -2684,6 +2684,13 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
     // victim for over 20 minutes, stayed near it, and passed three bosses over.
     const bool friendly = sServerFacade.IsFriendlyTo(bot, (Unit*)obj);
 
+    // A guild character chases no friend that is not a player, such as a party member's pet, to reach it with a
+    // spell: the pet follows its owner, and the chase pulls the character off its own way. In Razorfen Kraul the
+    // druid leader went to and fro between its travel and the hunter's pet for five minutes at a time, and passed
+    // its bosses over.
+    if (friendly && obj->GetTypeId() != TYPEID_PLAYER && sGuildBotMgr.IsGuildBot(bot))
+        return false;
+
 #ifdef MANGOSBOT_TWO
     TransportInfo* transportInfo = bot->GetTransportInfo();
     if (transportInfo && transportInfo->IsOnVehicle())
