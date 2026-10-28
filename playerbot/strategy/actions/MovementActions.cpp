@@ -751,7 +751,26 @@ TravelPath MovementAction::ResolveMovePath(const WorldPosition& startPosition, c
             && bot->GetMap()->IsDungeon())
         {
             std::vector<WorldPosition> path = endPosition.getPathFromPath({ startPosition }, bot, 40);
-            if (!path.empty() && path.back().distance(endPosition) + sPlayerbotAIConfig.tooCloseDistance < totalDistance)
+            // A path that ends far short of the place only leads as near as the navmesh goes in a straight line, to a
+            // dead end: from Lady Sarevess in Blackfathom Deeps, whose node has no links, it ended on a spot in the
+            // water no path leaves, 600 yards and more from Aku'mai. The nearest node with links is where the travel
+            // map's routes start, so the walk goes there instead, and routes again from it.
+            if (!path.empty() && path.back().distance(endPosition) > sPlayerbotAIConfig.sightDistance)
+                for (TravelNode* node : sTravelNodeMap.getNodes(startPosition, 300.0f))
+                {
+                    if (node->isPortal() || node->getLinks()->empty())
+                        continue;
+                    WorldPosition nodePosition = *node->getPosition();
+                    if (nodePosition.distance(startPosition) <= sPlayerbotAIConfig.tooCloseDistance)
+                        break;
+                    std::vector<WorldPosition> toNode = nodePosition.getPathFromPath({ startPosition }, bot, 40);
+                    if (!toNode.empty() && toNode.back().distance(nodePosition) + sPlayerbotAIConfig.tooCloseDistance < startPosition.distance(nodePosition))
+                    {
+                        outMovePath.addPath(toNode);
+                        break;
+                    }
+                }
+            if (outMovePath.empty() && !path.empty() && path.back().distance(endPosition) + sPlayerbotAIConfig.tooCloseDistance < totalDistance)
                 outMovePath.addPath(path);
         }
     }
