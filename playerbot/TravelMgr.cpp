@@ -626,7 +626,9 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     if ((int32)cInfo->MaxLevel < minLevel) //@lvl5 min = 3, @lvl60 max = 50
         return false;
 
-    if (cInfo->MinLootGold == 0)
+    // Upstream grinds for coin, so only creatures that drop it. A character levelling grinds for experience,
+    // and beasts give as much of it: counting them gives about half again as many spots, nearer on average.
+    if (cInfo->MinLootGold == 0 && !info.WantsExperience())
         return false;
 
     if (cInfo->Rank > CREATURE_ELITE_NORMAL && !info.GetBoolValue("can fight elite"))

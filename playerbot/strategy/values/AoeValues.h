@@ -31,7 +31,9 @@ namespace ai
         {
             AiObjectContext* ctx = AiObject::context;
 
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
         virtual bool Calculate() override;
     };

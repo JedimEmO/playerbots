@@ -9,7 +9,9 @@
 #include "playerbot/strategy/actions/ChangeTalentsAction.h"
 #include "playerbot/Talentspec.h"
 #include "playerbot/TravelMgr.h"
+#include "playerbot/strategy/values/PossibleAttackTargetsValue.h"
 #include "Accounts/AccountMgr.h"
+#include "Entities/Pet.h"
 #include "Chat/Chat.h"
 
 #include <algorithm>
@@ -38,6 +40,9 @@ namespace
     constexpr float ALONE_DISTANCE = 60.0f;
     // A second stall this soon after a reset sends the character home instead.
     constexpr time_t RECOVERY_WINDOW_SECONDS = 30 * MINUTE;
+    // A character this far below the ground at its x and y, with no floor under its feet, has fallen through the world.
+    constexpr float UNDER_MAP_DEPTH = 20.0f;
+    constexpr float UNDER_MAP_FLOOR_SEARCH = 10.0f;
     // A target the character has not hurt in this long is out of its reach; it is passed over for a while.
     constexpr time_t UNREACHED_TARGET_SECONDS = 45;
     constexpr time_t IGNORE_TARGET_SECONDS = 10 * MINUTE;
@@ -47,6 +52,8 @@ namespace
     constexpr size_t GIVE_UPS_TO_LEAVE = 3;
     constexpr time_t GIVE_UP_WINDOW_SECONDS = 10 * MINUTE;
     constexpr time_t LEAVE_DESTINATION_SECONDS = 30 * MINUTE;
+    // In the AI's combat state this long with nothing to attack and nothing under crowd control, the fight is empty.
+    constexpr time_t EMPTY_FIGHT_SECONDS = 20;
 
     std::string Trim(const std::string& s)
     {
@@ -102,6 +109,35 @@ namespace
     bool IsKnownJob(const std::string& job)
     {
         return job == "idle" || job == "level" || job == "party" || job == "farm" || job == "learn" || job == "dungeon";
+    }
+
+    // True for a character on a continent well below the terrain at its x and y with no floor near its feet,
+    // as after a fall through the world. A cave, a cellar or a tunnel has a floor under the character, so it does not count.
+    bool UnderTheMap(Player* bot)
+    {
+        Map* map = bot->GetMap();
+        if (!map || !map->IsContinent() || bot->IsTaxiFlying() || bot->GetTransport())
+            return false;
+        TerrainInfo const* terrain = map->GetTerrain();
+        if (!terrain)
+            return false;
+        const float x = bot->GetPositionX(), y = bot->GetPositionY(), z = bot->GetPositionZ();
+        const float surface = terrain->GetHeightStatic(x, y, MAX_HEIGHT, false);
+        if (surface <= INVALID_HEIGHT || z > surface - UNDER_MAP_DEPTH)
+            return false;
+        const float floor = terrain->GetHeightStatic(x, y, z, true, UNDER_MAP_FLOOR_SEARCH);
+        return floor <= INVALID_HEIGHT || floor > z + 5.0f || floor < z - UNDER_MAP_FLOOR_SEARCH;
+    }
+
+    // Out from under the world to the nearest graveyard of its faction on its map, as a player's stuck request does.
+    bool SendToGraveyard(Player* bot)
+    {
+        WorldSafeLocsEntry const* grave = bot->GetMap()->GetGraveyardManager().GetClosestGraveYard(
+            bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId(), bot->GetTeam());
+        if (!grave || grave->map_id != bot->GetMapId())
+            return false;
+        bot->CombatStop();
+        return bot->TeleportTo(grave->map_id, grave->x, grave->y, grave->z, grave->o);
     }
 }
 
@@ -228,6 +264,13 @@ void GuildBotMgr::CheckChase(Character& c, Player* bot)
 {
     PlayerbotAI* ai = bot->GetPlayerbotAI();
     Unit* victim = bot->GetVictim();
+    // Its own pet is never a target to give up on: the character stops attacking it.
+    if (victim && (victim->GetOwnerGuid() == bot->GetObjectGuid() || victim->GetObjectGuid() == bot->GetPetGuid()))
+    {
+        bot->AttackStop();
+        chases.erase(c.guid);
+        return;
+    }
     if (!ai || !victim || !victim->IsAlive() || victim->GetObjectGuid().IsPlayer())
     {
         chases.erase(c.guid);
@@ -287,6 +330,69 @@ void GuildBotMgr::CheckChase(Character& c, Player* bot)
     else if (GameObjectInfo const* info = entry < 0 ? ObjectMgr::GetGameObjectInfo(-entry) : nullptr)
         spot = info->name;
     Event(c.guid, "left_spot", spot);
+}
+
+void GuildBotMgr::CheckEmptyFight(Character& c, Player* bot)
+{
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai || !bot->IsAlive() || !ai->IsStateActive(BotState::BOT_STATE_COMBAT) || bot->GetVictim()
+        || bot->IsNonMeleeSpellCasted(false))
+    {
+        c.emptyFightSince = 0;
+        return;
+    }
+
+    AiObjectContext* context = ai->GetAiObjectContext();
+    const std::list<ObjectGuid> attackers = context->GetValue<std::list<ObjectGuid>>("attackers")->Get();
+    bool paused = !context->GetValue<std::list<ObjectGuid>>("possible attack targets")->Get().empty();
+    // A creature under crowd control is a fight paused, not an empty one.
+    for (ObjectGuid guid : attackers)
+        if (Unit* unit = ai->GetUnit(guid))
+            if (PossibleAttackTargetsValue::HasBreakableCC(unit, bot) || PossibleAttackTargetsValue::HasUnBreakableCC(unit, bot))
+                paused = true;
+    const time_t now = time(nullptr);
+    if (paused)
+    {
+        c.emptyFightSince = 0;
+        return;
+    }
+    if (!c.emptyFightSince)
+    {
+        c.emptyFightSince = now;
+        return;
+    }
+    if (now - c.emptyFightSince < EMPTY_FIGHT_SECONDS)
+        return;
+    c.emptyFightSince = 0;
+
+    // What holds it is given up on, so its attackers leave it out, and it leaves the fight where it stands.
+    // Its threat goes too, as a player's does by vanishing: while it is flagged in combat it cannot eat or drink,
+    // and a leader waiting on its mana would stand there.
+    std::string holder;
+    auto& ignored = ignoredTargets[c.guid];
+    for (ObjectGuid guid : attackers)
+    {
+        ignored[guid] = now + IGNORE_TARGET_SECONDS;
+        if (holder.empty())
+            if (Unit* unit = ai->GetUnit(guid))
+                holder = unit->GetName();
+    }
+    for (const char* name : { "old target", "current target", "attack target", "pull target" })
+        context->GetValue<ObjectGuid>(name)->Set(ObjectGuid());
+    bot->SetSelectionGuid(ObjectGuid());
+    bot->AttackStop();
+    if (bot->IsInCombat())
+    {
+        bot->getHostileRefManager().deleteReferences();
+        if (Pet* pet = bot->GetPet())
+            pet->getHostileRefManager().deleteReferences();
+        bot->CombatStopWithPets(true);
+    }
+    context->GetValue<std::list<ObjectGuid>>("attackers")->Reset();
+    context->GetValue<std::list<ObjectGuid>>("attackers", 1)->Reset();
+    context->GetValue<bool>("has attackers")->Reset();
+    ai->OnCombatEnded();
+    Event(c.guid, "recovery", "left a fight with nothing to attack" + (holder.empty() ? std::string() : ": " + holder));
 }
 
 uint8 GuildBotMgr::GetTankOrder(uint32 guid) const
@@ -995,6 +1101,7 @@ void GuildBotMgr::CheckJobs()
 
         ApplyRole(c, bot);
         CheckChase(c, bot);
+        CheckEmptyFight(c, bot);
         CheckLoot(c, bot);
 
         bool dead = sServerFacade.UnitIsDead(bot);
@@ -1157,7 +1264,13 @@ void GuildBotMgr::CheckJobs()
             PlayerbotAI* ai = bot->GetPlayerbotAI();
             if (ai && now - c.recoveredAt >= STALL_SECONDS)
             {
-                if (now - c.recoveredAt > RECOVERY_WINDOW_SECONDS)
+                // Fallen through the world: no reset or travel gets it out, and the hearthstone may be an hour away.
+                if (bot->IsAlive() && UnderTheMap(bot) && SendToGraveyard(bot))
+                {
+                    ai->Reset(true);
+                    Event(guid, "recovery", "under the map");
+                }
+                else if (now - c.recoveredAt > RECOVERY_WINDOW_SECONDS)
                 {
                     bot->CombatStop();
                     ai->Reset(true);

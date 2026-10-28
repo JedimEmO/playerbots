@@ -97,6 +97,14 @@ void LootObject::Refresh(Player* bot, ObjectGuid guid, bool debug)
     GameObject* go = ai->GetGameObject(guid);
     if (go && sServerFacade.isSpawned(go) && !go->IsInUse())
     {
+        // A trap holds nothing to take, and a hunter's own trap is not to be opened at all.
+        if (go->GetGoType() == GAMEOBJECT_TYPE_TRAP || go->GetOwnerGuid() == bot->GetObjectGuid())
+        {
+            if (debug)
+                ai->TellDebug(ai->GetMaster(), "Go is a trap.", "debug loot");
+            return;
+        }
+
         bool isQuestItemOnly = false;
 
 #ifdef MANGOSBOT_TWO

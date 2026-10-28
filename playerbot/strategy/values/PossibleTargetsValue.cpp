@@ -100,6 +100,12 @@ bool PossibleTargetsValue::IsValid(Unit* target, Player* player, bool ignoreLos)
             return false;
         }
 
+        // Its own pet or totem is never a target, whatever faction it shows.
+        if (target->GetOwnerGuid() == player->GetObjectGuid() || target->GetObjectGuid() == player->GetPetGuid())
+        {
+            return false;
+        }
+
         // If the target is friendly
         if (IsFriendly(target, player))
         {

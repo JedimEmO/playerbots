@@ -726,6 +726,18 @@ TravelPath MovementAction::ResolveMovePath(const WorldPosition& startPosition, c
     if (needsLongPath && !sTravelNodeMap.getNodes().empty() && !bot->InBattleGround())
     {
         outMovePath = sTravelNodeMap.getFullPath(startPosition, endPosition, bot); //Pathfind using nodes.
+
+        // Inside a dungeon, a place the travel map has no route to, such as a boss its links do not reach, is near
+        // enough to walk to by the navmesh alone. A guild character walks as far as one path goes, and paths again
+        // from its end on the next move. If the paths stop gaining ground, the dungeon job's headway rule passes the
+        // boss over.
+        if (outMovePath.empty() && sGuildBotMgr.IsGuildBot(bot) && startPosition.getMapId() == endPosition.getMapId()
+            && bot->GetMap()->IsDungeon())
+        {
+            std::vector<WorldPosition> path = endPosition.getPathFromPath({ startPosition }, bot, 40);
+            if (!path.empty() && path.back().distance(endPosition) + sPlayerbotAIConfig.tooCloseDistance < totalDistance)
+                outMovePath.addPath(path);
+        }
     }
     else
     {

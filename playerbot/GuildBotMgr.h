@@ -135,6 +135,7 @@ private:
         bool alone = false;         // in a group but with no member near, as its strategies were last built
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
         time_t invitedAt = 0;       // when the dungeon leader last invited its companion
+        time_t emptyFightSince = 0; // since when it has been in the AI's combat state with nothing to attack, or 0
         uint32 runsDone = 0;        // dungeon runs finished on this order, for `runs`
 
         // The hourly measure, counted every check and written every few minutes; see guildbot_metric.
@@ -161,6 +162,8 @@ private:
     void WriteState(const Character& c, Player* bot);
     void ApplyRole(Character& c, Player* bot);
     void CheckChase(Character& c, Player* bot);
+    // In the AI's combat state with nothing to attack for a while: it leaves the fight where it stands.
+    void CheckEmptyFight(Character& c, Player* bot);
     void CheckLoot(Character& c, Player* bot);
     static uint32 ZoneOf(Player* bot);
     // Count this check into the hourly measure, and write the counts when the hour or job changes, or every few minutes.

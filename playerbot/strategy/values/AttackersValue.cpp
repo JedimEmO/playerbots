@@ -3,7 +3,9 @@
 #include "AttackersValue.h"
 #include "PossibleTargetsValue.h"
 #include "EnemyPlayerValue.h"
+#include "PossibleAttackTargetsValue.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/PlayerbotAIConfig.h"
 
 using namespace ai;
 using namespace MaNGOS;
@@ -411,6 +413,17 @@ bool AttackersValue::IsValid(Unit* target, Player* player, Player* owner, bool c
                 return false;
             }
         }        
+
+        // A guild character's fight holds only what its combat can act on: within sight distance, and tapped by its
+        // group or by nobody. A creature farther off or someone else's, such as one fallen under the floor that keeps
+        // the party in its threat list, would otherwise hold it in combat with nothing to do. A creature under crowd
+        // control or immune stays: that fight is paused, not empty.
+        if (sGuildBotMgr.IsGuildBot(playerToCheckAgainst)
+            && (!playerToCheckAgainst->IsWithinDistInMap(target, sPlayerbotAIConfig.sightDistance)
+                || !PossibleAttackTargetsValue::IsTapped(target, playerToCheckAgainst)))
+        {
+            return false;
+        }
     }
 
     if (IgnoreTarget(target, playerToCheckAgainst))

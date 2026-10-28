@@ -15,6 +15,8 @@ namespace ai
         static bool IsPossibleTarget(Unit* target, Player* player, float range, bool ignoreCC);
         static bool HasBreakableCC(Unit* target, Player* player);
         static bool HasUnBreakableCC(Unit* target, Player* player);
+        // The target attacks nobody, the player's master or its group, or nobody else has tapped it.
+        static bool IsTapped(Unit* target, Player* player);
         virtual std::string Format() override;
 
 #ifdef GenerateBotHelp
@@ -32,7 +34,6 @@ namespace ai
 
         static bool IsImmuneToDamage(Unit* target, Player* player);
         static bool HasIgnoreCCRti(Unit* target, Player* player);
-        static bool IsTapped(Unit* target, Player* player);
         static bool IsCcTarget(Unit* attacker, Player* player);
     };
 

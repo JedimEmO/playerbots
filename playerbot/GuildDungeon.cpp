@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 using namespace ai;
 
@@ -1088,7 +1089,11 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         run.headwayBest = -1.0f;
         run.headwaySince = now;
     }
-    const bool idle = dungeon.talks.count(next) || !killing.empty() || !talkWait.empty() || leader->IsInCombat()
+    // The AI's combat state says the leader is fighting: the player's flag stays set while any creature has it in its
+    // threat list, and the AI's state is never empty of something to attack for long (GuildBotMgr::CheckEmptyFight).
+    PlayerbotAI* leaderAi = leader->GetPlayerbotAI();
+    const bool fighting = leaderAi ? leaderAi->IsStateActive(BotState::BOT_STATE_COMBAT) : leader->IsInCombat();
+    const bool idle = dungeon.talks.count(next) || !killing.empty() || !talkWait.empty() || fighting
         || !leader->IsAlive() || !bossPlace;
     const float bossDistance = bossPlace ? WorldPosition(leader).distance(bossPlace) : 0.0f;
     const bool nearer = bossPlace && (run.headwayBest < 0.0f || bossDistance < run.headwayBest - HEADWAY);
@@ -1293,9 +1298,21 @@ uint32 GuildDungeon::StoneMap(uint32 areaId)
         if (MapEntry const* map = sMapStore.LookupEntry(i))
             if (map->linked_zone == areaId && map->IsDungeon())
                 return map->MapID;
-    if (AreaTableEntry const* area = GetAreaEntryByAreaID(areaId))
-        if (MapEntry const* map = sMapStore.LookupEntry(area->mapid))
-            if (map->IsDungeon())
+    AreaTableEntry const* area = GetAreaEntryByAreaID(areaId);
+    if (!area)
+        return 0;
+    if (MapEntry const* map = sMapStore.LookupEntry(area->mapid))
+        if (map->IsDungeon())
+            return map->MapID;
+    // Some stones name the outdoor area in front of the dungeon, which has the dungeon's name but lies on the continent:
+    // Gnomeregan, Zul'Farrak and Uldaman. The dungeon map of the same name is theirs.
+    const int locale = sWorld.GetDefaultDbcLocale();
+    const char* areaName = area->area_name[locale];
+    if (!areaName || !*areaName)
+        return 0;
+    for (uint32 i = 0; i < sMapStore.GetNumRows(); ++i)
+        if (MapEntry const* map = sMapStore.LookupEntry(i))
+            if (map->IsDungeon() && map->name[locale] && strcmp(map->name[locale], areaName) == 0)
                 return map->MapID;
     return 0;
 }

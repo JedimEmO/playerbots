@@ -13,7 +13,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual uint8 Calculate() override;
@@ -27,7 +29,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual bool Calculate() override;
@@ -55,7 +59,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual uint8 Calculate() override;
@@ -69,7 +75,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual uint8 Calculate() override;
@@ -83,7 +91,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual uint8 Calculate() override;
@@ -97,7 +107,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual bool Calculate() override;
@@ -111,7 +123,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual uint8 Calculate() override;
@@ -125,7 +139,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual bool Calculate() override;
@@ -139,7 +155,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual bool EqualToLast(bool value) override { return value == lastValue; }
@@ -194,7 +212,9 @@ namespace ai
         Unit* GetTarget()
         {
             AiObjectContext* ctx = AiObject::context;
-            return ai->GetUnit(ctx->GetValue<ObjectGuid>(qualifier)->Get());
+            // A qualifier that names no value, or none, has no target.
+            Value<ObjectGuid>* target = ctx->GetValue<ObjectGuid>(qualifier);
+            return target ? ai->GetUnit(target->Get()) : nullptr;
         }
 
         virtual uint8 Calculate() override;

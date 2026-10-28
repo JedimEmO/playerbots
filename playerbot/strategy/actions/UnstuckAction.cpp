@@ -36,15 +36,15 @@ bool UnstuckAction::Execute(Event& event)
         return ai->DoSpecificAction("reset", event, true);
     }
 
-    // A living guild character is never released: upstream's repop puts it at its race's starting spot,
-    // a level 1 zone a continent away. It goes home by hearthstone if that is ready, or resets.
+    // A living guild character only resets. Upstream's repop puts it at its race's starting spot, a level 1 zone
+    // a continent away, and the hearthstone belongs to GuildBotMgr's stall recovery, which finds it spent otherwise.
     const bool guildCharacter = sGuildBotMgr.IsGuildBot(bot);
     auto longStuck = [&]()
     {
-        if (AI_VALUE2(bool, "action useful", "hearthstone") && bot->IsAlive())
-            return ai->DoSpecificAction("hearthstone", event, true);
         if (guildCharacter && bot->IsAlive())
             return ai->DoSpecificAction("reset", event, true);
+        if (AI_VALUE2(bool, "action useful", "hearthstone") && bot->IsAlive())
+            return ai->DoSpecificAction("hearthstone", event, true);
         return ai->DoSpecificAction("repop", event, true);
     };
 
