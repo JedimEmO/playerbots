@@ -565,6 +565,35 @@ void GuildBotMgr::CheckApproach(Character& c, Player* bot)
     }
 }
 
+void GuildBotMgr::CheckUnreachable(Character& c, Player* bot)
+{
+    if (c.job != "level" || c.status != "working" || !bot->IsAlive())
+        return;
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (!ai)
+        return;
+    ai::TravelTarget* travel = ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get();
+    // Cooling down after its moves failed: no route there, a lift it does not take or a shore it cannot climb.
+    // Without this the same spot wins again at the next choice, as Hfortmage's Lost One Fisherman did for a quarter hour.
+    if (!travel || travel->GetStatus() != ai::TravelStatus::TRAVEL_STATUS_COOLDOWN || !travel->IsMaxRetry(true)
+        || !dynamic_cast<ai::GrindTravelDestination*>(travel->GetDestination()))
+        return;
+    const int32 entry = travel->GetEntry();
+    if (!entry)
+        return;
+    const time_t now = time(nullptr);
+    auto& left = leftDestinations[c.guid];
+    auto it = left.find(entry);
+    if (it != left.end() && it->second > now)
+        return;
+    left[entry] = now + LEAVE_DESTINATION_SECONDS;
+    travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
+    std::string spot = std::to_string(entry);
+    if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry))
+        spot = info->Name;
+    Event(c.guid, "left_spot", spot + ": no way there");
+}
+
 void GuildBotMgr::CheckStay(Character& c, Player* bot)
 {
     if (c.job != "level" || c.status != "working" || !bot->IsAlive() || !c.stay.entry || c.stay.work < STAY_JUDGE_SECONDS)
@@ -1440,6 +1469,7 @@ void GuildBotMgr::CheckJobs()
         CheckGhostUnderMap(c, bot);
         CheckBreath(c, bot);
         CheckStay(c, bot);
+        CheckUnreachable(c, bot);
         CheckLoot(c, bot);
 
         bool dead = sServerFacade.UnitIsDead(bot);

@@ -327,6 +327,23 @@ namespace
     // It weighs the active spots of the nearest ranges that have any, this many, and at most this many spots.
     constexpr uint32 GRIND_RANGES = 2;
     constexpr size_t GRIND_CANDIDATES = 30;
+    // A spot is under water when most of these of its spawn points are: a character fights there holding its breath,
+    // comes up for air and drowns. Htensham on the Durotar coast and Htwenmage at Lake Frenzy died that way.
+    constexpr size_t GRIND_WATER_SAMPLE = 8;
+
+    bool UnderWaterSpot(TravelDestination* destination)
+    {
+        size_t checked = 0, under = 0;
+        for (WorldPosition* point : destination->GetPoints())
+        {
+            if (checked >= GRIND_WATER_SAMPLE)
+                break;
+            checked++;
+            if (point->isUnderWater())
+                under++;
+        }
+        return checked && under * 2 > checked;
+    }
 }
 
 // A levelling guild character: the active spot with the most experience expected per hour, walk included,
@@ -357,6 +374,8 @@ bool ChooseTravelTargetAction::SetBestGrindTarget(Player* requester, TravelTarge
             if (position->getMapId() != bot->GetMapId())
                 continue;
             if (!destination->IsActive(bot, info))
+                continue;
+            if (UnderWaterSpot(destination))
                 continue;
             any = true;
             Candidate candidate = { destination, position, distance, 0.0f, false };

@@ -201,6 +201,8 @@ private:
     void CheckBreath(Character& c, Player* bot);
     // A levelling character that has worked its spot a while for far less than the best spot near its level leaves it.
     void CheckStay(Character& c, Player* bot);
+    // A levelling character whose moves to its grind spot keep failing passes over that spot for a while.
+    void CheckUnreachable(Character& c, Player* bot);
     void CheckLoot(Character& c, Player* bot);
     static uint32 ZoneOf(Player* bot);
     // Count this check into the hourly measure, and write the counts when the hour or job changes, or every few minutes.
