@@ -188,6 +188,10 @@ namespace
     const KillFirst KILLS[] = {
         // Shadowfang Keep: Fenrus's death brings Arugal's four voidwalkers, and the Sorcerer's Gate opens when all four die.
         { 33, 4627, 3927, 18972 },
+        // Zul'Farrak: Witch Doctor Zum'rah turns hostile when a player comes near and raises Zul'Farrak Zombies from the
+        // forty Shallow Graves around him, one every 20 seconds, until he dies. He spawns friendly, so he is no boss of
+        // the run; with no boss of its own the row has him killed whenever he is near and hostile.
+        { 209, 7271, 0, 0 },
         // Zul'Farrak: Nekrum Gutchewer and Shadowpriest Sezz'ziz come down the pyramid last; their deaths open the End Door.
         { 209, 7796, 7267, 146084 },
         { 209, 7275, 7267, 146084 },
@@ -1215,7 +1219,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     std::string killing;
     for (const Dungeon::Kill& kill : dungeon.kills)
     {
-        if (kill.before != next)
+        // A row with no boss of its own is due whenever its creature is near and hostile.
+        if (kill.before && kill.before != next)
             continue;
         if (kill.doorSpawn)
             if (GameObject* door = map->GetGameObject(kill.doorSpawn))
@@ -1227,7 +1232,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         Cell::VisitAllObjects(leader, searcher, KILL_RANGE);
         Unit* nearest = nullptr;
         for (Unit* unit : found)
-            if (unit->IsAlive() && unit->IsInWorld() && (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest)))
+            if (unit->IsAlive() && unit->IsInWorld() && (kill.before || leader->CanAttack(unit))
+                && (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest)))
                 nearest = unit;
         if (!nearest)
             continue;
