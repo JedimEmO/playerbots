@@ -60,6 +60,8 @@ public:
     bool IsLeaving(Player* leader) const;
     // The leader, or a member of its group, is inside its dungeon in the bosses step: its routes stay on the map.
     bool KeepsToMap(Player* bot) const;
+    // The keys to the locked doors of the dungeon a job names, for the bench to hand out.
+    static std::vector<uint32> DungeonKeys(const std::string& name);
     int32 TravelEntry(Player* bot) const;
     // The way out, for the leader inside once the last boss is dead; null otherwise.
     ai::TravelDestination* ExitDestination(Player* bot) const;
@@ -247,6 +249,8 @@ private:
     // is a member that is not near the leader.
     static std::string CheckParty(Player* leader, const Dungeon& dungeon, bool& failed, bool* farOnly = nullptr);
     // The bosses step, inside with the whole party.
+    // The leader opens a locked door of the key table by it, with the key in its bags.
+    static void OpenKeyDoors(Player* leader, Update& update);
     void TickBosses(Player* leader, Run& run, Update& update);
     // The finish step: out, then the reset.
     void TickLeave(Player* leader, Run& run, Update& update);

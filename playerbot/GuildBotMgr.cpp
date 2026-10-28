@@ -842,6 +842,24 @@ uint8 GuildBotMgr::GetTankOrder(uint32 guid) const
     return it == tankOrders.end() ? 0 : it->second;
 }
 
+std::string GuildBotMgr::GetDungeonOrder(uint32 guid) const
+{
+    auto it = characters.find(guid);
+    if (it == characters.end())
+        return "";
+    if (it->second.job == "dungeon")
+        return ArgValue(it->second, "name");
+    if (it->second.job != "party")
+        return "";
+    std::string leaderName = ArgValue(it->second, "leader");
+    if (!normalizePlayerName(leaderName))
+        return "";
+    for (const auto& [leaderGuid, leader] : characters)
+        if (leader.name == leaderName && leader.job == "dungeon")
+            return ArgValue(leader, "name");
+    return "";
+}
+
 bool GuildBotMgr::GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const
 {
     auto it = characters.find(guid);

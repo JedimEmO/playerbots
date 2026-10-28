@@ -28,4 +28,5 @@ private:
     static std::list<std::string> Consumables(Player* bot);
     static std::list<std::string> Bags(Player* bot);
     static std::list<std::string> Pet(Player* bot);
+    static std::list<std::string> Keys(Player* bot);
 };

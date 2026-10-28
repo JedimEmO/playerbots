@@ -9,6 +9,7 @@
 #include "Pools/PoolManager.h"
 #include "Maps/InstanceData.h"
 #include "AI/ScriptDevAI/ScriptDevAIMgr.h"
+#include "AI/ScriptDevAI/include/sc_grid_searchers.h"
 #include "AI/ScriptDevAI/include/sc_gossip.h"
 #include "Grids/GridNotifiers.h"
 #include "Grids/GridNotifiersImpl.h"
@@ -121,6 +122,29 @@ namespace
     const std::map<uint32, std::vector<int32>> MORE_BOSSES = {
         { 34, { 1696, 1663 } },  // The Stockade: Targorr the Dread, four of him; Dextren Ward, three
     };
+
+    // Locked doors a guild party opens with a key, as a player would: the leader, with the key in its bags, uses the
+    // door as it comes by it. Every other door stays shut to it, and out of its loot: a dungeon's doors open by its
+    // events. The keys are what the bench hands a party for its dungeon (GuildBench::Keys); the locks are Lock.dbc's,
+    // each a key first, so the server takes the use as a player's with the key.
+    struct KeyDoor { uint32 map; uint32 door; uint32 key; };
+    const KeyDoor KEY_DOORS[] = {
+        // Dire Maul: the Crescent Key opens two doors in the west wing and one in the north; the Gordok courtyard and
+        // inner doors have keys of their own.
+        { 429, 177221, 18249 }, { 429, 179550, 18249 }, { 429, 179549, 18249 },
+        { 429, 177219, 18266 },  // Gordok Courtyard Door
+        { 429, 177217, 18268 },  // Gordok Inner Door
+        // Stratholme: the Key to the City opens the Service Entrance Gate inside the back door, before Barthilas,
+        // and the King's Square and Gauntlet gates.
+        { 329, 175368, 12382 }, { 329, 175352, 12382 }, { 329, 175353, 12382 }, { 329, 175356, 12382 }, { 329, 175357, 12382 },
+        // Blackrock Depths: the Shadowforge Key opens the Shadowforge gates and lock, the East Garrison Door and the Lyceum.
+        { 230, 170559, 11000 }, { 230, 170560, 11000 }, { 230, 161460, 11000 }, { 230, 170570, 11000 }, { 230, 170558, 11000 },
+        // Scholomance: the Viewing Room Key opens the Viewing Room Door.
+        { 289, 175167, 13873 },
+    };
+
+    // The leader opens a keyed door this near it.
+    constexpr float KEY_DOOR_NEAR = 10.0f;
 
     // Bosses the run leaves out: the way toward them leads to a place the party cannot go on from.
     const std::map<uint32, std::vector<int32>> NOT_BOSSES = {
@@ -1132,10 +1156,30 @@ uint32 GuildDungeon::LiveSpawn(Map* map, const std::vector<uint32>& spawns, cons
     return live;
 }
 
+void GuildDungeon::OpenKeyDoors(Player* leader, Update& update)
+{
+    if (!leader->IsInWorld() || leader->IsBeingTeleported() || !leader->IsAlive() || leader->IsInCombat())
+        return;
+    for (const KeyDoor& row : KEY_DOORS)
+    {
+        if (row.map != leader->GetMapId() || !leader->HasItemCount(row.key, 1))
+            continue;
+        GameObject* door = GetClosestGameObjectWithEntry(leader, row.door, KEY_DOOR_NEAR);
+        if (!door || door->GetGoState() != GO_STATE_READY || !door->IsWithinDistInMap(leader, door->GetInteractionDistance()))
+            continue;
+        WorldPacket packet(CMSG_GAMEOBJ_USE);
+        packet << door->GetObjectGuid();
+        leader->GetSession()->HandleGameObjectUseOpcode(packet);
+        if (door->GetGoState() != GO_STATE_READY)
+            update.events.push_back({ "used", std::string(door->GetGOInfo()->name) + ", with the key" });
+    }
+}
+
 void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
 {
     const Dungeon& dungeon = run.dungeon;
     Map* map = leader->GetMap();
+    OpenKeyDoors(leader, update);
     // The leader waits for a member far behind only on a tick that decides so below.
     const bool wasWaiting = run.waiting;
     run.waiting = false;
@@ -1939,6 +1983,8 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
 {
     const Dungeon& dungeon = run.dungeon;
     Group* group = leader->GetGroup();
+    if (leader->GetMapId() == dungeon.mapId)
+        OpenKeyDoors(leader, update);
 
     const time_t now = time(nullptr);
     const bool leaderOut = leader->GetMapId() != dungeon.mapId;
@@ -2160,6 +2206,18 @@ bool GuildDungeon::IsLeaving(Player* leader) const
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(leader->GetGUIDLow());
     return it != runs.end() && it->second.phase == Phase::Leave;
+}
+
+std::vector<uint32> GuildDungeon::DungeonKeys(const std::string& name)
+{
+    std::vector<uint32> keys;
+    const uint32 mapId = FindMap(name);
+    if (!mapId)
+        return keys;
+    for (const KeyDoor& row : KEY_DOORS)
+        if (row.map == mapId && std::find(keys.begin(), keys.end(), row.key) == keys.end())
+            keys.push_back(row.key);
+    return keys;
 }
 
 bool GuildDungeon::KeepsToMap(Player* bot) const

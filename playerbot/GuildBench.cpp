@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBench.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 #include "playerbot/PlayerbotFactory.h"
 #include "playerbot/Talentspec.h"
 #include "playerbot/strategy/actions/ChangeTalentsAction.h"
@@ -46,6 +47,7 @@ std::list<std::string> GuildBench::Help()
         "  bench consumables <name>                   food, drink, reagents, ammunition, oils and potions for its class",
         "  bench bags <name>                          a Traveler's Backpack in every empty bag slot",
         "  bench pet <name>                           a hunter's pet with its spells",
+        "  bench keys <name>                          the keys to the locked doors of the dungeon its order names",
         "  bench setup <name> <level> [quality]       all of the above, in that order",
         "All but level need the character online and played by the engine; level works offline as a level change only.",
     };
@@ -118,6 +120,8 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
         return Bags(bot);
     if (sub == "pet")
         return Pet(bot);
+    if (sub == "keys")
+        return Keys(bot);
 
     if (sub == "setup")
     {
@@ -132,6 +136,7 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
         out.splice(out.end(), Gear(bot, second));
         out.splice(out.end(), Consumables(bot));
         out.splice(out.end(), Pet(bot));
+        out.splice(out.end(), Keys(bot));
         return out;
     }
 
@@ -232,6 +237,23 @@ std::list<std::string> GuildBench::Bags(Player* bot)
 
     bot->SaveToDB();
     return { std::string(bot->GetName()) + " got " + std::to_string(added) + " Traveler's Backpacks" };
+}
+
+std::list<std::string> GuildBench::Keys(Player* bot)
+{
+    // The keys a player brings for the dungeon: the bench has no quest chain to earn them by.
+    const std::string dungeon = sGuildBotMgr.GetDungeonOrder(bot->GetGUIDLow());
+    if (dungeon.empty())
+        return { std::string(bot->GetName()) + " has no dungeon order; no keys" };
+    std::vector<uint32> keys = GuildDungeon::DungeonKeys(dungeon);
+    if (keys.empty())
+        return { std::string(bot->GetName()) + " needs no keys for " + dungeon };
+    uint32 added = 0;
+    for (uint32 key : keys)
+        if (!bot->HasItemCount(key, 1, true) && bot->StoreNewItemInBestSlots(key, 1))
+            ++added;
+    bot->SaveToDB();
+    return { std::string(bot->GetName()) + " got " + std::to_string(added) + " of the " + std::to_string(keys.size()) + " keys for " + dungeon };
 }
 
 std::list<std::string> GuildBench::Pet(Player* bot)

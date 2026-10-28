@@ -53,6 +53,8 @@ public:
     void RecordEvent(uint32 guid, const std::string& kind, const std::string& detail) { Event(guid, kind, detail); }
     // The farm job's item and amount (0 for no limit), for the guild order value. False when not farming.
     bool GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const;
+    // The dungeon the character's order names: its own, leading a party, or its leader's, in one. Empty for none.
+    std::string GetDungeonOrder(uint32 guid) const;
     // True for the item the character's job is collecting, which it must keep.
     bool IsJobItem(uint32 guid, uint32 itemId) const;
     // Whether the character may learn from a profession trainer for this skill: always for a bot that is not a
