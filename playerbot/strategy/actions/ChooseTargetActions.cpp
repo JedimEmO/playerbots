@@ -8,6 +8,9 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildDungeon.h"
 
+// A guild dungeon leader on its way does not pull a creature this far below it.
+static constexpr float PULL_BELOW = 10.0f;
+
 bool DpsAssistAction::isUseful()
 {
     // if carry flag, do not start fight
@@ -28,6 +31,14 @@ bool AttackAnythingAction::isUseful()
     Unit* target = GetTarget();
 
     if (!target || !ai->IsSafe(target))
+        return false;
+
+    // A guild dungeon leader inside pulls nothing out of its sight, or more than PULL_BELOW yards below it, that is not
+    // fighting the party yet and is not its next boss: such a pull fails, and the next one begins, as with the
+    // Blackfathom Myrmidons in the water under the way to Old Serra'kis, which held the leader there for twenty minutes.
+    if (sGuildBotMgr.IsGuildBot(bot) && sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) == "dungeon" && bot->GetMap()->IsDungeon()
+        && !target->IsInCombat() && target != sGuildDungeon.NextBoss(bot, sPlayerbotAIConfig.sightDistance)
+        && (!bot->IsWithinLOSInMap(target, true) || target->GetPositionZ() < bot->GetPositionZ() - PULL_BELOW))
         return false;
 
     bool pinnedByOrder = ai->HasStrategy("stay", BotState::BOT_STATE_NON_COMBAT) || ai->HasStrategy("guard", BotState::BOT_STATE_NON_COMBAT);
