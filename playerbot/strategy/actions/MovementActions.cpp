@@ -756,7 +756,8 @@ TravelPath MovementAction::ResolveMovePath(const WorldPosition& startPosition, c
             // water no path leaves, 600 yards and more from Aku'mai. The nearest node with links is where the travel
             // map's routes start, so the walk goes there instead, and routes again from it. Only when the nearest such
             // node is out of sight distance, away from the travel map: by Twilight Lord Kelris's node the walk to it
-            // and the walk on toward Lady Sarevess took turns, and the leader stood by Kelris.
+            // and the walk on toward Lady Sarevess took turns, and the leader stood by Kelris. And only to a node nearer
+            // the place than the walker: 60 yards on toward Lady Sarevess, a walk back to Kelris's node undid the way.
             if (!path.empty() && path.back().distance(endPosition) > sPlayerbotAIConfig.sightDistance)
                 for (TravelNode* node : sTravelNodeMap.getNodes(startPosition, 300.0f))
                 {
@@ -765,6 +766,8 @@ TravelPath MovementAction::ResolveMovePath(const WorldPosition& startPosition, c
                     WorldPosition nodePosition = *node->getPosition();
                     if (nodePosition.distance(startPosition) <= sPlayerbotAIConfig.sightDistance)
                         break;
+                    if (nodePosition.distance(endPosition) >= totalDistance)
+                        continue;
                     std::vector<WorldPosition> toNode = nodePosition.getPathFromPath({ startPosition }, bot, 40);
                     if (!toNode.empty() && toNode.back().distance(nodePosition) + sPlayerbotAIConfig.tooCloseDistance < startPosition.distance(nodePosition))
                     {
