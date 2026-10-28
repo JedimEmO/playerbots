@@ -233,8 +233,9 @@ private:
 
     static bool Resolve(const std::string& name, Player* leader, Dungeon& dungeon, std::string& error);
     static uint32 FindMap(const std::string& name);
-    // Why the party cannot set out yet, or empty. Sets failed when waiting would not help.
-    static std::string CheckParty(Player* leader, const Dungeon& dungeon, bool& failed);
+    // Why the party cannot set out yet, or empty. Sets failed when waiting would not help, and farOnly when the reason
+    // is a member that is not near the leader.
+    static std::string CheckParty(Player* leader, const Dungeon& dungeon, bool& failed, bool* farOnly = nullptr);
     // The bosses step, inside with the whole party.
     void TickBosses(Player* leader, Run& run, Update& update);
     // The finish step: out, then the reset.

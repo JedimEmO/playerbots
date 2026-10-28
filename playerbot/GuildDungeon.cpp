@@ -685,9 +685,11 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
     return true;
 }
 
-std::string GuildDungeon::CheckParty(Player* leader, const Dungeon& dungeon, bool& failed)
+std::string GuildDungeon::CheckParty(Player* leader, const Dungeon& dungeon, bool& failed, bool* farOnly)
 {
     failed = false;
+    if (farOnly)
+        *farOnly = false;
 
     Group* group = leader->GetGroup();
     if (!group)
@@ -753,7 +755,11 @@ std::string GuildDungeon::CheckParty(Player* leader, const Dungeon& dungeon, boo
             return "waiting for " + who + " to be alive";
 
         if (member != leader && (member->GetMapId() != leader->GetMapId() || member->GetDistance(leader) > NEAR_LEADER))
+        {
+            if (farOnly)
+                *farOnly = true;
             return "waiting for " + who + " to come near";
+        }
     }
 
     return "";
@@ -885,7 +891,8 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     }
 
     bool failed = false;
-    std::string why = CheckParty(leader, dungeon, failed);
+    bool farOnly = false;
+    std::string why = CheckParty(leader, dungeon, failed, &farOnly);
     if (failed)
     {
         runs.erase(leader->GetGUIDLow());
@@ -905,7 +912,9 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
         }
     }
 
-    if (run.phase == Phase::Check && why.empty())
+    // With a meeting stone, a member that is only far off does not keep the leader from setting out: the party meets
+    // at the stone, and a member stuck on the way, as on the lift below Gnomeregan's stone, is within its reach there.
+    if (run.phase == Phase::Check && (why.empty() || (farOnly && dungeon.stone)))
         run.phase = Phase::Go;
 
     // With a meeting stone, the leader goes to it and in by it, once the party is with it.

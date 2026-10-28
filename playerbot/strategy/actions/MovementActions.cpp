@@ -2679,6 +2679,11 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
     if (!ai->IsSafe(obj))
         return false;
 
+    // A friend is chased to come within reach of a spell on it, and never attacked: the attack makes it the
+    // character's victim. A druid in Razorfen Kraul reaching for the hunter's pet to buff it held the pet as its
+    // victim for over 20 minutes, stayed near it, and passed three bosses over.
+    const bool friendly = sServerFacade.IsFriendlyTo(bot, (Unit*)obj);
+
 #ifdef MANGOSBOT_TWO
     TransportInfo* transportInfo = bot->GetTransportInfo();
     if (transportInfo && transportInfo->IsOnVehicle())
@@ -2804,7 +2809,8 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
             sServerFacade.GetChaseOffset(bot) == distance)
         {
             bot->SetTarget(obj); //Needed to keep chase going in combat.
-            bot->Attack((Unit*)obj, false); //Needed to keep chase going in combat.
+            if (!friendly)
+                bot->Attack((Unit*)obj, false); //Needed to keep chase going in combat.
             return true;
         }
     }
@@ -2829,7 +2835,8 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
     if (angle > 20) angle = 0;
 
     bot->SetTarget(obj); //Needed to keep chase going in combat.
-    bot->Attack((Unit*)obj, false); //Needed to keep chase going in combat.
+    if (!friendly)
+        bot->Attack((Unit*)obj, false); //Needed to keep chase going in combat.
 
     mm.MoveChase((Unit*)obj, distance, angle);
     float dist = sServerFacade.GetDistance2d(bot, obj);
