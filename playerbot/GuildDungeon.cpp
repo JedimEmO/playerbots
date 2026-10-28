@@ -1767,6 +1767,30 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
             update.reason = run.cleared + "; " + std::to_string(inside) + " still inside after " + std::to_string(LEAVE_SECONDS / MINUTE) + " minutes";
             return;
         }
+        // On the way out, the rows with no boss of their own still run. Witch Doctor Zum'rah, hostile once a member
+        // passes him, raises the dead from his graves every 20 seconds until he dies, and the way out of Zul'Farrak
+        // goes by him: unkilled, he held the leader in his graveyard until the leave failed.
+        run.killGuid = ObjectGuid();
+        if (leader->GetMapId() == dungeon.mapId)
+            for (const Dungeon::Kill& kill : dungeon.kills)
+            {
+                if (kill.before)
+                    continue;
+                std::list<Unit*> found;
+                MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, kill.entry, KILL_RANGE);
+                MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
+                Cell::VisitAllObjects(leader, searcher, KILL_RANGE);
+                Unit* nearest = nullptr;
+                for (Unit* unit : found)
+                    if (unit->IsAlive() && unit->IsInWorld() && leader->CanAttack(unit)
+                        && (!nearest || leader->GetDistance(unit) < leader->GetDistance(nearest)))
+                        nearest = unit;
+                if (!nearest)
+                    continue;
+                run.killGuid = nearest->GetObjectGuid();
+                break;
+            }
+
         // The leader inside goes for the way out; any other travel target goes, as at a dead boss.
         if (leader->GetMapId() == dungeon.mapId)
             if (PlayerbotAI* ai = leader->GetPlayerbotAI())
@@ -2230,8 +2254,9 @@ Creature* GuildDungeon::KillTarget(Player* bot, float within) const
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(bot->GetGUIDLow());
-    if (it == runs.end() || it->second.phase != Phase::Bosses || it->second.killGuid.IsEmpty() || bot->GetMapId() != it->second.dungeon.mapId
-        || !bot->IsInWorld())
+    // In the boss step, and on the way out, where the rows with no boss of their own still run.
+    if (it == runs.end() || (it->second.phase != Phase::Bosses && it->second.phase != Phase::Leave) || it->second.killGuid.IsEmpty()
+        || bot->GetMapId() != it->second.dungeon.mapId || !bot->IsInWorld())
         return nullptr;
     Creature* creature = bot->GetMap()->GetCreature(it->second.killGuid);
     if (!creature || !creature->IsAlive() || !creature->IsInWorld() || bot->GetDistance(creature) > within)
