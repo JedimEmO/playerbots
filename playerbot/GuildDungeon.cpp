@@ -34,6 +34,7 @@ std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::exits;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::insides;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::stones;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::usePlaces;
+std::map<int32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::viaPlaces;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::bossPlaces;
 namespace
 {
@@ -194,6 +195,23 @@ namespace
 
     // The leader opens a keyed door this near it.
     constexpr float KEY_DOOR_NEAR = 10.0f;
+
+    // Places a party goes by after a boss, before its next step, where the travel map has no route from the boss's
+    // place and the navmesh's straight way leads somewhere the party cannot go on from: the map, the boss, the place.
+    struct ViaPlace { uint32 map; int32 after; float x, y, z; };
+    const ViaPlace VIAS[] = {
+        // Blackfathom Deeps: Lady Sarevess's node has no links, and the navmesh's way from her pool toward the Fires,
+        // Aku'mai or Ghamoo-ra's node ends on a spot in the water no path leaves. From this spot west of it, which a
+        // leader once reached from her pool, the travel map routes on.
+        { 48, 4831, -482.0f, 289.0f, -55.1f },
+        // Blackfathom Deeps: on the way from Twilight Lord Kelris to Lady Sarevess the route can end in the shallows near
+        // (-600, 55), where a leader stood until Sarevess was passed over. This spot short of her pool is where one leader's
+        // way went on to her, and the travel map reaches it from Ghamoo-ra's node nearby.
+        { 48, 4832, -417.3f, 254.9f, -55.3f },
+    };
+    // The leader has come by a via place this near it, or gives it up after this long.
+    constexpr float VIA_NEAR = 10.0f;
+    constexpr time_t VIA_SECONDS = 3 * MINUTE;
 
     // Bosses the run leaves out: the way toward them leads to a place the party cannot go on from.
     const std::map<uint32, std::vector<int32>> NOT_BOSSES = {
@@ -743,6 +761,19 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         if (!in)
             in = std::make_unique<PlaceTravelDestination>(arrival, "the way out of " + dungeon.name);
         dungeon.inside = in.get();
+    }
+
+    // Places to go by after a boss.
+    for (const ViaPlace& via : VIAS)
+    {
+        if (via.map != dungeon.mapId)
+            continue;
+        std::lock_guard<std::mutex> guard(exitLock);
+        auto& place = viaPlaces[via.after];
+        if (!place)
+            place = std::make_unique<PlaceTravelDestination>(WorldPosition(via.map, via.x, via.y, via.z),
+                "the way on from " + BossName(via.after) + " in " + dungeon.name);
+        dungeon.vias.push_back({ via.after, place.get() });
     }
 
     // Objects to use on the way, where the map has their spawns.
@@ -1314,6 +1345,35 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     const Dungeon& dungeon = run.dungeon;
     Map* map = leader->GetMap();
     OpenKeyDoors(leader, update);
+
+    // A via place after a boss that died comes before the next step: the leader travels there, and its travel stays.
+    run.viaPlace = nullptr;
+    for (const Dungeon::Via& via : dungeon.vias)
+    {
+        if (!run.killed.count(via.after) || run.viasDone.count(via.after))
+            continue;
+        const time_t viaNow = time(nullptr);
+        if (!run.viaSince)
+            run.viaSince = viaNow;
+        WorldPosition* at = via.place->GetClosestPoint(WorldPosition(leader));
+        if (!at || at->distance(WorldPosition(leader)) <= VIA_NEAR || viaNow - run.viaSince > VIA_SECONDS)
+        {
+            run.viasDone.insert(via.after);
+            run.viaSince = 0;
+            continue;
+        }
+        run.viaPlace = via.place;
+        // The way there is no headway lost on the next boss.
+        run.headwaySince = viaNow;
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+        {
+            TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+            if (target && target->IsActive() && target->GetDestination() != via.place)
+                target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+        }
+        update.reason = "on the way to " + via.place->GetTitle() + ", " + std::to_string(run.killed.size()) + " bosses down";
+        return;
+    }
     // The leader waits for a member far behind only on a tick that decides so below.
     const bool wasWaiting = run.waiting;
     run.waiting = false;
@@ -2612,7 +2672,11 @@ TravelDestination* GuildDungeon::BossDestination(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(bot->GetGUIDLow());
-    if (it == runs.end() || it->second.phase != Phase::Bosses || it->second.useSpawn || bot->GetMapId() != it->second.dungeon.mapId)
+    if (it == runs.end() || it->second.phase != Phase::Bosses || bot->GetMapId() != it->second.dungeon.mapId)
+        return nullptr;
+    if (it->second.viaPlace)
+        return it->second.viaPlace;
+    if (it->second.useSpawn)
         return nullptr;
     return it->second.nextPlace;
 }
@@ -2621,7 +2685,11 @@ TravelDestination* GuildDungeon::UseDestination(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(bot->GetGUIDLow());
-    if (it == runs.end() || it->second.phase != Phase::Bosses || !it->second.useSpawn || bot->GetMapId() != it->second.dungeon.mapId)
+    if (it == runs.end() || it->second.phase != Phase::Bosses || bot->GetMapId() != it->second.dungeon.mapId)
+        return nullptr;
+    if (it->second.viaPlace)
+        return it->second.viaPlace;
+    if (!it->second.useSpawn)
         return nullptr;
     for (const Dungeon::Use& use : it->second.dungeon.uses)
         if (use.spawn == it->second.useSpawn)

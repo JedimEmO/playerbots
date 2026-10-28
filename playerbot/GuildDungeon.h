@@ -186,6 +186,9 @@ private:
         // Creatures to kill before a boss: their entry, the boss, and the spawn of the door their deaths open, or 0.
         struct Kill { uint32 entry = 0; int32 before = 0; uint32 doorSpawn = 0; };
         std::vector<Kill> kills;
+        // Places the leader goes by once a boss is dead, before anything else: the boss, and the place.
+        struct Via { int32 after = 0; ai::PlaceTravelDestination* place = nullptr; };
+        std::vector<Via> vias;
         // Items to use on an object before a boss, as a player would: the item, the object's spawn, the boss,
         // the door the event it starts opens, the creature the party stays by meanwhile, and how long it waits.
         struct ItemUse { uint32 item = 0; uint32 spawn = 0; int32 before = 0; uint32 doorSpawn = 0; uint32 guard = 0; time_t wait = 0;
@@ -203,6 +206,9 @@ private:
         uint32 nextSpawn = 0;          // its spawn
         ai::PlaceTravelDestination* nextPlace = nullptr; // where that spawn stands, when the boss has several; kept in bossPlaces
         std::set<int32> killed;        // bosses reported dead
+        std::set<int32> viasDone;      // the bosses whose via place the leader has come by, or given up on
+        ai::PlaceTravelDestination* viaPlace = nullptr; // the via place it travels to now, or null
+        time_t viaSince = 0;           // since when it has travelled to it
         std::set<int32> talked;        // talk steps done
         std::map<int32, time_t> talkedAt; // when the leader last spoke to each, by entry
         std::set<uint32> used;         // use steps done, by the object's spawn
@@ -264,6 +270,7 @@ private:
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> insides; // by entrance trigger, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> stones; // by dungeon map, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> usePlaces; // by object spawn, never freed
+    static std::map<int32, std::unique_ptr<ai::PlaceTravelDestination>> viaPlaces; // by the boss before, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> bossPlaces; // by creature spawn, never freed
 
     static std::mutex entryLock;
