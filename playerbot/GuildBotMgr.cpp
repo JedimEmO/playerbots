@@ -77,6 +77,8 @@ namespace
     constexpr size_t UNREACHABLE_SPOTS_STUCK = 3;
     // A stuck character walks to the nearest travel node within this range.
     constexpr float STUCK_NODE_RANGE = 300.0f;
+    // A route to a grind spot that ends farther than this from it does not get there.
+    constexpr float NO_ROUTE_SHORT_YARDS = 200.0f;
     // In the AI's combat state this long with nothing to attack and nothing under crowd control, the fight is empty.
     constexpr time_t EMPTY_FIGHT_SECONDS = 20;
     // A dungeon leader outside that leaves this many such fights this close together goes straight to its stone,
@@ -472,7 +474,10 @@ void GuildBotMgr::CheckEmptyFight(Character& c, Player* bot)
         {
             if (PossibleAttackTargetsValue::HasBreakableCC(unit, bot) || PossibleAttackTargetsValue::HasUnBreakableCC(unit, bot))
                 paused = true;
-            if (unit->IsAlive() && bot->IsWithinDistInMap(unit, sPlayerbotAIConfig.sightDistance))
+            // A boss pull is a group's: a character on its own is held by a creature it cannot attack, not paused.
+            // Hthirhunt at the Dabyrie farm had four Cresting Exiles, eight levels up and out in the water, on its
+            // attackers at full health for most of an hour, and could neither rest nor move on.
+            if (unit->IsAlive() && bot->IsWithinDistInMap(unit, sPlayerbotAIConfig.sightDistance) && bot->GetGroup())
                 paused = true;
         }
     const time_t now = time(nullptr);
@@ -628,8 +633,11 @@ void GuildBotMgr::CheckUnreachable(Character& c, Player* bot)
     // No route the travel map knows for this character: the spot is out of its reach as things stand, and its failed
     // moves are no sign of being stuck. Dustwallow from Gadgetzan without the Great Lift is such a spot; Afortmage
     // picked one after another all hour in experiment 16. Set aside at once, without strikes.
+    // A route that stops short of the spot is none: Afortmage's from Gadgetzan to Dustwallow ran 10 points and
+    // ended 4476 yards from it.
     WorldPosition* target = travel->GetPosition();
-    if (target && sTravelNodeMap.getFullPath(WorldPosition(bot), *target, bot).empty())
+    TravelPath route = target ? sTravelNodeMap.getFullPath(WorldPosition(bot), *target, bot) : TravelPath();
+    if (target && (route.empty() || route.getBack().distance(*target) > NO_ROUTE_SHORT_YARDS))
     {
         left[entry] = now + LEAVE_DESTINATION_SECONDS;
         travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
