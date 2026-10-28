@@ -1749,12 +1749,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     // Given up on twice: the leader fought the boss and left it untouched at full health for 45 seconds two times,
     // out of reach of its blows and spells, such as Lady Sarevess in her pool. Those fights hold the clock above, and
     // the leader would take the boss again at once, so the party passes it over. Once could be a hiccup on the way in.
-    // A boss walking its waypoints, out of a fight, is not out of reach: its walk brings it back by. Captain Greenskin
-    // walks his ship in the Deadmines; given up on twice, he was passed over, and the party killed him a minute or two
-    // later all the same.
     Creature* bossCreature = map->GetCreature(run.nextSpawn);
-    const bool walking = bossCreature && bossCreature->GetMotionMaster()->GetCurrentMovementGeneratorType() == WAYPOINT_MOTION_TYPE;
-    const bool givenUp = !dungeon.talks.count(next) && bossCreature && bossCreature->IsAlive() && !walking
+    const bool givenUp = !dungeon.talks.count(next) && bossCreature && bossCreature->IsAlive()
         && sGuildBotMgr.GiveUps(leader, bossCreature->GetObjectGuid()) >= GIVE_UPS_TO_PASS;
     if ((idle || nearer) && !givenUp)
         run.headwaySince = now;
