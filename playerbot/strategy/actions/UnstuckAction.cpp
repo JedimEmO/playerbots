@@ -12,6 +12,26 @@ bool UnstuckAction::Execute(Event& event)
     // or away from the stone, to the other end of the world. The dungeon job sees to a party that cannot go on.
     if (bot->IsAlive() && sGuildBotMgr.StaysWithParty(bot))
     {
+        // Stuck in a fight with nothing in it to attack, such as a creature under the floor or out of reach that keeps
+        // the bot in its threat list: the bot leaves the fight where it stands, and the creature, with nobody left to
+        // fight, goes home. A reset alone leaves the threat in place, and the party stands there for good.
+        if (source.find("combat") != std::string::npos && bot->IsInCombat()
+            && AI_VALUE(std::list<ObjectGuid>, "possible attack targets").empty())
+        {
+            std::string holder;
+            for (ObjectGuid guid : AI_VALUE(std::list<ObjectGuid>, "attackers"))
+                if (Unit* unit = ai->GetUnit(guid))
+                {
+                    holder = unit->GetName();
+                    break;
+                }
+            bot->getHostileRefManager().deleteReferences();
+            if (Pet* pet = bot->GetPet())
+                pet->getHostileRefManager().deleteReferences();
+            bot->CombatStopWithPets(true);
+            sGuildBotMgr.RecordEvent(bot->GetGUIDLow(), "recovery",
+                "left a fight with nothing to attack" + (holder.empty() ? std::string() : ": " + holder));
+        }
         ai->TellDebug(master, "Unstuck: with the party, resetting.", "debug unstuck");
         return ai->DoSpecificAction("reset", event, true);
     }

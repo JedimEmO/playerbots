@@ -426,21 +426,39 @@ bool MovementAction::MoveOffTransport(PlayerbotAI* ai, WorldPosition exitPos, bo
     return true;
 }
 
+// The cars of the vertical elevators: Thunder Bluff's Mesa, the Undercity, Ironforge, Gnomeregan's Vator and Vator2,
+// and the Dun Morogh lift by Gnomeregan.
+static bool IsElevatorDisplay(uint32 displayId)
+{
+    switch (displayId)
+    {
+        case 360:  // Mesa Elevator
+        case 455:  // Undervator
+        case 561:  // IronForge Elevator
+        case 807:  // Vator
+        case 852:  // Vator2
+        case 1587: // Elevator
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool MovementAction::UseTransport(PlayerbotAI* ai, uint32 entry, WorldPosition dockPosition, WorldPosition exitPosition, bool doTeleport)
 {
     AiObjectContext* context = ai->GetAiObjectContext();
     Player* bot = ai->GetBot();
     WorldPosition botPos(bot);
 
-    // Mesa elevators move vertically while their X/Y position remains
-    // effectively unchanged. Use 3D distance so upper and lower stops
-    // are not treated as the same dock position.
+    // Elevators move vertically while their X/Y position stays the same, so the distance to a stop includes height.
+    // Otherwise the upper and lower stops count as the same dock: a character boards a car that is at the other end,
+    // or steps off as soon as it is on. Boats, zeppelins and the tram keep the flat distance.
     auto dockDistanceSq = [&dockPosition](GenericTransport* trans) -> float
     {
         GameObjectInfo const* info =
             sGOStorage.LookupEntry<GameObjectInfo>(trans->GetEntry());
 
-        if (info && info->displayId == 360) // Elevatorcar.m2
+        if (info && IsElevatorDisplay(info->displayId))
             return dockPosition.sqDistance(WorldPosition(trans));
 
         return dockPosition.sqDistance2d(WorldPosition(trans));

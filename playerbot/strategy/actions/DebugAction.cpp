@@ -3938,8 +3938,14 @@ bool DebugAction::HandleValues(Event& event, Player* requester, const std::strin
     }
 
     // A value nothing has read yet is not listed; asking for it by its full name, qualifier included, creates it.
+    // Only with a qualifier that is itself a value, such as "combat::self target": many values look their qualifier
+    // up as a value, and a made-up one crashes the server.
     if (!param.empty())
-        context->GetUntypedValue(param);
+    {
+        const size_t split = param.find("::");
+        if (split == std::string::npos || context->GetUntypedValue(param.substr(split + 2)))
+            context->GetUntypedValue(param);
+    }
 
     std::set<std::string> names = context->GetValues();
     std::vector<std::string> values;
