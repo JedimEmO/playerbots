@@ -137,3 +137,56 @@ level = 60
 job = "idle"
 binds = [409]
 enabled = false
+
+# pay at a counter: a human in Goldshire, 10g on it, paying at the Guild Master. Expect: working
+# `on its way to the Guild Master in Stormwind` while it walks the road north, then done,
+# `paid 10g (ref 1) to the Guild Master in Stormwind`, standing within 8 yards of Aldwin Laughlin,
+# and a `paid` event `ref=1 gold=100000`. Money 5g after. The tele name is a guess; coordinates in Goldshire are safer.
+[[worker]]
+name = "Paywalk"
+race = "human"
+class = "warrior"
+account = "LABPAYAT"
+level = 20
+tele = "Goldshire"
+job = "pay"
+args = "at=guild_master gold=100000 ref=1"
+money = 150000
+
+# pay at the emissary, which is not spawned yet: an orc in Razor Hill, with the reset currency.
+# Expect: `on its way to the emissary of the Bronze Flight in Orgrimmar`, then done at Urtrun Clanbringer's spot,
+# `paid 3 Sands of Renewal (ref 2) to the emissary of the Bronze Flight in Orgrimmar`.
+[[worker]]
+name = "Paysands"
+race = "orc"
+class = "warrior"
+account = "LABPAYATH"
+level = 20
+tele = "RazorHill"
+job = "pay"
+args = "at=emissary items=200001:3 ref=2"
+items = ["200001:3"]
+
+# pay at a counter behind lifts: a tauren at the foot of Thunder Bluff, placed by coordinates by the lifts,
+# since a tele to Thunder Bluff lands on the mesa; and an undead in Brill, whose nearest counter is Undercity. Lessons: bot paths do not ride elevators. Expect done at Krumn and at Christopher Drakul;
+# a failure `could not reach ...` after 20 minutes means the lift is the gap, and the route choice must avoid it.
+[[worker]]
+name = "Paylift"
+race = "tauren"
+class = "warrior"
+account = "LABPAYATH"
+level = 20
+job = "pay"
+args = "at=guild_master gold=10000 ref=3"
+money = 20000
+
+[[worker]]
+name = "Payunder"
+race = "undead"
+class = "warrior"
+account = "LABPAYATH"
+level = 20
+tele = "Brill"
+job = "pay"
+args = "at=guild_master gold=10000 ref=4"
+money = 20000

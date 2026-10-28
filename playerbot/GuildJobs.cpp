@@ -1,6 +1,9 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildJobs.h"
+#include "playerbot/GuildBotMgr.h"
 #include "playerbot/ServerFacade.h"
+#include "playerbot/TravelMgr.h"
+#include "playerbot/TravelNode.h"
 #include "Entities/Bag.h"
 #include "Groups/Group.h"
 #include "Grids/GridNotifiers.h"
@@ -9,8 +12,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
+
+using namespace ai;
 
 namespace
 {
@@ -18,6 +26,188 @@ namespace
     constexpr uint32 CRAFT_CAST_TRIES = 6;
     // At most this many items on one craft order.
     constexpr uint64 CRAFT_MAX_AMOUNT = 1000;
+
+    // The emissary of the Bronze Flight, who stands beside each capital's Guild Master.
+    constexpr uint32 EMISSARY_ENTRY = 200100;
+    // An emissary spawn this near a Guild Master is that city's.
+    constexpr float EMISSARY_NEAR = 40.0f;
+    // Talking range: a character this near its counter pays. A little more than the 5 yards travel counts as
+    // arrived, since it walks to a point up to 5 yards from the counter's spawn.
+    constexpr float COUNTER_REACH = 8.0f;
+    // On the way to a counter, a character that comes no 10 yards nearer to it in 20 minutes, while able to move,
+    // gives the order up.
+    constexpr float COUNTER_PROGRESS = 10.0f;
+    constexpr time_t COUNTER_STALL = 20 * MINUTE;
+
+    // A place a pay order is handed in at: a capital's Guild Master, or the emissary beside one.
+    struct Counter
+    {
+        bool emissary = false;
+        uint32 entry = 0;            // the creature
+        uint32 spawn = 0;            // its spawn, 0 for an emissary's place taken from its Guild Master's
+        uint32 faction = 0;          // the Guild Master's faction template: whom the counter serves
+        WorldPosition pos;
+        std::string where;           // "the Guild Master in Ironforge"
+        std::unique_ptr<PlaceTravelDestination> place;
+    };
+
+    // Indexed once from the world database's spawns, and never cleared: travel targets hold their places.
+    std::mutex counterLock;
+    bool countersIndexed = false;
+    std::vector<Counter> counters;
+    // The counter each character's pay order goes to, by character.
+    std::map<uint32, size_t> trips;
+
+    // The capitals' Guild Masters, by entry, for their city's name.
+    std::string CityOf(uint32 entry, CreatureData const& data)
+    {
+        switch (entry)
+        {
+            case 4974: return "Stormwind";       // Aldwin Laughlin
+            case 5130: return "Ironforge";       // Jondor Steelbrow
+            case 4161: return "Darnassus";       // Lysheana
+            case 3370: return "Orgrimmar";       // Urtrun Clanbringer
+            case 4613: return "Undercity";       // Christopher Drakul
+            case 5054: return "Thunder Bluff";   // Krumn
+            default: break;
+        }
+        if (AreaTableEntry const* zone = GetAreaEntryByAreaID(data.OriginalZoneId))
+            if (const char* name = zone->area_name[sWorld.GetDefaultDbcLocale()])
+                return name;
+        return "";
+    }
+
+    // Called with counterLock held.
+    void IndexCounters()
+    {
+        if (countersIndexed)
+            return;
+        countersIndexed = true;
+
+        // Guild Masters, the creatures with the guild charter flag, and the emissaries, spawned on a continent.
+        std::vector<std::pair<uint32, CreatureData>> masters, emissaries;
+        auto index = [&](auto const& pair)
+        {
+            CreatureData const& data = pair.second;
+            MapEntry const* map = sMapStore.LookupEntry(data.mapid);
+            if (!map || !map->IsContinent() || data.gameEvent)
+                return false;
+            if (data.id == EMISSARY_ENTRY)
+                emissaries.push_back({ pair.first, data });
+            else if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(data.id); info && (info->NpcFlags & UNIT_NPC_FLAG_PETITIONER))
+                masters.push_back({ pair.first, data });
+            return false;
+        };
+        sObjectMgr.DoCreatureData(index);
+
+        for (auto const& [guid, data] : masters)
+        {
+            CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(data.id);
+            const std::string city = CityOf(data.id, data);
+            const WorldPosition at(data.mapid, data.posX, data.posY, data.posZ, data.orientation);
+
+            Counter master;
+            master.entry = data.id;
+            master.spawn = guid;
+            master.faction = info->Faction;
+            master.pos = at;
+            master.where = city.empty() ? std::string("the Guild Master ") + info->Name : "the Guild Master in " + city;
+            master.place = std::make_unique<PlaceTravelDestination>(at, master.where);
+            counters.push_back(std::move(master));
+
+            // The emissary nearest this Guild Master, or, until it is spawned, the Guild Master's own spot.
+            Counter emissary;
+            emissary.emissary = true;
+            emissary.entry = EMISSARY_ENTRY;
+            emissary.faction = info->Faction;
+            emissary.pos = at;
+            float best = EMISSARY_NEAR;
+            for (auto const& [emissaryGuid, spawn] : emissaries)
+            {
+                const WorldPosition there(spawn.mapid, spawn.posX, spawn.posY, spawn.posZ, spawn.orientation);
+                if (there.getMapId() == at.getMapId() && there.distance(at) <= best)
+                {
+                    best = there.distance(at);
+                    emissary.spawn = emissaryGuid;
+                    emissary.pos = there;
+                }
+            }
+            emissary.where = std::string("the emissary of the Bronze Flight") + (city.empty() ? "" : " in " + city);
+            emissary.place = std::make_unique<PlaceTravelDestination>(emissary.pos, emissary.where);
+            counters.push_back(std::move(emissary));
+        }
+        sLog.outString("GuildJobs: %u Guild Masters and %u emissary spawns for pay counters",
+            uint32(masters.size()), uint32(emissaries.size()));
+    }
+
+    // The length of the travel map's route between two places, or -1 for none; as the dungeon job measures it.
+    float RouteLength(const WorldPosition& from, const WorldPosition& to)
+    {
+        std::shared_lock<std::shared_timed_mutex> guard(sTravelNodeMap.m_nMapMtx);
+        std::vector<TravelNode*> starts = sTravelNodeMap.getNodes(from, 50.0f);
+        std::vector<TravelNode*> goals = sTravelNodeMap.getNodes(to, 50.0f);
+        if (starts.empty() || goals.empty())
+            return -1.0f;
+        TravelNode* start = starts.front();
+        TravelNode* goal = goals.front();
+        float length = from.distance(*start->getPosition()) + goal->getPosition()->distance(to);
+        if (start == goal)
+            return length;
+        // With no unit, the search adds no hearthstone or teleport spell to the route.
+        TravelNodeRoute route = sTravelNodeMap.getRoute(start, goal, nullptr);
+        std::vector<TravelNode*>& nodes = route.getNodes();
+        if (nodes.size() < 2)
+            return -1.0f;
+        for (size_t i = 0; i + 1 < nodes.size(); ++i)
+        {
+            if (!nodes[i]->hasLinkTo(nodes[i + 1]))
+                return -1.0f;
+            length += nodes[i]->linkDistanceTo(nodes[i + 1]);
+        }
+        return length;
+    }
+
+    // The counter of the kind nearest the character among those of its faction: the shortest route on the travel map,
+    // or with no route to any, the nearest on its map, then the nearest by way of the map transfers. -1 for none.
+    // Called once the counters are indexed.
+    int NearestCounter(Player* bot, bool emissary)
+    {
+        FactionTemplateEntry const* own = bot->GetFactionTemplateEntry();
+        if (!own)
+            return -1;
+        const WorldPosition from(bot);
+        int best = -1;
+        std::pair<int, float> bestKey(2, FLT_MAX);
+        for (size_t i = 0; i < counters.size(); ++i)
+        {
+            Counter const& c = counters[i];
+            if (c.emissary != emissary)
+                continue;
+            FactionTemplateEntry const* theirs = sFactionTemplateStore.LookupEntry(c.faction);
+            if (!theirs || !theirs->IsFriendlyTo(*own) || theirs->IsHostileTo(*own))
+                continue;
+            const float route = RouteLength(from, c.pos);
+            const float straight = from.getMapId() == c.pos.getMapId() ? from.distance(c.pos) : sTravelMgr.MapTransDistance(from, c.pos);
+            const std::pair<int, float> key = route >= 0.0f ? std::make_pair(0, route) : std::make_pair(1, straight);
+            if (best < 0 || key < bestKey)
+            {
+                best = int(i);
+                bestKey = key;
+            }
+        }
+        return best;
+    }
+
+    bool InReach(Player* bot, const WorldPosition& counter)
+    {
+        return bot->GetMapId() == counter.getMapId() && WorldPosition(bot).distance(counter) <= COUNTER_REACH;
+    }
+
+    void EndTrip(uint32 guid)
+    {
+        std::lock_guard<std::mutex> guard(counterLock);
+        trips.erase(guid);
+    }
 
     // The value of key=value in a job's arguments, or empty.
     std::string Arg(const std::string& args, const std::string& key)
@@ -184,10 +374,48 @@ GuildJobs::Update GuildJobs::Tick(Player* bot, const std::string& job, const std
     }
 
     if (job == "pay")
-        return Pay(bot, args, p);
+    {
+        Update u = Pay(bot, args, p);
+        if (u.status != "working")
+            EndTrip(bot->GetGUIDLow());
+        return u;
+    }
+    EndTrip(bot->GetGUIDLow());
     if (job == "reset")
         return Reset(bot, args);
     return Craft(bot, args, p);
+}
+
+bool GuildJobs::PaysAtCounter(const std::string& job, const std::string& args)
+{
+    if (job != "pay")
+        return false;
+    const std::string at = Arg(args, "at");
+    return at == "guild_master" || at == "emissary";
+}
+
+bool GuildJobs::ShouldTravel(Player* bot)
+{
+    if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported() || sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) != "pay")
+        return false;
+    WorldPosition counter;
+    {
+        std::lock_guard<std::mutex> guard(counterLock);
+        auto it = trips.find(bot->GetGUIDLow());
+        if (it == trips.end())
+            return false;
+        counter = counters[it->second].pos;
+    }
+    return !InReach(bot, counter);
+}
+
+TravelDestination* GuildJobs::Destination(Player* bot)
+{
+    if (!bot)
+        return nullptr;
+    std::lock_guard<std::mutex> guard(counterLock);
+    auto it = trips.find(bot->GetGUIDLow());
+    return it == trips.end() ? nullptr : counters[it->second].place.get();
 }
 
 GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress& p)
@@ -228,6 +456,9 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
     }
     if (!gold && items.empty())
         return fail(usage);
+    const std::string at = Arg(args, "at");
+    if (!at.empty() && at != "guild_master" && at != "emissary")
+        return fail("pay: at must be guild_master or emissary");
 
     std::ostringstream paid;
     paid << "ref=" << ref;
@@ -256,11 +487,44 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
         }
     }
 
+    // At a counter: the nearest of its faction, chosen once per order, which travel takes it to.
+    WorldPosition counter;
+    std::string where;
+    if (!at.empty())
+    {
+        int chosen = -1;
+        {
+            std::lock_guard<std::mutex> guard(counterLock);
+            IndexCounters();
+            auto it = trips.find(bot->GetGUIDLow());
+            if (it != trips.end())
+                chosen = int(it->second);
+        }
+        if (chosen < 0)
+        {
+            // The counters do not change once indexed, so the routes are measured without the lock,
+            // which the travel values of characters on other maps take meanwhile.
+            chosen = NearestCounter(bot, at == "emissary");
+            if (chosen < 0)
+                return fail(at == "emissary" ? "no emissary known for its faction" : "no Guild Master known for its faction");
+            std::lock_guard<std::mutex> guard(counterLock);
+            trips[bot->GetGUIDLow()] = size_t(chosen);
+        }
+        counter = counters[chosen].pos;
+        where = counters[chosen].where;
+    }
+
+    const time_t now = time(nullptr);
     u.reason = NotReady(bot);
     if (!u.reason.empty())
+    {
+        // Waiting is no lack of progress towards the counter: the clock starts again once it can move.
+        p.nearestAt = 0;
         return u;
+    }
 
     // All or nothing: every check first, then everything taken at once.
+    // The checks come before the way to a counter too, so it does not set out for a payment it cannot make.
     if (bot->GetMoney() < gold)
         return fail("has " + Money(bot->GetMoney()) + ", needs " + Money(uint32(gold)));
     for (auto const& [entry, count] : items)
@@ -268,6 +532,29 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
         uint32 have = CountInBags(bot, entry);
         if (have < count)
             return fail("has " + std::to_string(have) + " of " + std::to_string(count) + " " + ItemName(entry));
+    }
+
+    if (!at.empty() && !InReach(bot, counter))
+    {
+        // Progress is coming 10 yards nearer on the counter's map, or moving on to another map.
+        const float distance = bot->GetMapId() == counter.getMapId() ? WorldPosition(bot).distance(counter) : FLT_MAX;
+        if (!p.nearestAt || bot->GetMapId() != p.nearestMap || (distance < FLT_MAX && distance + COUNTER_PROGRESS <= p.nearest))
+        {
+            p.nearest = distance;
+            p.nearestMap = bot->GetMapId();
+            p.nearestAt = now;
+        }
+        else if (now - p.nearestAt >= COUNTER_STALL)
+        {
+            std::string stall = "could not reach " + where + ": ";
+            if (distance < FLT_MAX)
+                stall += "came no nearer than " + std::to_string(uint32(p.nearest)) + " yards in " + std::to_string(COUNTER_STALL / MINUTE) + " minutes";
+            else
+                stall += "did not reach its map in " + std::to_string(COUNTER_STALL / MINUTE) + " minutes";
+            return fail(stall);
+        }
+        u.reason = "on its way to " + where;
+        return u;
     }
 
     if (gold)
@@ -281,7 +568,7 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
     for (auto const& [entry, count] : items)
         what += (what.empty() ? "" : ", ") + std::to_string(count) + " " + ItemName(entry);
     u.status = "done";
-    u.reason = "paid " + what + " (ref " + refArg + ")";
+    u.reason = "paid " + what + " (ref " + refArg + ")" + (where.empty() ? "" : " to " + where);
     u.events.push_back({ "paid", paid.str() });
     return u;
 }

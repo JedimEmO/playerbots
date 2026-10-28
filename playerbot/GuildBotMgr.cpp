@@ -997,6 +997,15 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
         return;
     }
 
+    if (auto it = characters.find(player->GetGUIDLow()); it != characters.end() && GuildJobs::PaysAtCounter(job, it->second.jobArgs))
+    {
+        // Pay at a counter: a forced travel target, the travel named "guild job", takes it to the Guild Master or
+        // the emissary its order names, and it pays there. No rpg and no free: it makes no trips to sell or repair
+        // on the way, which could spend the gold it carries to the counter.
+        engine->addStrategies("collision", "travel", "guild level", NULL);
+        return;
+    }
+
     // idle, and GuildJobs' pay, reset and craft: stand where it is.
     engine->addStrategy("stay");
 }
