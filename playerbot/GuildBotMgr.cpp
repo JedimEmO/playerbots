@@ -9,6 +9,8 @@
 #include "playerbot/strategy/actions/ChangeTalentsAction.h"
 #include "playerbot/Talentspec.h"
 #include "playerbot/TravelMgr.h"
+#include "playerbot/TravelNode.h"
+#include "playerbot/strategy/values/LastMovementValue.h"
 #include "playerbot/strategy/values/PossibleAttackTargetsValue.h"
 #include "Accounts/AccountMgr.h"
 #include "Entities/Pet.h"
@@ -73,6 +75,8 @@ namespace
     constexpr time_t UNREACHABLE_AGAIN_SECONDS = HOUR;
     constexpr time_t UNREACHABLE_WINDOW_SECONDS = 10 * MINUTE;
     constexpr size_t UNREACHABLE_SPOTS_STUCK = 3;
+    // A stuck character walks to the nearest travel node within this range.
+    constexpr float STUCK_NODE_RANGE = 300.0f;
     // In the AI's combat state this long with nothing to attack and nothing under crowd control, the fight is empty.
     constexpr time_t EMPTY_FIGHT_SECONDS = 20;
     // A dungeon leader outside that leaves this many such fights this close together goes straight to its stone,
@@ -600,9 +604,25 @@ void GuildBotMgr::CheckUnreachable(Character& c, Player* bot)
     auto it = left.find(entry);
     if (it != left.end() && it->second > now)
         return;
+    std::string spot = std::to_string(entry);
+    if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry))
+        spot = info->Name;
 
-    // Moves to several spots failing close together say the character is stuck, not that the spots are out of reach:
-    // Afortdru in Feralas set 27 spots aside in six minutes. The stall recovery sees to a stuck character.
+    // No route the travel map knows for this character: the spot is out of its reach as things stand, and its failed
+    // moves are no sign of being stuck. Dustwallow from Gadgetzan without the Great Lift is such a spot; Afortmage
+    // picked one after another all hour in experiment 16. Set aside at once, without strikes.
+    WorldPosition* target = travel->GetPosition();
+    if (target && sTravelNodeMap.getFullPath(WorldPosition(bot), *target, bot).empty())
+    {
+        left[entry] = now + LEAVE_DESTINATION_SECONDS;
+        travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
+        Event(c.guid, "left_spot", spot + ": no route there");
+        return;
+    }
+
+    // Moves along known routes to several spots failing close together say the character is stuck where it stands:
+    // Afortdru in Feralas set 27 spots aside in six minutes. It forgets its path and walks to the nearest travel node,
+    // where the routes start, before it chooses again.
     auto& times = c.unreachableTimes;
     times.erase(std::remove_if(times.begin(), times.end(), [&](time_t t) { return now - t > UNREACHABLE_WINDOW_SECONDS; }), times.end());
     times.push_back(now);
@@ -611,7 +631,21 @@ void GuildBotMgr::CheckUnreachable(Character& c, Player* bot)
         if (now - c.stuckNotedAt > UNREACHABLE_WINDOW_SECONDS)
         {
             c.stuckNotedAt = now;
-            Event(c.guid, "recovery", "no way from here");
+            times.clear();
+            ai->GetAiObjectContext()->GetValue<ai::LastMovement&>("last movement")->Get().clear();
+            ai->StopMoving();
+            bot->GetMotionMaster()->Clear();
+            std::string where = "no way from here";
+            // Never a move for a character on its way to another map: the path build asserts without one.
+            TravelNode* node = bot->IsInWorld() && !bot->IsBeingTeleported() ? sTravelNodeMap.getNode(WorldPosition(bot), nullptr, STUCK_NODE_RANGE) : nullptr;
+            if (node && node->getPosition()->getMapId() == bot->GetMapId())
+            {
+                WorldPosition* at = node->getPosition();
+                bot->GetMotionMaster()->MovePoint(0, at->getX(), at->getY(), at->getZ(), FORCED_MOVEMENT_RUN);
+                where += ", to " + node->getName();
+            }
+            travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
+            Event(c.guid, "recovery", where);
         }
         return;
     }
@@ -625,9 +659,6 @@ void GuildBotMgr::CheckUnreachable(Character& c, Player* bot)
 
     left[entry] = now + LEAVE_DESTINATION_SECONDS;
     travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
-    std::string spot = std::to_string(entry);
-    if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry))
-        spot = info->Name;
     Event(c.guid, "left_spot", spot + ": no way there");
 }
 
