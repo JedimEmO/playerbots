@@ -55,7 +55,7 @@ public:
     bool GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) const;
     // The dungeon the character's order names: its own, leading a party, or its leader's, in one. Empty for none.
     std::string GetDungeonOrder(uint32 guid) const;
-    // True for the item the character's job is collecting, which it must keep.
+    // True for the item the character's job is collecting, or a kit or deposit order names, which it must keep.
     bool IsJobItem(uint32 guid, uint32 itemId) const;
     // Whether the character may learn from a profession trainer for this skill: always for a bot that is not a
     // guild character; for one, only ranks of a profession it has, or the profession its learn job names.

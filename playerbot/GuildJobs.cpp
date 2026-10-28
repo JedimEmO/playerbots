@@ -10,13 +10,24 @@
 #include "Grids/GridNotifiersImpl.h"
 #include "Grids/CellImpl.h"
 
+// The guild vault is the core's, on its competition branch until it is merged. Without it, kit buys from vendors only
+// and deposit fails.
+#if __has_include("Guilds/GuildVault.h")
+#include "Guilds/GuildVault.h"
+#define GUILD_JOBS_VAULT 1
+#else
+#define GUILD_JOBS_VAULT 0
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 using namespace ai;
 
@@ -29,7 +40,10 @@ namespace
 
     // The emissary of the Bronze Flight, who stands beside each capital's Guild Master.
     constexpr uint32 EMISSARY_ENTRY = 200100;
-    // An emissary spawn this near a Guild Master is that city's.
+    // The Steamwheedle Vaultkeeper, who keeps the guild's vault beside each capital's Guild Master;
+    // GuildVault::VAULTKEEPER_ENTRY, here for a core without the vault too.
+    constexpr uint32 VAULTKEEPER_ENTRY = 200101;
+    // An emissary or vaultkeeper spawn this near a Guild Master is that city's.
     constexpr float EMISSARY_NEAR = 40.0f;
     // Talking range: a character this near its counter pays. A little more than the 5 yards travel counts as
     // arrived, since it walks to a point up to 5 yards from the counter's spawn.
@@ -39,12 +53,30 @@ namespace
     constexpr float COUNTER_PROGRESS = 10.0f;
     constexpr time_t COUNTER_STALL = 20 * MINUTE;
 
-    // A place a pay order is handed in at: a capital's Guild Master, or the emissary beside one.
+    // kit buys from vendors this near it, on its map: in practice the capital it kitted from the vault in.
+    constexpr float VENDOR_RANGE = 400.0f;
+    // A vendor with this many creatures hostile to the character within 30 yards stands in a hostile camp, as the
+    // Defias Profiteer in Moonbrook does, and is not gone to (docs/lessons.md).
+    constexpr float VENDOR_CAMP_RADIUS = 30.0f;
+    constexpr uint32 VENDOR_CAMP_HOSTILES = 3;
+    // A vendor it comes no 10 yards nearer to in 5 minutes is given up, and so is one it cannot step up to and
+    // trade with in six checks, about half a minute.
+    constexpr time_t VENDOR_STALL = 5 * MINUTE;
+    constexpr uint32 VENDOR_APPROACHES = 6;
+    // At most this many vendors on one kit order.
+    constexpr size_t KIT_MAX_VENDORS = 6;
+    // At most this many of an item on a pay, kit or deposit order.
+    constexpr uint64 ORDER_MAX_COUNT = 10000;
+
+    enum class CounterKind : uint8 { GuildMaster, Emissary, Vaultkeeper };
+
+    // A place a pay order is handed in at, or the vault is reached from: a capital's Guild Master,
+    // or the emissary or the vaultkeeper beside one.
     struct Counter
     {
-        bool emissary = false;
+        CounterKind kind = CounterKind::GuildMaster;
         uint32 entry = 0;            // the creature
-        uint32 spawn = 0;            // its spawn, 0 for an emissary's place taken from its Guild Master's
+        uint32 spawn = 0;            // its spawn, 0 for a place taken from its Guild Master's
         uint32 faction = 0;          // the Guild Master's faction template: whom the counter serves
         WorldPosition pos;
         std::string where;           // "the Guild Master in Ironforge"
@@ -55,8 +87,36 @@ namespace
     std::mutex counterLock;
     bool countersIndexed = false;
     std::vector<Counter> counters;
-    // The counter each character's pay order goes to, by character.
-    std::map<uint32, size_t> trips;
+
+    // Where a character's order goes now: a counter or a vendor, by character. Read by the travel values off the
+    // world thread, so under counterLock.
+    struct Trip
+    {
+        WorldPosition pos;
+        TravelDestination* place = nullptr;
+        std::string where;
+    };
+    std::map<uint32, Trip> trips;
+
+    // A vendor spawn kit may buy from, on a continent, with what it sells.
+    struct Vendor
+    {
+        uint32 entry = 0;
+        uint32 faction = 0;
+        WorldPosition pos;
+        std::string name;
+        uint32 hostileToAlliance = 0;   // creatures within VENDOR_CAMP_RADIUS hostile to each team
+        uint32 hostileToHorde = 0;
+        std::unique_ptr<PlaceTravelDestination> place;   // made when first gone to
+    };
+
+    // Indexed once at the first kit order and used on the world thread only, where the jobs run.
+    bool vendorsIndexed = false;
+    std::vector<Vendor> vendors;
+    std::map<uint32, std::vector<size_t>> vendorsOf;    // by item sold
+
+    // The stages of a kit order.
+    enum KitStage : uint8 { KIT_PLAN = 0, KIT_VAULT, KIT_VENDORS };
 
     // The capitals' Guild Masters, by entry, for their city's name.
     std::string CityOf(uint32 entry, CreatureData const& data)
@@ -84,8 +144,8 @@ namespace
             return;
         countersIndexed = true;
 
-        // Guild Masters, the creatures with the guild charter flag, and the emissaries, spawned on a continent.
-        std::vector<std::pair<uint32, CreatureData>> masters, emissaries;
+        // Guild Masters, the creatures with the guild charter flag, and the emissaries and vaultkeepers, spawned on a continent.
+        std::vector<std::pair<uint32, CreatureData>> masters, emissaries, vaultkeepers;
         auto index = [&](auto const& pair)
         {
             CreatureData const& data = pair.second;
@@ -94,6 +154,8 @@ namespace
                 return false;
             if (data.id == EMISSARY_ENTRY)
                 emissaries.push_back({ pair.first, data });
+            else if (data.id == VAULTKEEPER_ENTRY)
+                vaultkeepers.push_back({ pair.first, data });
             else if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(data.id); info && (info->NpcFlags & UNIT_NPC_FLAG_PETITIONER))
                 masters.push_back({ pair.first, data });
             return false;
@@ -107,6 +169,7 @@ namespace
             const WorldPosition at(data.mapid, data.posX, data.posY, data.posZ, data.orientation);
 
             Counter master;
+            master.kind = CounterKind::GuildMaster;
             master.entry = data.id;
             master.spawn = guid;
             master.faction = info->Faction;
@@ -115,29 +178,34 @@ namespace
             master.place = std::make_unique<PlaceTravelDestination>(at, master.where);
             counters.push_back(std::move(master));
 
-            // The emissary nearest this Guild Master, or, until it is spawned, the Guild Master's own spot.
-            Counter emissary;
-            emissary.emissary = true;
-            emissary.entry = EMISSARY_ENTRY;
-            emissary.faction = info->Faction;
-            emissary.pos = at;
-            float best = EMISSARY_NEAR;
-            for (auto const& [emissaryGuid, spawn] : emissaries)
+            // The emissary and the vaultkeeper nearest this Guild Master, or, until one is spawned, the Guild Master's own spot.
+            auto beside = [&](CounterKind kind, uint32 entry, std::vector<std::pair<uint32, CreatureData>> const& spawns, const std::string& where)
             {
-                const WorldPosition there(spawn.mapid, spawn.posX, spawn.posY, spawn.posZ, spawn.orientation);
-                if (there.getMapId() == at.getMapId() && there.distance(at) <= best)
+                Counter c;
+                c.kind = kind;
+                c.entry = entry;
+                c.faction = info->Faction;
+                c.pos = at;
+                float best = EMISSARY_NEAR;
+                for (auto const& [spawnGuid, spawn] : spawns)
                 {
-                    best = there.distance(at);
-                    emissary.spawn = emissaryGuid;
-                    emissary.pos = there;
+                    const WorldPosition there(spawn.mapid, spawn.posX, spawn.posY, spawn.posZ, spawn.orientation);
+                    if (there.getMapId() == at.getMapId() && there.distance(at) <= best)
+                    {
+                        best = there.distance(at);
+                        c.spawn = spawnGuid;
+                        c.pos = there;
+                    }
                 }
-            }
-            emissary.where = std::string("the emissary of the Bronze Flight") + (city.empty() ? "" : " in " + city);
-            emissary.place = std::make_unique<PlaceTravelDestination>(emissary.pos, emissary.where);
-            counters.push_back(std::move(emissary));
+                c.where = where + (city.empty() ? "" : " in " + city);
+                c.place = std::make_unique<PlaceTravelDestination>(c.pos, c.where);
+                counters.push_back(std::move(c));
+            };
+            beside(CounterKind::Emissary, EMISSARY_ENTRY, emissaries, "the emissary of the Bronze Flight");
+            beside(CounterKind::Vaultkeeper, VAULTKEEPER_ENTRY, vaultkeepers, "the vaultkeeper");
         }
-        sLog.outString("GuildJobs: %u Guild Masters and %u emissary spawns for pay counters",
-            uint32(masters.size()), uint32(emissaries.size()));
+        sLog.outString("GuildJobs: %u Guild Masters, %u emissary and %u vaultkeeper spawns for counters",
+            uint32(masters.size()), uint32(emissaries.size()), uint32(vaultkeepers.size()));
     }
 
     // The length of the travel map's route between two places, or -1 for none; as the dungeon job measures it.
@@ -170,7 +238,7 @@ namespace
     // The counter of the kind nearest the character among those of its faction: the shortest route on the travel map,
     // or with no route to any, the nearest on its map, then the nearest by way of the map transfers. -1 for none.
     // Called once the counters are indexed.
-    int NearestCounter(Player* bot, bool emissary)
+    int NearestCounter(Player* bot, CounterKind kind)
     {
         FactionTemplateEntry const* own = bot->GetFactionTemplateEntry();
         if (!own)
@@ -181,7 +249,7 @@ namespace
         for (size_t i = 0; i < counters.size(); ++i)
         {
             Counter const& c = counters[i];
-            if (c.emissary != emissary)
+            if (c.kind != kind)
                 continue;
             FactionTemplateEntry const* theirs = sFactionTemplateStore.LookupEntry(c.faction);
             if (!theirs || !theirs->IsFriendlyTo(*own) || theirs->IsHostileTo(*own))
@@ -207,6 +275,39 @@ namespace
     {
         std::lock_guard<std::mutex> guard(counterLock);
         trips.erase(guid);
+    }
+
+    void StartTrip(uint32 guid, const WorldPosition& pos, TravelDestination* place, const std::string& where)
+    {
+        std::lock_guard<std::mutex> guard(counterLock);
+        trips[guid] = Trip{ pos, place, where };
+    }
+
+    // The trip a character's order is on, if any.
+    bool CurrentTrip(uint32 guid, Trip& out)
+    {
+        std::lock_guard<std::mutex> guard(counterLock);
+        auto it = trips.find(guid);
+        if (it == trips.end())
+            return false;
+        out = it->second;
+        return true;
+    }
+
+    // The counter of the kind nearest the character, as a trip; false when its faction has none.
+    bool CounterTrip(Player* bot, CounterKind kind, Trip& out)
+    {
+        {
+            std::lock_guard<std::mutex> guard(counterLock);
+            IndexCounters();
+        }
+        // The counters do not change once indexed, so the routes are measured without the lock,
+        // which the travel values of characters on other maps take meanwhile.
+        const int chosen = NearestCounter(bot, kind);
+        if (chosen < 0)
+            return false;
+        out = Trip{ counters[chosen].pos, counters[chosen].place.get(), counters[chosen].where };
+        return true;
     }
 
     // The value of key=value in a job's arguments, or empty.
@@ -251,15 +352,15 @@ namespace
         return proto ? proto->Name1 : "item " + std::to_string(entry);
     }
 
-    // How many of the item are in its backpack, keyring and bags, not equipped, not in a bag slot and not in a trade:
-    // the ones Player::DestroyItemCount takes before it reaches the equipment.
-    uint32 CountInBags(Player* bot, uint32 entry)
+    // The stacks of the item in its backpack, keyring and bags, not equipped, not in a bag slot and not in a trade:
+    // the ones Player::DestroyItemCount takes before it reaches the equipment, and the ones the vault takes.
+    std::vector<Item*> StacksInBags(Player* bot, uint32 entry)
     {
-        uint32 count = 0;
+        std::vector<Item*> stacks;
         auto add = [&](Item* item)
         {
             if (item && item->GetEntry() == entry && !item->IsInTrade())
-                count += item->GetCount();
+                stacks.push_back(item);
         };
         for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
             add(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
@@ -269,7 +370,330 @@ namespace
             if (Bag* bag = dynamic_cast<Bag*>(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot)))
                 for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
                     add(bag->GetItemByPos(uint8(slot)));
+        return stacks;
+    }
+
+    // How many of the item those stacks hold.
+    uint32 CountInBags(Player* bot, uint32 entry)
+    {
+        uint32 count = 0;
+        for (Item* item : StacksInBags(bot, entry))
+            count += item->GetCount();
         return count;
+    }
+
+    // <entry>:<count>,... into out, in the order given, each entry once: the counts of an entry given twice add up,
+    // and with allowAll a count of 0, all the character carries, stays 0. Empty when it parsed, else what is wrong.
+    std::string ParseItems(const std::string& text, const std::string& job, bool allowAll, std::vector<std::pair<uint32, uint32>>& out)
+    {
+        std::istringstream in(text);
+        std::string part;
+        while (std::getline(in, part, ','))
+        {
+            size_t colon = part.find(':');
+            uint64 entry = 0, count = 0;
+            if (colon == std::string::npos || !ParseNumber(part.substr(0, colon), entry) || !ParseNumber(part.substr(colon + 1), count) ||
+                (!count && !allowAll) || count > ORDER_MAX_COUNT)
+                return job + ": items must be <entry>:<count>,<entry>:<count>";
+            if (!sObjectMgr.GetItemPrototype(uint32(entry)))
+                return job + ": no item " + std::to_string(entry);
+            auto it = std::find_if(out.begin(), out.end(), [entry](auto const& i) { return i.first == entry; });
+            if (it == out.end())
+                out.push_back({ uint32(entry), uint32(count) });
+            else
+                it->second = it->second && count ? it->second + uint32(count) : 0;
+        }
+        return out.empty() ? job + ": items must be <entry>:<count>,<entry>:<count>" : "";
+    }
+
+    // Whether an items= list names the entry, without checking the rest of it.
+    bool ListsItem(const std::string& text, uint32 entry)
+    {
+        std::istringstream in(text);
+        std::string part;
+        while (std::getline(in, part, ','))
+        {
+            uint64 listed = 0;
+            if (ParseNumber(part.substr(0, part.find(':')), listed) && listed == entry)
+                return true;
+        }
+        return false;
+    }
+
+    // What it lacks of each item to have the count in its bags, in the order given.
+    std::vector<std::pair<uint32, uint32>> Lacking(Player* bot, std::vector<std::pair<uint32, uint32>> const& items)
+    {
+        std::vector<std::pair<uint32, uint32>> lacking;
+        for (auto const& [entry, count] : items)
+        {
+            const uint32 have = CountInBags(bot, entry);
+            if (have < count)
+                lacking.push_back({ entry, count - have });
+        }
+        return lacking;
+    }
+
+    // Room in its bags for one of anything it lacks.
+    bool RoomForAny(Player* bot, std::vector<std::pair<uint32, uint32>> const& lacking)
+    {
+        for (auto const& [entry, count] : lacking)
+        {
+            ItemPosCountVec dest;
+            if (bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry, 1) == EQUIP_ERR_OK)
+                return true;
+        }
+        return false;
+    }
+
+    // Items for a reason: "4 Major Mana Potion, 10 Sacred Candle".
+    template<class List>
+    std::string Names(List const& items)
+    {
+        std::string out;
+        for (auto const& [entry, count] : items)
+            out += (out.empty() ? "" : ", ") + std::to_string(count) + " " + ItemName(entry);
+        return out;
+    }
+
+    // Items for an event's detail: "13444:4,17029:10".
+    template<class List>
+    std::string Entries(List const& items)
+    {
+        std::string out;
+        for (auto const& [entry, count] : items)
+            out += (out.empty() ? "" : ",") + std::to_string(entry) + ":" + std::to_string(count);
+        return out;
+    }
+
+    // On the way to a place, at a check while it can move: true once it has come no COUNTER_PROGRESS yards nearer
+    // in `stall`, with why, such as "came no nearer than 340 yards in 20 minutes". Coming 10 yards nearer on the
+    // place's map, or moving on to another map, is progress. nearestAt 0 starts the clock again.
+    bool Stalled(Player* bot, const WorldPosition& to, time_t stall, float& nearest, uint32& nearestMap, time_t& nearestAt, std::string& why)
+    {
+        const time_t now = time(nullptr);
+        const float distance = bot->GetMapId() == to.getMapId() ? WorldPosition(bot).distance(to) : FLT_MAX;
+        if (!nearestAt || bot->GetMapId() != nearestMap || (distance < FLT_MAX && distance + COUNTER_PROGRESS <= nearest))
+        {
+            nearest = distance;
+            nearestMap = bot->GetMapId();
+            nearestAt = now;
+            return false;
+        }
+        if (now - nearestAt < stall)
+            return false;
+        if (distance < FLT_MAX)
+            why = "came no nearer than " + std::to_string(uint32(nearest)) + " yards in " + std::to_string(stall / MINUTE) + " minutes";
+        else
+            why = "did not reach its map in " + std::to_string(stall / MINUTE) + " minutes";
+        return true;
+    }
+
+    // The vendors on a continent with anything for sale, from the world database's spawns and vendor lists,
+    // and how many creatures hostile to each team stand around each.
+    void IndexVendors()
+    {
+        if (vendorsIndexed)
+            return;
+        vendorsIndexed = true;
+
+        auto onContinent = [](CreatureData const& data)
+        {
+            MapEntry const* map = sMapStore.LookupEntry(data.mapid);
+            return map && map->IsContinent() && !data.gameEvent;
+        };
+        auto at = [](CreatureData const& data) { return WorldPosition(data.mapid, data.posX, data.posY, data.posZ, data.orientation); };
+
+        // What each vendor entry sells: its own list and its vendor template's.
+        std::map<uint32, std::set<uint32>> soldBy;
+        auto sells = [](CreatureInfo const* info, std::set<uint32>& items)
+        {
+            auto add = [&items](VendorItemData const* list)
+            {
+                if (list)
+                    for (VendorItem const* sold : list->m_items)
+                        if (sold && sObjectMgr.GetItemPrototype(sold->item))
+                            items.insert(sold->item);
+            };
+            add(sObjectMgr.GetNpcVendorItemList(info->Entry));
+            if (info->VendorTemplateId)
+                add(sObjectMgr.GetNpcVendorTemplateItemList(info->VendorTemplateId));
+        };
+        auto index = [&](auto const& pair)
+        {
+            CreatureData const& data = pair.second;
+            if (!onContinent(data))
+                return false;
+            CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(data.id);
+            if (!info || !(info->NpcFlags & UNIT_NPC_FLAG_VENDOR))
+                return false;
+            auto [sold, fresh] = soldBy.try_emplace(data.id);
+            if (fresh)
+                sells(info, sold->second);
+            if (sold->second.empty())
+                return false;
+            Vendor v;
+            v.entry = data.id;
+            v.faction = info->Faction;
+            v.pos = at(data);
+            v.name = info->Name;
+            for (uint32 item : sold->second)
+                vendorsOf[item].push_back(vendors.size());
+            vendors.push_back(std::move(v));
+            return false;
+        };
+        sObjectMgr.DoCreatureData(index);
+
+        // The hostile creatures around each vendor, by a grid of cells the camp radius wide.
+        typedef std::tuple<uint32, int32, int32> GridCell;
+        auto cellOf = [](const WorldPosition& pos, int32 dx, int32 dy)
+        {
+            return GridCell(pos.getMapId(), int32(std::floor(pos.getX() / VENDOR_CAMP_RADIUS)) + dx, int32(std::floor(pos.getY() / VENDOR_CAMP_RADIUS)) + dy);
+        };
+        std::map<GridCell, std::vector<size_t>> cells;
+        for (size_t i = 0; i < vendors.size(); ++i)
+            cells[cellOf(vendors[i].pos, 0, 0)].push_back(i);
+        FactionTemplateEntry const* alliance = sFactionTemplateStore.LookupEntry(1);   // a human's
+        FactionTemplateEntry const* horde = sFactionTemplateStore.LookupEntry(2);      // an orc's
+        std::map<uint32, std::pair<bool, bool>> hostility;                              // by faction template
+        auto camps = [&](auto const& pair)
+        {
+            CreatureData const& data = pair.second;
+            if (!onContinent(data))
+                return false;
+            CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(data.id);
+            if (!info)
+                return false;
+            auto [hostile, fresh] = hostility.try_emplace(info->Faction);
+            if (fresh)
+            {
+                FactionTemplateEntry const* theirs = sFactionTemplateStore.LookupEntry(info->Faction);
+                hostile->second = { theirs && alliance && theirs->IsHostileTo(*alliance), theirs && horde && theirs->IsHostileTo(*horde) };
+            }
+            if (!hostile->second.first && !hostile->second.second)
+                return false;
+            const WorldPosition pos = at(data);
+            for (int32 dx = -1; dx <= 1; ++dx)
+                for (int32 dy = -1; dy <= 1; ++dy)
+                    if (auto near = cells.find(cellOf(pos, dx, dy)); near != cells.end())
+                        for (size_t i : near->second)
+                            if (vendors[i].pos.distance(pos) <= VENDOR_CAMP_RADIUS)
+                            {
+                                vendors[i].hostileToAlliance += hostile->second.first ? 1 : 0;
+                                vendors[i].hostileToHorde += hostile->second.second ? 1 : 0;
+                            }
+            return false;
+        };
+        sObjectMgr.DoCreatureData(camps);
+
+        sLog.outString("GuildJobs: %u vendor spawns selling %u items for kit orders", uint32(vendors.size()), uint32(vendorsOf.size()));
+    }
+
+    bool Sells(size_t vendor, uint32 entry)
+    {
+        auto it = vendorsOf.find(entry);
+        return it != vendorsOf.end() && std::find(it->second.begin(), it->second.end(), vendor) != it->second.end();
+    }
+
+    // The nearest vendor on the character's map, within VENDOR_RANGE, of a faction friendly to it and not in a hostile
+    // camp, that sells something it lacks for no more than its gold, passing over those it visited; -1 for none.
+    // sells is the first such item; noGold is true when there is such a vendor, but only for more than its gold.
+    int NearestVendor(Player* bot, std::vector<std::pair<uint32, uint32>> const& lacking, std::set<int> const& visited, uint32& sells, bool& noGold)
+    {
+        noGold = false;
+        FactionTemplateEntry const* own = bot->GetFactionTemplateEntry();
+        if (!own)
+            return -1;
+        const WorldPosition from(bot);
+        const bool alliance = bot->GetTeam() == ALLIANCE;
+        int best = -1;
+        float bestDistance = VENDOR_RANGE;
+        for (auto const& [entry, count] : lacking)
+        {
+            auto it = vendorsOf.find(entry);
+            ItemPrototype const* proto = sObjectMgr.GetItemPrototype(entry);
+            if (it == vendorsOf.end() || !proto)
+                continue;
+            for (size_t i : it->second)
+            {
+                Vendor const& v = vendors[i];
+                if (visited.count(int(i)) || v.pos.getMapId() != from.getMapId() || v.pos.distance(from) > bestDistance)
+                    continue;
+                FactionTemplateEntry const* theirs = sFactionTemplateStore.LookupEntry(v.faction);
+                if (!theirs || !theirs->IsFriendlyTo(*own) || theirs->IsHostileTo(*own))
+                    continue;
+                if ((alliance ? v.hostileToAlliance : v.hostileToHorde) >= VENDOR_CAMP_HOSTILES)
+                    continue;
+                if (proto->BuyPrice > bot->GetMoney())
+                {
+                    noGold = true;
+                    continue;
+                }
+                best = int(i);
+                bestDistance = v.pos.distance(from);
+                sells = entry;
+            }
+        }
+        if (best >= 0)
+            noGold = false;
+        return best;
+    }
+
+    // The live vendor of the entry nearest the character, within a little more than its spawn's reach.
+    Creature* FindVendor(Player* bot, uint32 entry)
+    {
+        Creature* found = nullptr;
+        MaNGOS::NearestCreatureEntryWithLiveStateInObjectRangeCheck check(*bot, entry, true, false, 30.0f);
+        MaNGOS::CreatureLastSearcher<MaNGOS::NearestCreatureEntryWithLiveStateInObjectRangeCheck> searcher(found, check);
+        Cell::VisitGridObjects(bot, searcher, 30.0f);
+        return found;
+    }
+
+    // Buys up to want of the item from the vendor, which it can trade with, as its gold and bags allow, a stack at a
+    // time; how many it got. bagsFull and noGold say what stopped it, if that did; a vendor sold out, or an item
+    // that needs a reputation or a condition it lacks, stops it too.
+    uint32 BuyFrom(Player* bot, Creature* vendor, uint32 entry, uint32 want, uint32& spent, bool& bagsFull, bool& noGold)
+    {
+        ItemPrototype const* proto = sObjectMgr.GetItemPrototype(entry);
+        if (!proto)
+            return 0;
+        const uint32 perBuy = std::max<uint32>(1, proto->BuyCount);
+        const uint32 buysPerStack = std::min<uint32>(255, std::max<uint32>(1, proto->GetMaxStackSize() / perBuy));
+        const float discount = bot->GetReputationPriceDiscount(vendor);
+        uint32 got = 0;
+        while (got < want)
+        {
+            uint32 buys = std::min<uint32>((want - got + perBuy - 1) / perBuy, buysPerStack);
+            ItemPosCountVec dest;
+            InventoryResult room = bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry, buys * perBuy);
+            while (room != EQUIP_ERR_OK && buys > 1)
+            {
+                buys /= 2;
+                dest.clear();
+                room = bot->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry, buys * perBuy);
+            }
+            if (room != EQUIP_ERR_OK)
+            {
+                bagsFull = bagsFull || room != EQUIP_ERR_CANT_CARRY_MORE_OF_THIS;
+                break;
+            }
+            const uint32 each = uint32(std::floor(proto->BuyPrice * discount));
+            if (each && bot->GetMoney() < uint64(each) * buys)
+                buys = std::min<uint32>(buys, bot->GetMoney() / each);
+            if (!buys)
+            {
+                noGold = true;
+                break;
+            }
+            const uint32 before = CountInBags(bot, entry);
+            const uint32 money = bot->GetMoney();
+            bot->BuyItemFromVendor(vendor->GetObjectGuid(), entry, uint8(buys), NULL_BAG, NULL_SLOT);
+            const uint32 after = CountInBags(bot, entry);
+            if (after <= before)
+                break;
+            got += after - before;
+            spent += money > bot->GetMoney() ? money - bot->GetMoney() : 0;
+        }
+        return got;
     }
 
     // Why the character cannot act now, or empty: pay and craft wait for it to be alive, settled and out of a fight.
@@ -344,7 +768,7 @@ namespace
 
 bool GuildJobs::IsJob(const std::string& job)
 {
-    return job == "pay" || job == "reset" || job == "craft";
+    return job == "pay" || job == "reset" || job == "craft" || job == "kit" || job == "deposit";
 }
 
 bool GuildJobs::AlwaysKeep(uint32 itemId)
@@ -369,13 +793,15 @@ GuildJobs::Update GuildJobs::Tick(Player* bot, const std::string& job, const std
     Progress& p = progress[bot->GetGUIDLow()];
     if (p.seq != jobSeq)
     {
+        // A new order: whatever place the last one went to is no longer the way.
         p = Progress();
         p.seq = jobSeq;
+        EndTrip(bot->GetGUIDLow());
     }
 
-    if (job == "pay")
+    if (job == "pay" || job == "kit" || job == "deposit")
     {
-        Update u = Pay(bot, args, p);
+        Update u = job == "pay" ? Pay(bot, args, p) : job == "kit" ? Kit(bot, args, p) : Deposit(bot, args, p);
         if (u.status != "working")
             EndTrip(bot->GetGUIDLow());
         return u;
@@ -386,36 +812,36 @@ GuildJobs::Update GuildJobs::Tick(Player* bot, const std::string& job, const std
     return Craft(bot, args, p);
 }
 
-bool GuildJobs::PaysAtCounter(const std::string& job, const std::string& args)
+bool GuildJobs::Travels(const std::string& job, const std::string& args)
 {
+    if (job == "kit" || job == "deposit")
+        return true;
     if (job != "pay")
         return false;
     const std::string at = Arg(args, "at");
     return at == "guild_master" || at == "emissary";
 }
 
+bool GuildJobs::KeepsForJob(const std::string& job, const std::string& args, uint32 itemId)
+{
+    return (job == "kit" || job == "deposit") && ListsItem(Arg(args, "items"), itemId);
+}
+
 bool GuildJobs::ShouldTravel(Player* bot)
 {
-    if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported() || sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) != "pay")
+    if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
         return false;
-    WorldPosition counter;
-    {
-        std::lock_guard<std::mutex> guard(counterLock);
-        auto it = trips.find(bot->GetGUIDLow());
-        if (it == trips.end())
-            return false;
-        counter = counters[it->second].pos;
-    }
-    return !InReach(bot, counter);
+    const std::string job = sGuildBotMgr.GetActiveJob(bot->GetGUIDLow());
+    if (job != "pay" && job != "kit" && job != "deposit")
+        return false;
+    Trip trip;
+    return CurrentTrip(bot->GetGUIDLow(), trip) && !InReach(bot, trip.pos);
 }
 
 TravelDestination* GuildJobs::Destination(Player* bot)
 {
-    if (!bot)
-        return nullptr;
-    std::lock_guard<std::mutex> guard(counterLock);
-    auto it = trips.find(bot->GetGUIDLow());
-    return it == trips.end() ? nullptr : counters[it->second].place.get();
+    Trip trip;
+    return bot && CurrentTrip(bot->GetGUIDLow(), trip) ? trip.place : nullptr;
 }
 
 GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress& p)
@@ -437,22 +863,9 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
     const std::string itemsArg = Arg(args, "items");
     if (!itemsArg.empty())
     {
-        std::istringstream in(itemsArg);
-        std::string part;
-        while (std::getline(in, part, ','))
-        {
-            size_t colon = part.find(':');
-            uint64 entry = 0, count = 0;
-            if (colon == std::string::npos || !ParseNumber(part.substr(0, colon), entry) || !ParseNumber(part.substr(colon + 1), count) || !count || count > 10000)
-                return fail("pay: items must be <entry>:<count>,<entry>:<count>");
-            if (!sObjectMgr.GetItemPrototype(uint32(entry)))
-                return fail("pay: no item " + std::to_string(entry));
-            auto it = std::find_if(items.begin(), items.end(), [entry](auto const& i) { return i.first == entry; });
-            if (it != items.end())
-                it->second += uint32(count);
-            else
-                items.push_back({ uint32(entry), uint32(count) });
-        }
+        const std::string error = ParseItems(itemsArg, "pay", false, items);
+        if (!error.empty())
+            return fail(error);
     }
     if (!gold && items.empty())
         return fail(usage);
@@ -492,29 +905,17 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
     std::string where;
     if (!at.empty())
     {
-        int chosen = -1;
+        Trip trip;
+        if (!CurrentTrip(bot->GetGUIDLow(), trip))
         {
-            std::lock_guard<std::mutex> guard(counterLock);
-            IndexCounters();
-            auto it = trips.find(bot->GetGUIDLow());
-            if (it != trips.end())
-                chosen = int(it->second);
-        }
-        if (chosen < 0)
-        {
-            // The counters do not change once indexed, so the routes are measured without the lock,
-            // which the travel values of characters on other maps take meanwhile.
-            chosen = NearestCounter(bot, at == "emissary");
-            if (chosen < 0)
+            if (!CounterTrip(bot, at == "emissary" ? CounterKind::Emissary : CounterKind::GuildMaster, trip))
                 return fail(at == "emissary" ? "no emissary known for its faction" : "no Guild Master known for its faction");
-            std::lock_guard<std::mutex> guard(counterLock);
-            trips[bot->GetGUIDLow()] = size_t(chosen);
+            StartTrip(bot->GetGUIDLow(), trip.pos, trip.place, trip.where);
         }
-        counter = counters[chosen].pos;
-        where = counters[chosen].where;
+        counter = trip.pos;
+        where = trip.where;
     }
 
-    const time_t now = time(nullptr);
     u.reason = NotReady(bot);
     if (!u.reason.empty())
     {
@@ -536,23 +937,9 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
 
     if (!at.empty() && !InReach(bot, counter))
     {
-        // Progress is coming 10 yards nearer on the counter's map, or moving on to another map.
-        const float distance = bot->GetMapId() == counter.getMapId() ? WorldPosition(bot).distance(counter) : FLT_MAX;
-        if (!p.nearestAt || bot->GetMapId() != p.nearestMap || (distance < FLT_MAX && distance + COUNTER_PROGRESS <= p.nearest))
-        {
-            p.nearest = distance;
-            p.nearestMap = bot->GetMapId();
-            p.nearestAt = now;
-        }
-        else if (now - p.nearestAt >= COUNTER_STALL)
-        {
-            std::string stall = "could not reach " + where + ": ";
-            if (distance < FLT_MAX)
-                stall += "came no nearer than " + std::to_string(uint32(p.nearest)) + " yards in " + std::to_string(COUNTER_STALL / MINUTE) + " minutes";
-            else
-                stall += "did not reach its map in " + std::to_string(COUNTER_STALL / MINUTE) + " minutes";
-            return fail(stall);
-        }
+        std::string why;
+        if (Stalled(bot, counter, COUNTER_STALL, p.nearest, p.nearestMap, p.nearestAt, why))
+            return fail("could not reach " + where + ": " + why);
         u.reason = "on its way to " + where;
         return u;
     }
@@ -785,6 +1172,349 @@ GuildJobs::Update GuildJobs::Craft(Player* bot, const std::string& args, Progres
     if (++p.castFailures >= CRAFT_CAST_TRIES)
         return fail(made + "; could not cast " + spellName);
     return u;
+}
+
+GuildJobs::Update GuildJobs::Kit(Player* bot, const std::string& args, Progress& p)
+{
+    Update u;
+    auto fail = [&u](const std::string& reason) { u.status = "failed"; u.reason = reason; return u; };
+
+    std::vector<std::pair<uint32, uint32>> items;
+    const std::string itemsArg = Arg(args, "items");
+    if (itemsArg.empty())
+        return fail("kit needs items=<entry>:<count>,...");
+    const std::string error = ParseItems(itemsArg, "kit", false, items);
+    if (!error.empty())
+        return fail(error);
+    const std::string loadout = Arg(args, "loadout");
+    const uint32 guid = bot->GetGUIDLow();
+
+    u.reason = NotReady(bot);
+    if (!u.reason.empty())
+    {
+        // Waiting is no lack of progress towards a place: the clock starts again once it can move.
+        p.nearestAt = 0;
+        return u;
+    }
+
+    std::vector<std::pair<uint32, uint32>> lacking = Lacking(bot, items);
+
+    // Done once it holds the counts or has got all it could, with what is short: the order queued after it still goes.
+    // Failed only when its bags took nothing at all.
+    auto finish = [&]()
+    {
+        lacking = Lacking(bot, items);
+        std::string reason = loadout.empty() ? "kitted" : "kitted " + loadout;
+        if (!lacking.empty())
+        {
+            reason += "; short " + Names(lacking);
+            if (p.bagsFull)
+                reason += "; bags full";
+            if (p.noGold)
+                reason += "; out of gold";
+            if (!p.note.empty())
+                reason += "; " + p.note;
+            if (p.bagsFull && p.took.empty() && p.bought.empty())
+                return fail("bags full; short " + Names(lacking));
+        }
+        std::string detail = loadout.empty() ? "" : "loadout=" + loadout;
+        auto add = [&detail](const std::string& key, const std::string& value)
+        {
+            if (!value.empty())
+                detail += (detail.empty() ? "" : " ") + key + "=" + value;
+        };
+        add("vault", Entries(p.took));
+        add("bought", Entries(p.bought));
+        add("spent", p.spent ? std::to_string(p.spent) : "");
+        add("short", Entries(lacking));
+        u.status = "done";
+        u.reason = reason;
+        u.events.push_back({ "kitted", detail });
+        return u;
+    };
+
+    if (lacking.empty())
+        return finish();
+
+    if (p.stage == KIT_PLAN)
+    {
+        if (!RoomForAny(bot, lacking))
+        {
+            p.bagsFull = true;
+            return finish();
+        }
+        p.stage = KIT_VENDORS;
+#if GUILD_JOBS_VAULT
+        // To the vault only if it has some of what the character lacks.
+        p.guild = sGuildVault.GuildOf(bot->GetSession()->GetAccountId());
+        bool inVault = false;
+        for (auto const& [entry, count] : lacking)
+            inVault = inVault || (!p.guild.empty() && sGuildVault.Count(p.guild, entry) > 0);
+        Trip trip;
+        if (inVault && CounterTrip(bot, CounterKind::Vaultkeeper, trip))
+        {
+            StartTrip(guid, trip.pos, trip.place, trip.where);
+            p.stage = KIT_VAULT;
+            p.nearestAt = 0;
+        }
+#endif
+    }
+
+#if GUILD_JOBS_VAULT
+    if (p.stage == KIT_VAULT)
+    {
+        Trip trip;
+        if (!CurrentTrip(guid, trip))
+            p.stage = KIT_VENDORS;
+        else if (!InReach(bot, trip.pos))
+        {
+            std::string why;
+            if (!Stalled(bot, trip.pos, COUNTER_STALL, p.nearest, p.nearestMap, p.nearestAt, why))
+            {
+                u.reason = "on its way to " + trip.where;
+                return u;
+            }
+            // Short of the vault, it still buys what it can.
+            p.note = "could not reach " + trip.where + ": " + why;
+            EndTrip(guid);
+            p.stage = KIT_VENDORS;
+        }
+        else
+        {
+            // As much of each as the vault holds and the bags take; another character of the guild may have taken
+            // some on the way.
+            for (auto const& [entry, count] : lacking)
+            {
+                std::string reason;
+                InventoryResult bagError = EQUIP_ERR_OK;
+                if (const uint32 taken = sGuildVault.Withdraw(bot, entry, count, reason, &bagError))
+                    p.took[entry] += taken;
+                if (bagError != EQUIP_ERR_OK && bagError != EQUIP_ERR_CANT_CARRY_MORE_OF_THIS)
+                    p.bagsFull = true;
+            }
+            EndTrip(guid);
+            p.stage = KIT_VENDORS;
+            lacking = Lacking(bot, items);
+            if (lacking.empty())
+                return finish();
+        }
+    }
+#endif
+
+    // At the vendor it went to: step up to it, and buy what it sells of what the character lacks.
+    if (p.vendor >= 0)
+    {
+        Vendor const& v = vendors[p.vendor];
+        if (!InReach(bot, v.pos))
+        {
+            std::string why;
+            if (!Stalled(bot, v.pos, VENDOR_STALL, p.nearest, p.nearestMap, p.nearestAt, why))
+            {
+                u.reason = "on its way to buy from " + v.name;
+                return u;
+            }
+        }
+        else if (Creature* vendor = FindVendor(bot, v.entry))
+        {
+            if (!bot->GetNPCIfCanInteractWith(vendor->GetObjectGuid(), UNIT_NPC_FLAG_VENDOR))
+            {
+                if (++p.approaches <= VENDOR_APPROACHES)
+                {
+                    // Travel stops within 5 yards of the vendor's spawn; trading needs a little nearer, to where it
+                    // stands now. Never a move for a character on its way to another map.
+                    if (bot->IsInWorld() && !bot->IsBeingTeleported())
+                    {
+                        const float angle = vendor->GetAngle(bot);
+                        bot->GetMotionMaster()->MovePoint(0, vendor->GetPositionX() + 2.0f * std::cos(angle),
+                            vendor->GetPositionY() + 2.0f * std::sin(angle), vendor->GetPositionZ(), FORCED_MOVEMENT_RUN);
+                    }
+                    u.reason = "stepping up to " + v.name;
+                    return u;
+                }
+            }
+            else
+            {
+                for (auto const& [entry, count] : lacking)
+                {
+                    if (!Sells(size_t(p.vendor), entry))
+                        continue;
+                    if (const uint32 got = BuyFrom(bot, vendor, entry, count, p.spent, p.bagsFull, p.noGold))
+                        p.bought[entry] += got;
+                    if (p.bagsFull)
+                        break;
+                }
+            }
+        }
+        // Bought from, or given up on: on to the next.
+        p.visited.insert(p.vendor);
+        p.vendor = -1;
+        EndTrip(guid);
+        lacking = Lacking(bot, items);
+        if (lacking.empty())
+            return finish();
+    }
+
+    // The nearest vendor that sells something it still lacks, which travel takes it to.
+    if (!p.bagsFull && p.visited.size() < KIT_MAX_VENDORS)
+    {
+        if (!RoomForAny(bot, lacking))
+            p.bagsFull = true;
+        else
+        {
+            IndexVendors();
+            uint32 sells = 0;
+            bool noGold = false;
+            const int next = NearestVendor(bot, lacking, p.visited, sells, noGold);
+            if (next >= 0)
+            {
+                Vendor& v = vendors[next];
+                if (!v.place)
+                    v.place = std::make_unique<PlaceTravelDestination>(v.pos, v.name);
+                StartTrip(guid, v.pos, v.place.get(), v.name);
+                p.vendor = next;
+                p.approaches = 0;
+                p.nearestAt = 0;
+                u.reason = "on its way to buy " + ItemName(sells) + " from " + v.name;
+                return u;
+            }
+            p.noGold = p.noGold || noGold;
+        }
+    }
+    return finish();
+}
+
+GuildJobs::Update GuildJobs::Deposit(Player* bot, const std::string& args, Progress& p)
+{
+    Update u;
+    auto fail = [&u](const std::string& reason) { u.status = "failed"; u.reason = reason; return u; };
+
+#if !GUILD_JOBS_VAULT
+    (void)bot;
+    (void)args;
+    (void)p;
+    return fail("this server has no guild vault");
+#else
+    std::vector<std::pair<uint32, uint32>> items;
+    const std::string itemsArg = Arg(args, "items");
+    if (itemsArg.empty())
+        return fail("deposit needs items=<entry>:<count>,..., a count of 0 for all it carries");
+    const std::string error = ParseItems(itemsArg, "deposit", true, items);
+    if (!error.empty())
+        return fail(error);
+    const uint32 guid = bot->GetGUIDLow();
+
+    // An order is put in once. After a restart that lost the done status, the deposited event of this order,
+    // written after the vault's change in the same queue, says it was put in already. The order's events come
+    // after the last job event, which a new order writes.
+    if (!p.started)
+    {
+        p.started = true;
+        auto result = CharacterDatabase.PQuery(
+            "SELECT 1 FROM guildbot_event WHERE guid = %u AND kind = 'deposited' AND (detail = 'seq=%u' OR detail LIKE 'seq=%u %%') "
+            "AND id > (SELECT COALESCE(MAX(id), 0) FROM guildbot_event WHERE guid = %u AND kind = 'job') LIMIT 1",
+            guid, p.seq, p.seq, guid);
+        if (result)
+        {
+            u.status = "done";
+            u.reason = "already deposited this order";
+            return u;
+        }
+        p.guild = sGuildVault.GuildOf(bot->GetSession()->GetAccountId());
+    }
+
+    u.reason = NotReady(bot);
+    if (!u.reason.empty())
+    {
+        p.nearestAt = 0;
+        return u;
+    }
+    if (p.guild.empty())
+        return fail("has no guild vault");
+
+    // Each stack of each item, up to its count: put in, or with forReal false only asked whether the vault would take it.
+    // The reason lists what went in, what the vault refused and why, and what it carried less of than the order said.
+    std::vector<std::pair<uint32, uint32>> deposited;
+    auto putIn = [&](bool forReal)
+    {
+        deposited.clear();
+        std::vector<std::tuple<uint32, uint32, std::string>> refused;
+        std::vector<std::string> missing;
+        for (auto const& [entry, count] : items)
+        {
+            uint32 put = 0, carried = 0;
+            for (Item* item : StacksInBags(bot, entry))
+            {
+                const uint32 stack = item->GetCount();
+                carried += stack;
+                if (count && put >= count)
+                    continue;
+                const uint32 n = count ? std::min(stack, count - put) : stack;
+                std::string why;
+                // The item may be gone after a deposit: only its count, read before, is used.
+                if (forReal ? sGuildVault.Deposit(bot, item, n == stack ? 0 : n, why) : GuildVault::IsFungible(item, why))
+                    put += n;
+                else
+                {
+                    if (!why.empty() && why.back() == '.')
+                        why.pop_back();
+                    auto it = std::find_if(refused.begin(), refused.end(), [&](auto const& r) { return std::get<0>(r) == entry && std::get<2>(r) == why; });
+                    if (it == refused.end())
+                        refused.emplace_back(entry, n, why);
+                    else
+                        std::get<1>(*it) += n;
+                }
+            }
+            if (put)
+                deposited.push_back({ entry, put });
+            if (!carried)
+                missing.push_back("none of " + ItemName(entry));
+            else if (count && carried < count)
+                missing.push_back(std::to_string(carried) + " of " + std::to_string(count) + " " + ItemName(entry));
+        }
+        std::string reason = deposited.empty() ? "deposited nothing" : "deposited " + Names(deposited);
+        for (auto const& [entry, n, why] : refused)
+            reason += "; refused " + std::to_string(n) + " " + ItemName(entry) + " (" + why + ")";
+        if (!missing.empty())
+        {
+            reason += "; carries ";
+            for (size_t i = 0; i < missing.size(); ++i)
+                reason += (i ? ", " : "") + missing[i];
+        }
+        return reason;
+    };
+
+    // Before it sets out: to the vault only with something the vault would take.
+    Trip trip;
+    if (!CurrentTrip(guid, trip))
+    {
+        const std::string plan = putIn(false);
+        if (deposited.empty())
+        {
+            u.status = "done";
+            u.reason = plan;
+            return u;
+        }
+        if (!CounterTrip(bot, CounterKind::Vaultkeeper, trip))
+            return fail("no vaultkeeper known for its faction");
+        StartTrip(guid, trip.pos, trip.place, trip.where);
+        p.nearestAt = 0;
+    }
+
+    if (!InReach(bot, trip.pos))
+    {
+        std::string why;
+        if (Stalled(bot, trip.pos, COUNTER_STALL, p.nearest, p.nearestMap, p.nearestAt, why))
+            return fail("could not reach " + trip.where + ": " + why);
+        u.reason = "on its way to " + trip.where;
+        return u;
+    }
+
+    u.status = "done";
+    u.reason = putIn(true);
+    if (!deposited.empty())
+        u.events.push_back({ "deposited", "seq=" + std::to_string(p.seq) + " items=" + Entries(deposited) });
+    return u;
+#endif
 }
 
 void GuildJobs::EnsureTable()

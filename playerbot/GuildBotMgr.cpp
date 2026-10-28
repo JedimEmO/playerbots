@@ -921,7 +921,11 @@ bool GuildBotMgr::GetFarmOrder(uint32 guid, uint32& itemId, uint32& amount) cons
 bool GuildBotMgr::IsJobItem(uint32 guid, uint32 itemId) const
 {
     uint32 farmItem, amount;
-    return GetFarmOrder(guid, farmItem, amount) && farmItem == itemId;
+    if (GetFarmOrder(guid, farmItem, amount) && farmItem == itemId)
+        return true;
+    // What a kit or deposit order names, while it runs.
+    auto it = characters.find(guid);
+    return it != characters.end() && GuildJobs::KeepsForJob(GetActiveJob(guid), it->second.jobArgs, itemId);
 }
 
 uint32 GuildBotMgr::ProfessionSkill(const std::string& name)
@@ -1042,16 +1046,16 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
         return;
     }
 
-    if (auto it = characters.find(player->GetGUIDLow()); it != characters.end() && GuildJobs::PaysAtCounter(job, it->second.jobArgs))
+    if (auto it = characters.find(player->GetGUIDLow()); it != characters.end() && GuildJobs::Travels(job, it->second.jobArgs))
     {
-        // Pay at a counter: a forced travel target, the travel named "guild job", takes it to the Guild Master or
-        // the emissary its order names, and it pays there. No rpg and no free: it makes no trips to sell or repair
-        // on the way, which could spend the gold it carries to the counter.
+        // Pay at a counter, kit and deposit: a forced travel target, the travel named "guild job", takes it to the
+        // Guild Master or the emissary its order names, the vaultkeeper, or the vendor kit buys from. No rpg and
+        // no free: it makes no trips to sell or repair on the way, which could spend the gold it carries.
         engine->addStrategies("collision", "travel", "guild level", NULL);
         return;
     }
 
-    // idle, and GuildJobs' pay, reset and craft: stand where it is.
+    // idle, and GuildJobs' pay without at, reset and craft: stand where it is.
     engine->addStrategy("stay");
 }
 

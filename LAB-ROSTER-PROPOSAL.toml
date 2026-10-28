@@ -1,4 +1,4 @@
-# A proposed addition to lab/roster.toml, for the pay, reset and craft jobs (GUILD-JOBS.md).
+# A proposed addition to lab/roster.toml, for the pay, reset, craft, kit and deposit jobs (GUILD-JOBS.md).
 # For the session that owns the lab to copy and adapt; nothing here is wired into `lab build` yet.
 #
 # The roster cannot express these characters today. It has groups and levellers only, and `lab build`
@@ -190,3 +190,69 @@ tele = "Brill"
 job = "pay"
 args = "at=guild_master gold=10000 ref=4"
 money = 20000
+
+# kit with vendor-only items, on a core with or without the vault: a human at Stormwind's tele, 58 yards from the
+# Guild Master, with no vault row for its account. Moonberry Juice (1645) is sold by Thurman Mullby and Ben Trias,
+# Sacred Candle (17029) by Keldric and Kyra Boucher, all within 70 yards; no vendor sells Major Mana Potion (13444).
+# Expect: `on its way to buy ... from ...` twice, then done `kitted lab_vendor; short 5 Major Mana Potion`,
+# 20 juice and 10 candles in its bags, about 1g 80s spent, and a `kitted` event
+# `loadout=lab_vendor bought=1645:20,17029:10 spent=18000 short=13444:5` (the spend lower with a reputation discount).
+[[worker]]
+name = "Kitvendor"
+race = "human"
+class = "priest"
+account = "LABKIT"
+level = 50
+tele = "Stormwind"
+job = "kit"
+args = "loadout=lab_vendor items=1645:20,17029:10,13444:5"
+money = 50000
+
+# kit short of gold: the same order with 50 silver. Expect: done, short, with `; out of gold`, and a few silver left
+# at most; not failed, since being short is done.
+[[worker]]
+name = "Kitpoor"
+race = "human"
+class = "priest"
+account = "LABKIT"
+level = 50
+tele = "Stormwind"
+job = "kit"
+args = "loadout=lab_vendor items=1645:20,17029:10,13444:5"
+money = 5000
+
+# NEEDS THE VAULT CORE (the core fork's competition branch and 031-vault.sql in the lab's world database).
+# kit from the vault, then vendors: an orc at Orgrimmar's tele, about 95 yards from Urtrun Clanbringer.
+# Before the server starts (the vault is read at startup), in the characters database:
+#   REPLACE INTO guildd_account VALUES (<LABVAULT's account id>, 'lab-vault');
+#   REPLACE INTO guildbot_vault VALUES ('lab-vault', 13444, 3);
+# Expect: `on its way to the vaultkeeper in Orgrimmar`, 3 Major Mana Potion taken, then the juice bought from a vendor
+# in Orgrimmar, done `kitted lab_vault; short 2 Major Mana Potion`, an event
+# `loadout=lab_vault vault=13444:3 bought=1645:5 spent=2000 short=13444:2`, and no 13444 row left in guildbot_vault.
+[[worker]]
+name = "Kitvault"
+race = "orc"
+class = "shaman"
+account = "LABVAULT"
+level = 50
+tele = "Orgrimmar"
+job = "kit"
+args = "loadout=lab_vault items=13444:5,1645:5"
+money = 20000
+
+# NEEDS THE VAULT CORE, and the guildd_account row above for the same account.
+# deposit: all its Major Mana Potions, its Hearthstone (soulbound) and 10 Moonberry Juice of the 4 it carries.
+# Expect: `on its way to the vaultkeeper in Orgrimmar`, then done
+# `deposited 5 Major Mana Potion, 4 Moonberry Juice; refused 1 Hearthstone (Soulbound items cannot go in the vault); carries 4 of 10 Moonberry Juice`,
+# a `deposited` event `seq=<its job_seq> items=13444:5,1645:4`, the Hearthstone still in its bags, and guildbot_vault
+# up by 5 and 4. On a core without the vault the same order fails at once with `this server has no guild vault`.
+[[worker]]
+name = "Depositor"
+race = "orc"
+class = "warrior"
+account = "LABVAULT"
+level = 50
+tele = "Orgrimmar"
+job = "deposit"
+args = "items=13444:0,6948:1,1645:10"
+items = ["13444:5", "1645:4"]
