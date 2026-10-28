@@ -377,6 +377,12 @@ bool MovementAction::MoveOnTransport(PlayerbotAI* ai, GenericTransport* transpor
     bot->GetMotionMaster()->Clear();
 
     std::vector<G3D::Vector3> pointPath = transPos.toPointsArray(path);
+    // A passenger's spline runs in the transport's own coordinates, from its offset on board (MoveSplineInit),
+    // and the path here is in world coordinates. Given as is, the world position became the offset, and stepping
+    // off the Great Lift put the character some 5000 yards away, under Uldum.
+    if (bot->GetTransport() == transport)
+        for (auto& point : pointPath)
+            transport->CalculatePassengerOffset(point.x, point.y, point.z);
 #ifndef MANGOSBOT_TWO
     bot->GetMotionMaster()->MovePath(pointPath, FORCED_MOVEMENT_RUN, false, false);
 #else
