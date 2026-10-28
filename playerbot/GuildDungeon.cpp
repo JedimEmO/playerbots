@@ -4,6 +4,7 @@
 #include "playerbot/GuildRuns.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/TravelNode.h"
+#include "playerbot/strategy/values/LastMovementValue.h"
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
 #include "Maps/InstanceData.h"
@@ -1786,6 +1787,10 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             && !fighting && bossPlace && bossDistance > APPROACH_RANGE;
         if (target && (forNext ? stopped : target->IsActive()))
             target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+        // Restarted, it also forgets its last path: a path kept from elsewhere ends near the boss and is taken again,
+        // and from where the leader stands its moves along it fail every time.
+        if (target && forNext && stopped)
+            ai->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().clear();
     }
     if (!talkWait.empty())
         update.reason = "waiting for " + talkWait + " in " + dungeon.name + ", " + count;

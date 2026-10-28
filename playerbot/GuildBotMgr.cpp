@@ -2298,6 +2298,22 @@ std::list<std::string> GuildBotMgr::HandleDebug(const std::string& args)
         travel << "no travel target";
     out.push_back(travel.str());
 
+    // The moves behind the travel: failed moves to the present target, and the last path, where it starts and ends,
+    // to tell a path that leads off from where the character stands from one it has left.
+    std::ostringstream move;
+    move << "move retries " << (target ? target->GetRetryCount(true) : 0) << ", retries " << (target ? target->GetRetryCount(false) : 0);
+    ai::TravelPath& lastPath = ai->GetAiObjectContext()->GetValue<ai::LastMovement&>("last movement")->Get().lastPath;
+    if (lastPath.empty())
+        move << ", no last path";
+    else
+    {
+        move << ", last path " << lastPath.getPath().size() << " points, starts " << uint32(lastPath.getFront().distance(WorldPosition(bot)))
+             << " yd off, ends on map " << lastPath.getBack().getMapId();
+        if (target && target->GetPosition())
+            move << " " << uint32(lastPath.getBack().distance(*target->GetPosition())) << " yd from the target";
+    }
+    out.push_back(move.str());
+
     std::ostringstream attackers;
     attackers << "attackers:";
     for (Unit* attacker : bot->getAttackers())
