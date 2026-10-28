@@ -157,6 +157,7 @@ private:
         std::vector<time_t> unreachableTimes;  // when any spot's moves last failed, to tell a stuck character
         time_t stuckNotedAt = 0;               // when that was last recorded
         int32 unreachableHandled = 0;          // the spot whose present cooldown has been counted, once
+        int32 retrySpot = 0;                   // the grind spot its travel target's failed-move count belongs to
         time_t underwaterSince = 0; // since when it has been fully under water, or 0
         bool surfacing = false;     // it has been sent up for air on this dive
         uint32 runsDone = 0;        // dungeon runs finished on this order, for `runs`

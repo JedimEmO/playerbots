@@ -585,20 +585,37 @@ void GuildBotMgr::CheckUnreachable(Character& c, Player* bot)
     if (!ai)
         return;
     ai::TravelTarget* travel = ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get();
+    if (!travel)
+        return;
+
+    // The travel target keeps its failed-move count from target to target, as upstream has it and the dungeon
+    // leaders need. For a levelling character the count starts again with each grind spot: carried over, a few failures
+    // put every later spot in cooldown at its first failed move, and the Gadgetzan trio set spot after spot aside in
+    // experiment 18 while walking to Gadgetzan's own node.
+    const bool grinding = dynamic_cast<ai::GrindTravelDestination*>(travel->GetDestination()) != nullptr;
+    if (grinding && travel->GetStatus() == ai::TravelStatus::TRAVEL_STATUS_TRAVEL && travel->GetEntry() != c.retrySpot)
+    {
+        travel->SetRetry(true, 0);
+        c.retrySpot = travel->GetEntry();
+    }
+
     // Cooling down after its moves failed: no route there, a lift it does not take or a shore it cannot climb.
     // Without this the same spot wins again at the next choice, as Hfortmage's Lost One Fisherman did for a quarter hour.
-    if (!travel || travel->GetStatus() != ai::TravelStatus::TRAVEL_STATUS_COOLDOWN)
+    if (travel->GetStatus() != ai::TravelStatus::TRAVEL_STATUS_COOLDOWN)
     {
         c.unreachableHandled = 0;
         return;
     }
-    if (!travel->IsMaxRetry(true) || !dynamic_cast<ai::GrindTravelDestination*>(travel->GetDestination()))
+    if (!travel->IsMaxRetry(true) || !grinding)
         return;
     const int32 entry = travel->GetEntry();
     // Each cooldown counts once, not on every check while it lasts.
     if (!entry || entry == c.unreachableHandled)
         return;
     c.unreachableHandled = entry;
+    // Counted: the next spot starts from no failed moves, whatever this one comes to.
+    travel->SetRetry(true, 0);
+    c.retrySpot = 0;
     const time_t now = time(nullptr);
     auto& left = leftDestinations[c.guid];
     auto it = left.find(entry);
