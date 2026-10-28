@@ -236,9 +236,10 @@ void GuildBotMgr::AddSpotYield(int32 entry, uint32 work, uint32 experience)
 void GuildBotMgr::LoadSpotYields()
 {
     auto result = CharacterDatabase.Query(
-        "SELECT s.entry, SUM(s.work), SUM(s.experience) FROM guildbot_spot s "
+        "SELECT s.entry, SUM(s.work), SUM(s.work_experience) FROM guildbot_spot s "
         "JOIN guildbot_metric m ON m.hour = s.hour AND m.guid = s.guid AND m.job = 'level' "
-        "WHERE s.hour >= NOW() - INTERVAL 48 HOUR GROUP BY s.entry");
+        // Rows from before work_experience existed have it 0 with experience earned; they would read as worthless spots.
+        "WHERE s.hour >= NOW() - INTERVAL 48 HOUR AND (s.work_experience > 0 OR s.experience = 0) GROUP BY s.entry");
     if (!result)
         return;
     do
@@ -728,6 +729,9 @@ void GuildBotMgr::EnsureTables()
         " deaths INT UNSIGNED NOT NULL DEFAULT 0,"
         " PRIMARY KEY (hour, guid, entry), KEY entry (entry)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // The experience earned at the spot itself, which its rate is made of; experience also counts the fights on the way.
+    CharacterDatabase.DirectExecute(
+        "ALTER TABLE guildbot_spot ADD COLUMN IF NOT EXISTS work_experience INT UNSIGNED NOT NULL DEFAULT 0 AFTER experience");
 
     sGuildRuns.EnsureTables();
     LoadSpotYields();
@@ -818,6 +822,8 @@ void GuildBotMgr::Measure(Character& c, Player* bot, bool died)
             else
                 count.work += uint32(step);
             count.experience += gained;
+            if (activity != ACTIVITY_TRAVEL)
+                count.workExperience += gained;
             // Coin looted there; selling happens on errands, which are not at a spot.
             if (bot->GetMoney() > c.lastMoney && activity != ACTIVITY_TRAVEL)
                 count.money += bot->GetMoney() - c.lastMoney;
@@ -858,14 +864,15 @@ void GuildBotMgr::WriteMetric(Character& c)
         for (auto& [entry, count] : c.spots)
         {
             if (c.metricJob == "level")
-                AddSpotYield(entry, count.work, count.experience);
+                AddSpotYield(entry, count.work, count.workExperience);
             CharacterDatabase.PExecute(
-                "INSERT INTO guildbot_spot (hour, guid, entry, level, visits, travel, work, experience, money, deaths) "
-                "VALUES (FROM_UNIXTIME(%u), %u, %d, %u, %u, %u, %u, %u, %u, %u) "
+                "INSERT INTO guildbot_spot (hour, guid, entry, level, visits, travel, work, experience, work_experience, money, deaths) "
+                "VALUES (FROM_UNIXTIME(%u), %u, %d, %u, %u, %u, %u, %u, %u, %u, %u) "
                 "ON DUPLICATE KEY UPDATE level = GREATEST(level, VALUES(level)), visits = visits + VALUES(visits), "
                 "travel = travel + VALUES(travel), work = work + VALUES(work), experience = experience + VALUES(experience), "
-                "money = money + VALUES(money), deaths = deaths + VALUES(deaths)",
-                uint32(c.metricHour), c.guid, entry, c.xpLevel, count.visits, count.travel, count.work, count.experience, count.money, count.deaths);
+                "work_experience = work_experience + VALUES(work_experience), money = money + VALUES(money), deaths = deaths + VALUES(deaths)",
+                uint32(c.metricHour), c.guid, entry, c.xpLevel, count.visits, count.travel, count.work, count.experience, count.workExperience,
+                count.money, count.deaths);
         }
     c.spots.clear();
     c.seconds = c.earning = c.experience = c.deaths = 0;

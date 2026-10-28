@@ -153,7 +153,8 @@ private:
         uint32 seconds = 0, earning = 0, experience = 0, deaths = 0;
         uint32 activity[ACTIVITIES] = {};  // seconds by Activity
         // The same counts by grind spot, for guildbot_spot: what each spot cost in walking and gave back.
-        struct SpotCount { uint32 travel = 0, work = 0, experience = 0, deaths = 0, money = 0, visits = 0; };
+        // workExperience is what it earned at the spot itself, without the fights on the way there.
+        struct SpotCount { uint32 travel = 0, work = 0, experience = 0, workExperience = 0, deaths = 0, money = 0, visits = 0; };
         std::map<int32, SpotCount> spots;
         int32 lastSpot = 0;               // the spot at the last check, to count visits
         uint32 lastMoney = 0;             // money at the last check, for the coin looted at a spot

@@ -23,6 +23,7 @@ namespace ai
         virtual std::list<ObjectGuid> Calculate() override;
 
         static bool IsValid(Unit* target, Player* player, Player* owner = nullptr, bool checkInCombat = true, bool validatePossibleTarget = true);
+        static bool InCombat(Unit* target, Player* player, bool checkPullTargets = true);
         static bool IgnoreTarget(Unit* target, Player* playerToCheckAgainst);
         virtual std::string Format() override;
 
@@ -41,7 +42,6 @@ namespace ai
         void AddTargetsOf(Player* player, std::set<Unit*>& targets, std::set<ObjectGuid>& invalidTargets, bool getOne = false);
         static float GetRange() { return sPlayerbotAIConfig.sightDistance; }
 
-        static bool InCombat(Unit* target, Player* player, bool checkPullTargets = true);
 
         WorldPosition calculatePos;
     };
