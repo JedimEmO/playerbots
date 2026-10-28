@@ -244,11 +244,13 @@ namespace
     // Disciple of Naralex, and once arrived the travel target goes on counting as working there while fights take the
     // leader off, 200 yards from the gong in Razorfen Downs.
     constexpr float APPROACH_RANGE = 60.0f;
-    // A leader whose moves to its next boss all fail where it stands walks to the nearest travel node this near,
+    // A leader whose moves to its next boss all fail where it stands steps toward the nearest travel node this near,
     // at most this often, and the travel restarts once it has stopped there or this long has passed.
     constexpr float NODE_WALK_RANGE = 300.0f;
-    constexpr time_t NODE_WALK_SECONDS = 2 * MINUTE;
+    constexpr time_t NODE_WALK_SECONDS = 20;
     constexpr time_t NODE_WALK_HOLD_SECONDS = 30;
+    // The walk is a straight step this long toward the node, without a path: from such a place no path is found at all.
+    constexpr float NODE_WALK_STEP = 10.0f;
     // A boss that fell asleep as the next boss, such as Mograine lying as dead until Whitemane raises him, keeps the leader
     // by it this long, fighting what comes, before the next boss after it comes first.
     constexpr time_t SLEEPER_WAIT_SECONDS = 3 * MINUTE;
@@ -1790,20 +1792,44 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         const TravelStatus status = target ? target->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
         bool stopped = (status == TravelStatus::TRAVEL_STATUS_WORK || status == TravelStatus::TRAVEL_STATUS_COOLDOWN)
             && !fighting && bossPlace && bossDistance > APPROACH_RANGE;
-        // Cooled down after its moves failed one after another, with no path from where it stands, the leader first walks
-        // to the nearest travel node: by the way to Old Serra'kis neither the travel map nor the navmesh led on from the
-        // leader's place, and the restarted travel failed there again and again. The travel waits while it walks.
+        // Cooled down after its moves failed one after another, with no path from where it stands, the leader first steps
+        // toward the nearest travel node that is no way in or out: by the way to Old Serra'kis, and inside the entrance of
+        // Razorfen Kraul, neither the travel map nor the navmesh led on from the leader's place, and a pathed move to the
+        // node did not move it either. The step is straight and short, and only to a point in sight, which puts the
+        // leader back where paths are found. The travel waits while it steps.
         if (forNext && stopped && status == TravelStatus::TRAVEL_STATUS_COOLDOWN && target->IsMaxRetry(true)
             && now - run.nodeWalkAt >= NODE_WALK_SECONDS && leader->IsInWorld() && !leader->IsBeingTeleported())
         {
             run.nodeWalkAt = now;
-            if (TravelNode* node = sTravelNodeMap.getNode(WorldPosition(leader), nullptr, NODE_WALK_RANGE))
-                if (node->getPosition()->getMapId() == leader->GetMapId())
+            // No travel map lock here, as for the stuck walk in GuildBotMgr: a route search holds it while it waits
+            // for this dungeon's lock, which the tick holds.
+            TravelNode* node = nullptr;
+            for (TravelNode* near : sTravelNodeMap.getNodes(WorldPosition(leader), NODE_WALK_RANGE))
+                if (near->getPosition()->getMapId() == leader->GetMapId() && !near->isPortal())
                 {
-                    WorldPosition* at = node->getPosition();
-                    leader->GetMotionMaster()->MovePoint(0, at->getX(), at->getY(), at->getZ(), FORCED_MOVEMENT_RUN);
-                    update.events.push_back({ "recovery", "to the nearest node, " + node->getName() });
+                    node = near;
+                    break;
                 }
+            if (node)
+            {
+                WorldPosition* at = node->getPosition();
+                const float dx = at->getX() - leader->GetPositionX();
+                const float dy = at->getY() - leader->GetPositionY();
+                const float length = sqrtf(dx * dx + dy * dy);
+                if (length > 1.0f)
+                {
+                    const float step = length < NODE_WALK_STEP ? length : NODE_WALK_STEP;
+                    float x = leader->GetPositionX() + dx / length * step;
+                    float y = leader->GetPositionY() + dy / length * step;
+                    float z = leader->GetPositionZ();
+                    leader->UpdateAllowedPositionZ(x, y, z);
+                    if (leader->IsWithinLOS(x, y, z + 1.0f))
+                    {
+                        leader->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_RUN, false);
+                        update.events.push_back({ "recovery", "toward the nearest node, " + node->getName() });
+                    }
+                }
+            }
         }
         if (stopped && now - run.nodeWalkAt < NODE_WALK_HOLD_SECONDS && leader->IsMoving())
             stopped = false;
