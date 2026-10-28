@@ -58,6 +58,8 @@ public:
     bool NoRpg(Player* bot) const;
     // The leader's run is in its leave phase, on the way out after the last boss.
     bool IsLeaving(Player* leader) const;
+    // The leader, or a member of its group, is inside its dungeon in the bosses step: its routes stay on the map.
+    bool KeepsToMap(Player* bot) const;
     int32 TravelEntry(Player* bot) const;
     // The way out, for the leader inside once the last boss is dead; null otherwise.
     ai::TravelDestination* ExitDestination(Player* bot) const;

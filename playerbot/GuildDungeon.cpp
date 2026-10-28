@@ -1989,6 +1989,16 @@ bool GuildDungeon::IsLeaving(Player* leader) const
     return it != runs.end() && it->second.phase == Phase::Leave;
 }
 
+bool GuildDungeon::KeepsToMap(Player* bot) const
+{
+    uint32 leaderGuid = bot->GetGUIDLow();
+    if (Group* group = bot->GetGroup())
+        leaderGuid = group->GetLeaderGuid().GetCounter();
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(leaderGuid);
+    return it != runs.end() && it->second.phase == Phase::Bosses && bot->GetMapId() == it->second.dungeon.mapId;
+}
+
 bool GuildDungeon::IsHolding(Player* bot) const
 {
     std::lock_guard<std::mutex> guard(lock);

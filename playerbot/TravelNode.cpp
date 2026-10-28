@@ -1,6 +1,7 @@
 #include "TravelNode.h"
 #include "playerbot/TravelMgr.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 
 #include <iomanip>
 #include <regex>
@@ -132,6 +133,11 @@ float TravelNodePath::getCost(Unit* unit, uint32 cGold)
                     if (at && at->conditionId && !sObjectMgr.IsConditionSatisfied(at->conditionId, bot, map, nullptr, CONDITION_FROM_AREATRIGGER_TELEPORT))
                         return -1;
             }
+            // A guild party between its dungeon's bosses goes by no way out of the dungeon. In Gnomeregan the route
+            // from Electrocutioner 6000 to Thermaplugg went out by the front and in again by the Train Depot, and a
+            // member that came out with the leader was left outside.
+            if (at && at->target_mapId != bot->GetMapId() && sGuildBotMgr.IsGuildBot(bot) && sGuildDungeon.KeepsToMap(bot))
+                return -1;
         }
 
         if (getPathType() == TravelNodePathType::staticPortal && pathObject)
