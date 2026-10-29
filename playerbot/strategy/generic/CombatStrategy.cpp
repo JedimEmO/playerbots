@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "CombatStrategy.h"
 #include "playerbot/ServerFacade.h"
+#include "playerbot/GuildBotMgr.h"
 
 using namespace ai;
 
@@ -121,6 +122,9 @@ WaitForAttackStrategy* WaitForAttackStrategy::Get(PlayerbotAI* ai)
     return ai ? ai->GetStrategy<WaitForAttackStrategy>("wait for attack", BotState::BOT_STATE_COMBAT) : nullptr;
 }
 
+// How long a guild party's damage dealers hold before they strike, inside a dungeon.
+static constexpr uint8 GUILD_WAIT_FOR_ATTACK_SECONDS = 3;
+
 bool WaitForAttackStrategy::ShouldWait(PlayerbotAI* ai)
 {
     // Only check if the bot has the strategy enabled
@@ -129,7 +133,9 @@ bool WaitForAttackStrategy::ShouldWait(PlayerbotAI* ai)
         // Only check if bot is in a group with a real player
         Player* bot = ai->GetBot();
         AiObjectContext* context = ai->GetAiObjectContext();
-        if (bot->GetGroup() && ai->HasRealPlayerMaster())
+        // Or a guild party inside a dungeon, where a room answers a pull together and the tank needs the first seconds.
+        const bool guildInside = sGuildBotMgr.IsGuildBot(bot) && bot->GetMap() && bot->GetMap()->IsDungeon();
+        if (bot->GetGroup() && (ai->HasRealPlayerMaster() || guildInside))
         {
             // Don't wait if the current target is an enemy player
             bool enemyPlayer = false;
@@ -163,6 +169,9 @@ bool WaitForAttackStrategy::ShouldWait(PlayerbotAI* ai)
 
 uint8 WaitForAttackStrategy::GetWaitTime(PlayerbotAI* ai)
 {
+    // A guild party waits a short while: long enough for the tank's first blows, not so long that the pack is on the healer.
+    if (sGuildBotMgr.IsGuildBot(ai->GetBot()))
+        return GUILD_WAIT_FOR_ATTACK_SECONDS;
     AiObjectContext* context = ai->GetAiObjectContext();
     return AI_VALUE(uint8, "wait for attack time");
 }

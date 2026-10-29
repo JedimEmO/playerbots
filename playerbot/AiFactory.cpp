@@ -600,11 +600,21 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
         if (sPlayerbotAIConfig.jumpChase)
             combatEngine->addStrategy("chase jump");
 
+        // A guild tank in a party marks its target, so the party strikes one creature and the crowd control classes
+        // (polymorph, sap, a freezing trap, shackle) take another: CcTargetValue passes over the marked one.
+        if (sGuildBotMgr.IsGuildBot(player) && player->GetGroup() && PlayerbotAI::IsTank(player))
+            combatEngine->addStrategy("mark rti");
+
         // remove threat for now
         //engine->removeStrategy("threat");
 
         // Guild characters take the plain bots' combat config; the random bots' one adds chat.
         combatEngine->ChangeStrategy(sGuildBotMgr.IsGuildBot(player) ? sPlayerbotAIConfig.combatStrategies : sPlayerbotAIConfig.randomBotCombatStrategies);
+
+        // A guild party member that deals damage gives its tank a moment to take hold of a fight before it strikes, as
+        // in a party with a player; WaitForAttackStrategy::ShouldWait applies it to guild parties inside a dungeon.
+        if (sGuildBotMgr.IsGuildBot(player) && player->GetGroup() && !PlayerbotAI::IsTank(player) && !PlayerbotAI::IsHeal(player))
+            combatEngine->addStrategy("wait for attack");
     }
     else
     {
