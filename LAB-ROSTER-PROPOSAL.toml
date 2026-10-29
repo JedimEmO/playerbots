@@ -256,3 +256,50 @@ tele = "Orgrimmar"
 job = "deposit"
 args = "items=13444:0,6948:1,1645:10"
 items = ["13444:5", "1645:4"]
+
+# NEEDS THE VAULT CORE, and the guildd_account row above for the same account.
+# deposit gold above a keep: 6g carried, 1g kept back. Expect: `on its way to the vaultkeeper in Orgrimmar`, then done
+# `deposited 5g`, a `deposited` event `seq=<its job_seq> gold=50000`, 1g left on it, guildbot_vault_gold for
+# 'lab-vault' up by 50000 and a guildbot_vault_log line with item 0 and delta 50000.
+[[worker]]
+name = "Golddepositor"
+race = "orc"
+class = "warrior"
+account = "LABVAULT"
+level = 50
+tele = "Orgrimmar"
+job = "deposit"
+args = "gold=0 keep=10000"
+money = 60000
+
+# NEEDS THE VAULT CORE. A second guild, so its gold is not the depositor's:
+#   REPLACE INTO guildd_account VALUES (<LABVAULTG's account id>, 'lab-vault-gold');
+#   REPLACE INTO guildbot_vault_gold VALUES ('lab-vault-gold', 100000);
+#   REPLACE INTO guildbot_vault VALUES ('lab-vault-gold', 13444, 2);
+# withdraw: 3g and all the Major Mana Potions. Expect: done `took 3g and 2 Major Mana Potion`, a `withdrew` event
+# `seq=<its job_seq> items=13444:2 gold=30000`, 3g 50s on it, and the 13444 row gone.
+[[worker]]
+name = "Goldtaker"
+race = "orc"
+class = "warrior"
+account = "LABVAULTG"
+level = 50
+tele = "Orgrimmar"
+job = "withdraw"
+args = "items=13444:0 gold=30000"
+money = 5000
+
+# NEEDS THE VAULT CORE, and the lab-vault-gold rows above. pay at a counter with 1g of 5g: the vault makes up 4g.
+# Expect: it sets out, done `paid 5g (ref 5) to the Guild Master in Orgrimmar, 4g of it from the vault`, a `paid` event
+# `ref=5 gold=50000`, no gold left on it, and the vault's gold down by 40000 (with Goldtaker's 30000, 30000 left).
+# On a core without the vault it fails at once with `has 1g, needs 5g`.
+[[worker]]
+name = "Payvault"
+race = "orc"
+class = "warrior"
+account = "LABVAULTG"
+level = 50
+tele = "Orgrimmar"
+job = "pay"
+args = "at=guild_master gold=50000 ref=5"
+money = 10000
