@@ -4,8 +4,12 @@
 #include "playerbot/strategy/values/AttackersValue.h"
 #include "PullActions.h"
 #include "playerbot/strategy/values/PositionValue.h"
+#include "playerbot/GuildBotMgr.h"
 
 using namespace ai;
+
+// A guild tank pulls back to its healer when the healer is this near.
+static constexpr float PULL_TO_HEALER_RANGE = 40.0f;
 
 bool PullRequestAction::Execute(Event& event)
 {
@@ -50,6 +54,20 @@ bool PullRequestAction::Execute(Event& event)
     PositionEntry pullPosition = posMap["pull"];
 
     pullPosition.Set(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId());
+    // A guild tank inside a dungeon brings the pull back to its healer, behind it, so the fight is where the healer
+    // stands and not in the room the pack came from, where a second pack could join.
+    if (sGuildBotMgr.IsGuildBot(bot) && bot->GetMap()->IsDungeon())
+        if (Group* group = bot->GetGroup())
+            for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+            {
+                Player* member = ref->getSource();
+                if (member && member != bot && member->IsAlive() && member->GetMapId() == bot->GetMapId()
+                    && PlayerbotAI::IsHeal(member) && member->GetDistance(bot) <= PULL_TO_HEALER_RANGE)
+                {
+                    pullPosition.Set(member->GetPositionX(), member->GetPositionY(), member->GetPositionZ(), member->GetMapId());
+                    break;
+                }
+            }
     posMap["pull"] = pullPosition;
 
     strategy->RequestPull(target);
