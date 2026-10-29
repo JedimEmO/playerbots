@@ -213,9 +213,11 @@ namespace
     // nodes are sparse: the nearest to the Guild Master in Ironforge is 150 yards off, in Orgrimmar 89.
     constexpr float ROUTE_NODE_REACH = 200.0f;
 
-    // The length of the travel map's route between two places, or -1 for none; as the dungeon job measures it.
-    // Boats and zeppelins count as no distance on the travel map, so a route across the sea can measure short.
-    float RouteLength(const WorldPosition& from, const WorldPosition& to)
+    // The length of the travel map's route between two places for the character, or -1 for none. The search is the
+    // one its travel makes, so a route takes no lift a guild character may not ride, and may start with its
+    // hearthstone or a teleport spell. Those steps, and boats and zeppelins, count as no distance, so a route across
+    // the sea can measure short.
+    float RouteLength(Player* bot, const WorldPosition& from, const WorldPosition& to)
     {
         std::shared_lock<std::shared_timed_mutex> guard(sTravelNodeMap.m_nMapMtx);
         std::vector<TravelNode*> starts = sTravelNodeMap.getNodes(from, ROUTE_NODE_REACH);
@@ -227,17 +229,19 @@ namespace
         float length = from.distance(*start->getPosition()) + goal->getPosition()->distance(to);
         if (start == goal)
             return length;
-        // With no unit, the search adds no hearthstone or teleport spell to the route.
-        TravelNodeRoute route = sTravelNodeMap.getRoute(start, goal, nullptr);
+        TravelNodeRoute route = sTravelNodeMap.getRoute(start, goal, bot);
         std::vector<TravelNode*>& nodes = route.getNodes();
         if (nodes.size() < 2)
-            return -1.0f;
-        for (size_t i = 0; i + 1 < nodes.size(); ++i)
+            length = -1.0f;
+        // A step by spell is a path but no link, so paths are what is measured.
+        for (size_t i = 0; length >= 0.0f && i + 1 < nodes.size(); ++i)
         {
-            if (!nodes[i]->hasLinkTo(nodes[i + 1]))
-                return -1.0f;
-            length += nodes[i]->linkDistanceTo(nodes[i + 1]);
+            if (!nodes[i]->hasPathTo(nodes[i + 1]))
+                length = -1.0f;
+            else
+                length += nodes[i]->linkDistanceTo(nodes[i + 1]);
         }
+        route.cleanTempNodes();
         return length;
     }
 
@@ -261,7 +265,7 @@ namespace
             FactionTemplateEntry const* theirs = sFactionTemplateStore.LookupEntry(c.faction);
             if (!theirs || !theirs->IsFriendlyTo(*own) || theirs->IsHostileTo(*own))
                 continue;
-            const float route = RouteLength(from, c.pos);
+            const float route = RouteLength(bot, from, c.pos);
             const float straight = from.getMapId() == c.pos.getMapId() ? from.distance(c.pos) : sTravelMgr.MapTransDistance(from, c.pos);
             const bool otherMap = from.getMapId() != c.pos.getMapId();
             const std::tuple<bool, int, float> key = route >= 0.0f ? std::make_tuple(otherMap, 0, route) : std::make_tuple(otherMap, 1, straight);
