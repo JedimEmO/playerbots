@@ -378,6 +378,9 @@ namespace
     // at most this often, and the travel restarts once it has stopped there or this long has passed.
     constexpr float NODE_WALK_RANGE = 300.0f;
     constexpr time_t NODE_WALK_SECONDS = 20;
+    // At most this many walks for one next boss: past them its travel failing is left to the headway rule, which passes
+    // the boss over. In Wailing Caverns a leader started 61 walks to Kresh's node, one every 20 seconds, for an hour.
+    constexpr uint32 NODE_WALKS_PER_BOSS = 3;
     constexpr time_t NODE_WALK_HOLD_SECONDS = 30;
     // A walk to the node ends there, after this long, or when it has come no nearer by this much in this long,
     // as against a wall for a leader inside the scenery.
@@ -1214,7 +1217,32 @@ bool GuildDungeon::BossesOf(uint32 mapId, Player* member, Bosses& out)
         return false;
     Dungeon dungeon;
     std::string error;
-    if (!Resolve(map->name[0], member, dungeon, error))
+    // A dungeon with wings is run a wing at a time, and its record counts the wing's bosses: those of the wing the
+    // leader's order names, or else of the wing whose arrival is nearest. By the map's name, Dire Maul's record
+    // counted other bosses than the east wing's, and showed "0 of 4" for a cleared run.
+    std::string name = map->name[0];
+    if (Group* group = member->GetGroup())
+    {
+        const std::string ordered = sGuildBotMgr.GetDungeonOrder(group->GetLeaderGuid().GetCounter());
+        if (!ordered.empty() && FindMap(ordered) == mapId)
+            name = ordered;
+    }
+    if (name == map->name[0])
+    {
+        float best = 0.0f;
+        for (const Wing& wing : WINGS)
+            if (AreaTrigger const* at = sObjectMgr.GetAreaTrigger(wing.trigger))
+                if (at->target_mapId == mapId)
+                {
+                    const float distance = member->GetDistance(at->target_X, at->target_Y, at->target_Z);
+                    if (name == map->name[0] || distance < best)
+                    {
+                        name = wing.name;
+                        best = distance;
+                    }
+                }
+    }
+    if (!Resolve(name, member, dungeon, error))
         return false;
     out.name = dungeon.name;
     out.entries = dungeon.bosses;
@@ -2103,10 +2131,17 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         // travel waits until it is there. By the way to Old Serra'kis the route itself ended at a place with no path on;
         // a pathed move did not move the leader, and one step off it was undone by the restarted travel, which led
         // straight back. Lady Sarevess's and Old Serra'kis's own nodes have no links, so the walk is to Ghamoo-ra's.
+        if (run.nodeWalkBoss != next)
+        {
+            run.nodeWalkBoss = next;
+            run.nodeWalks = 0;
+        }
         if (!run.nodeWalking && forNext && stopped && status == TravelStatus::TRAVEL_STATUS_COOLDOWN && target->IsMaxRetry(true)
-            && now - run.nodeWalkAt >= NODE_WALK_SECONDS && leader->IsInWorld() && !leader->IsBeingTeleported())
+            && now - run.nodeWalkAt >= NODE_WALK_SECONDS && run.nodeWalks < NODE_WALKS_PER_BOSS
+            && leader->IsInWorld() && !leader->IsBeingTeleported())
         {
             run.nodeWalkAt = now;
+            ++run.nodeWalks;
             // No travel map lock here, as for the stuck walk in GuildBotMgr: a route search holds it while it waits
             // for this dungeon's lock, which the tick holds.
             for (TravelNode* near : sTravelNodeMap.getNodes(WorldPosition(leader), NODE_WALK_RANGE))

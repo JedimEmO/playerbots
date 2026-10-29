@@ -230,6 +230,8 @@ private:
         time_t headwaySince = 0;       // when the leader last came nearer, or last had a reason to stand still
         time_t nodeWalkAt = 0;         // when the leader last set out for the nearest travel node, its moves failing
         bool nodeWalking = false;      // it is stepping there now, and its travel waits
+        int32 nodeWalkBoss = 0;        // the next boss the walks below were for
+        uint32 nodeWalks = 0;          // how many it has started for that boss
         float nodeX = 0.0f, nodeY = 0.0f, nodeZ = 0.0f; // the node it steps toward
         float nodeBest = 0.0f;         // the nearest it has come to the node on this walk
         time_t nodeBestAt = 0;         // when it last came nearer by NODE_WALK_GAIN
