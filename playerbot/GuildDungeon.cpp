@@ -3165,8 +3165,21 @@ bool GuildDungeon::CorpseEntrance(Player* ghost, WorldLocation& place, uint32& t
     Corpse* corpse = ghost->GetCorpse();
     if (corpse->GetMapId() == ghost->GetMapId())
         return false;
-    // The entrance of the wing the corpse lies in.
-    AreaTrigger const* at = EntranceNear(corpse->GetMapId(), corpse->GetPositionX(), corpse->GetPositionY(), corpse->GetPositionZ());
+    // The entrance the party came in by, when the ghost's leader runs this dungeon: a ghost that comes back in is
+    // resurrected where its entrance puts it, and that is where the party waits for it. By the entrance nearest its
+    // corpse, the Dire Maul East healer came back in alone by the gate into the Warpwood Quarter, died there among
+    // its creatures, and came back in by the same gate again, all hour, while the party waited by Lariss's pavilion.
+    // Otherwise the entrance of the wing the corpse lies in.
+    AreaTrigger const* at = nullptr;
+    if (Group* group = ghost->GetGroup())
+    {
+        std::lock_guard<std::mutex> guard(instance().lock);
+        auto run = instance().runs.find(group->GetLeaderGuid().GetCounter());
+        if (run != instance().runs.end() && run->second.dungeon.mapId == corpse->GetMapId())
+            at = run->second.dungeon.entrance;
+    }
+    if (!at)
+        at = EntranceNear(corpse->GetMapId(), corpse->GetPositionX(), corpse->GetPositionY(), corpse->GetPositionZ());
     AreaTriggerEntry const* entry = at ? sAreaTriggerStore.LookupEntry(at->entry) : nullptr;
     if (!entry || entry->mapid != ghost->GetMapId())
         return false;
