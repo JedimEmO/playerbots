@@ -75,12 +75,35 @@ bool FindCorpseAction::Execute(Event& event)
     float reach = 0.0f;
     if (GuildDungeon::CorpseEntrance(bot, entrance, triggerId, reach))
     {
+        if (!bot->IsInWorld() || bot->IsBeingTeleported())
+            return true;
         WorldPosition at(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z);
-        if (WorldPosition(bot).distance(at) > reach)
+        // In the trigger as the core checks it, with a margin inside the core's: a sphere's centre can lie
+        // under the walkable ground, as Blackfathom Deeps' does under water.
+        AreaTriggerEntry const* atEntry = sAreaTriggerStore.LookupEntry(triggerId);
+        if (!atEntry || !IsPointInAreaTriggerZone(atEntry, bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(),
+            bot->GetPositionZ(), 2.0f))
         {
-            if (MoveTo(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z, false, false))
+            const float distance = WorldPosition(bot).distance(at);
+            // Unwatched, a ghost that has run as long as the way should take is put at the entrance, as upstream puts an
+            // unwatched bot's ghost at its corpse below. Ghosts that ran the whole corpse-run limit and then took the
+            // spirit healer outside were found at eight of the dungeons: short of entrances the travel map has no way
+            // into, and pacing by the Dire Maul East gate.
+            const time_t ran = time(nullptr) - corpse->GetGhostTime();
+            const time_t way = time_t(1.5f * distance / std::max(bot->GetSpeed(MOVE_RUN), 1.0f));
+            if (ran > std::max(time_t(3 * MINUTE), way) && !ai->HasActivePlayerMaster()
+                && !ai->HasPlayerNearby(at, 0.0f) && !ai->HasPlayerNearby(WorldPosition(bot), 0.0f))
+            {
+                sLog.outString("Guild dungeon: ghost %s put at the entrance of map %u after %u s, %.0f yards short",
+                    bot->GetName(), corpse->GetMapId(), uint32(ran), distance);
+                bot->GetMotionMaster()->Clear();
+                bot->TeleportTo(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z, bot->GetOrientation());
                 return true;
-            // No route the travel map knows: straight at it, as the area trigger action goes into a trigger.
+            }
+            if (distance > reach && MoveTo(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z, false, false))
+                return true;
+            // No route the travel map knows, or near it and not in it: straight at it, as the area trigger action goes
+            // into a trigger.
             bot->GetMotionMaster()->MovePoint(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z, FORCED_MOVEMENT_RUN);
             return true;
         }
