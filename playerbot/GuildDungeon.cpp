@@ -202,9 +202,10 @@ namespace
     struct ViaPlace { uint32 map; int32 after; float x, y, z; };
     const ViaPlace VIAS[] = {
         // Blackfathom Deeps: Lady Sarevess's node has no links, and the navmesh's way from her pool toward the Fires,
-        // Aku'mai or Ghamoo-ra's node ends on a spot in the water no path leaves. From this spot west of it, which a
-        // leader once reached from her pool, the travel map routes on.
-        { 48, 4831, -482.0f, 289.0f, -55.1f },
+        // Aku'mai or Ghamoo-ra's node ends on a spot in the water no path leaves. The leader goes back by the spot it came
+        // to her by from Kelris, where the travel map's route reached: from a spot further west, (-482, 289), no route
+        // built either, and the leader stood there until the run failed at Aku'mai.
+        { 48, 4831, -417.3f, 254.9f, -55.3f },
         // Blackfathom Deeps: on the way from Twilight Lord Kelris to Lady Sarevess the route can end in the shallows near
         // (-600, 55), where a leader stood until Sarevess was passed over. This spot short of her pool is where one leader's
         // way went on to her, and the travel map reaches it from Ghamoo-ra's node nearby.
