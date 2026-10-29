@@ -780,7 +780,7 @@ namespace
 
 bool GuildJobs::IsJob(const std::string& job)
 {
-    return job == "pay" || job == "reset" || job == "craft" || job == "kit" || job == "deposit";
+    return job == "pay" || job == "reset" || job == "craft" || job == "kit" || job == "deposit" || job == "withdraw";
 }
 
 bool GuildJobs::AlwaysKeep(uint32 itemId)
@@ -811,9 +811,10 @@ GuildJobs::Update GuildJobs::Tick(Player* bot, const std::string& job, const std
         EndTrip(bot->GetGUIDLow());
     }
 
-    if (job == "pay" || job == "kit" || job == "deposit")
+    if (job == "pay" || job == "kit" || job == "deposit" || job == "withdraw")
     {
-        Update u = job == "pay" ? Pay(bot, args, p) : job == "kit" ? Kit(bot, args, p) : Deposit(bot, args, p);
+        Update u = job == "pay" ? Pay(bot, args, p) : job == "kit" ? Kit(bot, args, p)
+            : job == "deposit" ? Deposit(bot, args, p) : Withdraw(bot, args, p);
         if (u.status != "working")
             EndTrip(bot->GetGUIDLow());
         return u;
@@ -826,7 +827,7 @@ GuildJobs::Update GuildJobs::Tick(Player* bot, const std::string& job, const std
 
 bool GuildJobs::Travels(const std::string& job, const std::string& args)
 {
-    if (job == "kit" || job == "deposit")
+    if (job == "kit" || job == "deposit" || job == "withdraw")
         return true;
     if (job != "pay")
         return false;
@@ -836,7 +837,7 @@ bool GuildJobs::Travels(const std::string& job, const std::string& args)
 
 bool GuildJobs::KeepsForJob(const std::string& job, const std::string& args, uint32 itemId)
 {
-    return (job == "kit" || job == "deposit") && ListsItem(Arg(args, "items"), itemId);
+    return (job == "kit" || job == "deposit" || job == "withdraw") && ListsItem(Arg(args, "items"), itemId);
 }
 
 bool GuildJobs::ShouldTravel(Player* bot)
@@ -844,7 +845,7 @@ bool GuildJobs::ShouldTravel(Player* bot)
     if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
         return false;
     const std::string job = sGuildBotMgr.GetActiveJob(bot->GetGUIDLow());
-    if (job != "pay" && job != "kit" && job != "deposit")
+    if (job != "pay" && job != "kit" && job != "deposit" && job != "withdraw")
         return false;
     Trip trip;
     return CurrentTrip(bot->GetGUIDLow(), trip) && !InReach(bot, trip.pos);
@@ -910,6 +911,10 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
             u.reason = "already paid ref=" + refArg;
             return u;
         }
+#if GUILD_JOBS_VAULT
+        if (!at.empty())
+            p.guild = sGuildVault.GuildOf(bot->GetSession()->GetAccountId());
+#endif
     }
 
     // At a counter: the nearest of its faction, chosen once per order, which travel takes it to.
@@ -938,8 +943,19 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
 
     // All or nothing: every check first, then everything taken at once.
     // The checks come before the way to a counter too, so it does not set out for a payment it cannot make.
-    if (bot->GetMoney() < gold)
-        return fail("has " + Money(bot->GetMoney()) + ", needs " + Money(uint32(gold)));
+    // Short of gold at a counter, it takes the rest from the guild's vault: a vaultkeeper stands beside every counter.
+    const uint32 shortfall = bot->GetMoney() < gold ? uint32(gold) - bot->GetMoney() : 0;
+    if (shortfall)
+    {
+        uint64 inVault = 0;
+#if GUILD_JOBS_VAULT
+        if (!at.empty() && !p.guild.empty())
+            inVault = sGuildVault.Gold(p.guild);
+#endif
+        if (inVault < shortfall)
+            return fail("has " + Money(bot->GetMoney()) + ", needs " + Money(uint32(gold))
+                + (at.empty() || p.guild.empty() ? "" : "; the vault holds " + Money(uint32(inVault))));
+    }
     for (auto const& [entry, count] : items)
     {
         uint32 have = CountInBags(bot, entry);
@@ -956,6 +972,17 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
         return u;
     }
 
+#if GUILD_JOBS_VAULT
+    if (shortfall)
+    {
+        // The vault's gold is saved with the character's in the vault's own transaction, before the payment below.
+        std::string why;
+        p.fromVault += sGuildVault.WithdrawGold(bot, shortfall, why);
+        if (bot->GetMoney() < gold)
+            return fail("has " + Money(bot->GetMoney()) + ", needs " + Money(uint32(gold)) + (why.empty() ? "" : "; " + why));
+    }
+#endif
+
     if (gold)
         bot->ModifyMoney(-int32(gold));
     for (auto const& [entry, count] : items)
@@ -967,7 +994,8 @@ GuildJobs::Update GuildJobs::Pay(Player* bot, const std::string& args, Progress&
     for (auto const& [entry, count] : items)
         what += (what.empty() ? "" : ", ") + std::to_string(count) + " " + ItemName(entry);
     u.status = "done";
-    u.reason = "paid " + what + " (ref " + refArg + ")" + (where.empty() ? "" : " to " + where);
+    u.reason = "paid " + what + " (ref " + refArg + ")" + (where.empty() ? "" : " to " + where)
+        + (p.fromVault ? ", " + Money(p.fromVault) + " of it from the vault" : "");
     u.events.push_back({ "paid", paid.str() });
     return u;
 }
@@ -1408,12 +1436,34 @@ GuildJobs::Update GuildJobs::Deposit(Player* bot, const std::string& args, Progr
 #else
     std::vector<std::pair<uint32, uint32>> items;
     const std::string itemsArg = Arg(args, "items");
-    if (itemsArg.empty())
-        return fail("deposit needs items=<entry>:<count>,..., a count of 0 for all it carries");
-    const std::string error = ParseItems(itemsArg, "deposit", true, items);
-    if (!error.empty())
-        return fail(error);
+    const std::string goldArg = Arg(args, "gold");
+    const std::string keepArg = Arg(args, "keep");
+    if (itemsArg.empty() && goldArg.empty())
+        return fail("deposit needs items=<entry>:<count>,... (a count of 0 for all it carries) or gold=<copper> (0 for all)");
+    if (!itemsArg.empty())
+    {
+        const std::string error = ParseItems(itemsArg, "deposit", true, items);
+        if (!error.empty())
+            return fail(error);
+    }
+    // gold=0 is all it carries; keep is what it keeps back of that.
+    const bool withGold = !goldArg.empty();
+    uint64 gold = 0, keep = 0;
+    if (withGold && (!ParseNumber(goldArg, gold) || gold > MAX_MONEY_AMOUNT))
+        return fail("deposit: gold must be copper, up to " + std::to_string(MAX_MONEY_AMOUNT));
+    if (!keepArg.empty() && (!withGold || !ParseNumber(keepArg, keep) || keep > MAX_MONEY_AMOUNT))
+        return fail("deposit: keep=<copper> goes with gold=, up to " + std::to_string(MAX_MONEY_AMOUNT));
     const uint32 guid = bot->GetGUIDLow();
+
+    // The gold to put in now: what it carries above keep, up to gold.
+    auto spareGold = [&]() -> uint32
+    {
+        if (!withGold)
+            return 0;
+        const uint32 money = bot->GetMoney();
+        const uint32 spare = money > keep ? money - uint32(keep) : 0;
+        return gold ? std::min(uint32(gold), spare) : spare;
+    };
 
     // An order is put in once. After a restart that lost the done status, the deposited event of this order,
     // written after the vault's change in the same queue, says it was put in already. The order's events come
@@ -1446,9 +1496,11 @@ GuildJobs::Update GuildJobs::Deposit(Player* bot, const std::string& args, Progr
     // Each stack of each item, up to its count: put in, or with forReal false only asked whether the vault would take it.
     // The reason lists what went in, what the vault refused and why, and what it carried less of than the order said.
     std::vector<std::pair<uint32, uint32>> deposited;
+    uint32 goldIn = 0;
     auto putIn = [&](bool forReal)
     {
         deposited.clear();
+        goldIn = 0;
         std::vector<std::tuple<uint32, uint32, std::string>> refused;
         std::vector<std::string> missing;
         for (auto const& [entry, count] : items)
@@ -1483,7 +1535,23 @@ GuildJobs::Update GuildJobs::Deposit(Player* bot, const std::string& args, Progr
             else if (count && carried < count)
                 missing.push_back(std::to_string(carried) + " of " + std::to_string(count) + " " + ItemName(entry));
         }
-        std::string reason = deposited.empty() ? "deposited nothing" : "deposited " + Names(deposited);
+        std::string goldRefused;
+        if (const uint32 spare = spareGold())
+        {
+            if (!forReal || sGuildVault.DepositGold(bot, spare, goldRefused))
+                goldIn = spare;
+            else if (!goldRefused.empty() && goldRefused.back() == '.')
+                goldRefused.pop_back();
+        }
+        std::string reason;
+        if (deposited.empty() && !goldIn)
+            reason = "deposited nothing";
+        else
+            reason = "deposited " + (goldIn ? Money(goldIn) + (deposited.empty() ? "" : " and ") : "") + (deposited.empty() ? "" : Names(deposited));
+        if (!goldRefused.empty())
+            reason += "; refused the gold (" + goldRefused + ")";
+        else if (withGold && gold && goldIn < gold)
+            reason += "; had " + Money(goldIn) + " of " + Money(uint32(gold)) + " to spare";
         for (auto const& [entry, n, why] : refused)
             reason += "; refused " + std::to_string(n) + " " + ItemName(entry) + " (" + why + ")";
         if (!missing.empty())
@@ -1500,7 +1568,7 @@ GuildJobs::Update GuildJobs::Deposit(Player* bot, const std::string& args, Progr
     if (!CurrentTrip(guid, trip))
     {
         const std::string plan = putIn(false);
-        if (deposited.empty())
+        if (deposited.empty() && !goldIn)
         {
             u.status = "done";
             u.reason = plan;
@@ -1523,8 +1591,164 @@ GuildJobs::Update GuildJobs::Deposit(Player* bot, const std::string& args, Progr
 
     u.status = "done";
     u.reason = putIn(true);
-    if (!deposited.empty())
-        u.events.push_back({ "deposited", "seq=" + std::to_string(p.seq) + " items=" + Entries(deposited) });
+    if (!deposited.empty() || goldIn)
+    {
+        std::string detail = "seq=" + std::to_string(p.seq);
+        if (!deposited.empty())
+            detail += " items=" + Entries(deposited);
+        if (goldIn)
+            detail += " gold=" + std::to_string(goldIn);
+        u.events.push_back({ "deposited", detail });
+    }
+    return u;
+#endif
+}
+
+GuildJobs::Update GuildJobs::Withdraw(Player* bot, const std::string& args, Progress& p)
+{
+    Update u;
+    auto fail = [&u](const std::string& reason) { u.status = "failed"; u.reason = reason; return u; };
+
+#if !GUILD_JOBS_VAULT
+    (void)bot;
+    (void)args;
+    (void)p;
+    return fail("this server has no guild vault");
+#else
+    std::vector<std::pair<uint32, uint32>> items;
+    const std::string itemsArg = Arg(args, "items");
+    const std::string goldArg = Arg(args, "gold");
+    if (itemsArg.empty() && goldArg.empty())
+        return fail("withdraw needs items=<entry>:<count>,... (a count of 0 for all the vault holds) or gold=<copper>");
+    if (!itemsArg.empty())
+    {
+        const std::string error = ParseItems(itemsArg, "withdraw", true, items);
+        if (!error.empty())
+            return fail(error);
+    }
+    uint64 gold = 0;
+    if (!goldArg.empty() && (!ParseNumber(goldArg, gold) || !gold || gold > MAX_MONEY_AMOUNT))
+        return fail("withdraw: gold must be copper, from 1 up to " + std::to_string(MAX_MONEY_AMOUNT));
+    const uint32 guid = bot->GetGUIDLow();
+
+    // An order is taken out once, as a deposit is put in once: after a restart that lost the done status,
+    // the withdrew event of this order says it was taken already.
+    if (!p.started)
+    {
+        p.started = true;
+        auto result = CharacterDatabase.PQuery(
+            "SELECT 1 FROM guildbot_event WHERE guid = %u AND kind = 'withdrew' AND (detail = 'seq=%u' OR detail LIKE 'seq=%u %%') "
+            "AND id > (SELECT COALESCE(MAX(id), 0) FROM guildbot_event WHERE guid = %u AND kind = 'job') LIMIT 1",
+            guid, p.seq, p.seq, guid);
+        if (result)
+        {
+            u.status = "done";
+            u.reason = "already withdrew this order";
+            return u;
+        }
+        p.guild = sGuildVault.GuildOf(bot->GetSession()->GetAccountId());
+    }
+
+    u.reason = NotReady(bot);
+    if (!u.reason.empty())
+    {
+        p.nearestAt = 0;
+        return u;
+    }
+    if (p.guild.empty())
+        return fail("has no guild vault");
+
+    // What the vault holds of the order: each item, and the gold.
+    auto inVault = [&]()
+    {
+        bool any = gold && sGuildVault.Gold(p.guild) > 0;
+        for (auto const& [entry, count] : items)
+            any = any || sGuildVault.Count(p.guild, entry) > 0;
+        return any;
+    };
+
+    // Before it sets out: to the vault only if it holds some of the order.
+    Trip trip;
+    if (!CurrentTrip(guid, trip))
+    {
+        if (!inVault())
+            return fail("the vault holds none of it");
+        if (!CounterTrip(bot, CounterKind::Vaultkeeper, trip))
+            return fail("no vaultkeeper known for its faction");
+        StartTrip(guid, trip.pos, trip.place, trip.where);
+        p.nearestAt = 0;
+    }
+
+    if (!InReach(bot, trip.pos))
+    {
+        std::string why;
+        if (Stalled(bot, trip.pos, COUNTER_STALL, p.nearest, p.nearestMap, p.nearestAt, why))
+            return fail("could not reach " + trip.where + ": " + why);
+        u.reason = "on its way to " + trip.where;
+        return u;
+    }
+
+    // As much as the vault holds and the bags and purse take; another character of the guild may have taken some
+    // on the way.
+    std::vector<std::pair<uint32, uint32>> took, shortOf;
+    std::string bagNote;
+    for (auto const& [entry, count] : items)
+    {
+        const uint32 held = sGuildVault.Count(p.guild, entry);
+        const uint32 want = count ? count : held;
+        uint32 got = 0;
+        if (want)
+        {
+            std::string why;
+            InventoryResult bagError = EQUIP_ERR_OK;
+            got = sGuildVault.Withdraw(bot, entry, want, why, &bagError);
+            if (bagError != EQUIP_ERR_OK && bagNote.empty())
+                bagNote = "bags full";
+        }
+        if (got)
+            took.push_back({ entry, got });
+        if (count && got < count)
+            shortOf.push_back({ entry, count - got });
+        else if (!count && !held)
+            shortOf.push_back({ entry, 0 });
+    }
+    uint32 goldOut = 0;
+    std::string goldNote;
+    if (gold)
+    {
+        std::string why;
+        goldOut = sGuildVault.WithdrawGold(bot, uint32(gold), why);
+        if (goldOut < gold)
+        {
+            if (!why.empty() && why.back() == '.')
+                why.pop_back();
+            goldNote = goldOut ? "short " + Money(uint32(gold) - goldOut) + " of gold" : why;
+        }
+    }
+
+    if (took.empty() && !goldOut)
+        return fail("took nothing" + (bagNote.empty() ? "" : "; " + bagNote) + (goldNote.empty() ? "" : "; " + goldNote));
+
+    std::string reason = "took " + (goldOut ? Money(goldOut) + (took.empty() ? "" : " and ") : "") + (took.empty() ? "" : Names(took));
+    if (!shortOf.empty())
+    {
+        reason += "; the vault was short of ";
+        for (size_t i = 0; i < shortOf.size(); ++i)
+            reason += (i ? ", " : "") + (shortOf[i].second ? std::to_string(shortOf[i].second) + " " : "") + ItemName(shortOf[i].first);
+    }
+    if (!bagNote.empty())
+        reason += "; " + bagNote;
+    if (!goldNote.empty())
+        reason += "; " + goldNote;
+
+    std::string detail = "seq=" + std::to_string(p.seq);
+    if (!took.empty())
+        detail += " items=" + Entries(took);
+    if (goldOut)
+        detail += " gold=" + std::to_string(goldOut);
+    u.status = "done";
+    u.reason = reason;
+    u.events.push_back({ "withdrew", detail });
     return u;
 #endif
 }

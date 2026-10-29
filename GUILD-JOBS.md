@@ -1,6 +1,6 @@
 # The guild's jobs
 
-Five jobs for the competition (`docs/competition.md`): `pay`, `reset`, `craft`, `kit` and `deposit`.
+Six jobs for the competition (`docs/competition.md`): `pay`, `reset`, `craft`, `kit`, `deposit` and `withdraw`.
 They are in `playerbot/GuildJobs.cpp`; `GuildBotMgr` holds the orders and reports them as it does for the others.
 This page is to be folded into `docs/engine.md`.
 
@@ -10,7 +10,7 @@ such as `waiting: dead`, `waiting: in combat`, `waiting: between places` or `wai
 `reset` needs only the character in the world.
 The character stands where it is on `reset`, `craft` and `pay`, as on `idle`,
 but for a `pay` order with `at`, which travels to a counter first,
-and `kit` and `deposit`, which travel to the vaultkeeper and to vendors; see below.
+and `kit`, `deposit` and `withdraw`, which travel to the vaultkeeper, and `kit` to vendors; see below.
 
 ## Jobs
 
@@ -20,9 +20,10 @@ and `kit` and `deposit`, which travel to the vaultkeeper and to vendors; see bel
 | `reset` | `map=<raid map id>` | Clears the lockout to one raid for every character on its account, so the guild's next entry opens a fresh instance. Refuses while any of them is inside. Done when cleared |
 | `craft` | `item=<entry made>` or `spell=<recipe spell id>`, `amount=<n>` (optional, 1 by default) | Makes the item with a recipe it knows, from the reagents in its bags, where it stands. Done when it has made the amount. The reason reports the count |
 | `kit` | `loadout=<name>` (optional, for the reason and the event), `items=<entry>:<count>,<entry>:<count>` | Brings what it carries of each item up to at least the count: takes what the guild's vault has, then buys from vendors near it with its own gold. Done when it holds the counts or has got all it could, with what is short |
-| `deposit` | `items=<entry>:<count>,<entry>:<count>`, a count of 0 for all it carries of one | Travels to the nearest vaultkeeper and puts the items in the guild's vault. Done with what went in, what the vault refused and why |
+| `deposit` | `items=<entry>:<count>,<entry>:<count>`, a count of 0 for all it carries of one; `gold=<copper>`, 0 for all it carries; `keep=<copper>` (optional, with `gold`) | Travels to the nearest vaultkeeper and puts the items and the gold in the guild's vault, keeping back `keep` of its gold. Done with what went in, what the vault refused and why |
+| `withdraw` | `items=<entry>:<count>,<entry>:<count>`, a count of 0 for all the vault holds of one; `gold=<copper>` | Travels to the nearest vaultkeeper and takes the items and the gold from the guild's vault, as much as it holds and the bags and purse take. Done with what it took and what the vault was short of |
 
-A `pay` order needs `ref` and at least one of `gold` and `items`.
+A `pay` order needs `ref` and at least one of `gold` and `items`; `deposit` and `withdraw` need at least one of theirs.
 The ref is the guild service's number for the payment, and it comes back in the event.
 A ref is paid once per character:
 an order whose ref the character already paid is done at once, with the reason `already paid ref=17`, and takes nothing.
@@ -54,7 +55,10 @@ unless the travel map's route to one across the sea is shorter.
 The choice holds for the order; a restart chooses again.
 
 The money and items are checked before it sets out, and again at every check, so it does not travel to a payment
-it cannot make. On the way it has the travel strategy and none of the town services:
+it cannot make. At a counter the guild's vault makes up the gold: a character with less than the order's gold
+sets out if the vault holds the rest, and at the counter takes the rest with `GuildVault::WithdrawGold`,
+since a vaultkeeper stands beside every counter. The reason then says how much came from the vault.
+Without `at` it pays with its own gold only. On the way it has the travel strategy and none of the town services:
 no trips to sell or repair, which could spend the gold it carries.
 The travel named `guild job` takes it there, by `GuildJobs::ShouldTravel` and `GuildJobs::Destination`.
 It pays once it is within 8 yards of the counter's spawn, talking range;
@@ -82,7 +86,7 @@ the object it needs nearby, such as an anvil or a forge, its reagents and room i
 It counts what it made by the item appearing in its bags, and keeps the count in `guildbot_job_progress`,
 so a restart carries on with the same order instead of starting it over.
 
-## Kit and deposit
+## Kit, deposit and withdraw
 
 A guild keeps a stockpile in its vault, the core's `GuildVault`, kept by a vaultkeeper (creature 200101) beside each capital's Guild Master.
 The guild service works out a loadout's counts for one character, such as `kit loadout=molten_core items=6049:5,13444:10`,
@@ -126,23 +130,38 @@ the `deposited` event of the order, written after the vault's change in the same
 says it was put in already. The event names the order's `job_seq` for that.
 A vaultkeeper it comes no 10 yards nearer to in 20 minutes fails the order, as a pay counter does.
 
-While either order runs, the character keeps the items it names, as the ones below:
+With `gold`, `deposit` also puts in gold, with `GuildVault::DepositGold`:
+what it carries above `keep`, up to `gold`, or all of that for `gold=0`.
+So `deposit gold=0 keep=500000` leaves a character 50g and puts in the rest.
+The amount is worked out at the vaultkeeper, from what it carries then.
+With only gold to put in and none to spare, it is done where it stands.
+
+`withdraw` checks before it sets out that the account has a vault and that it holds some of the order.
+At the vaultkeeper it takes each item with `GuildVault::Withdraw`, up to the count, or all the vault holds for 0,
+then the gold with `GuildVault::WithdrawGold`; each as much as the vault holds and the bags or purse take.
+Another character of the guild may have taken some on the way.
+It is done if it took anything, with what the vault was short of, and failed if it took nothing.
+It is taken out once, by its `withdrew` event, as a deposit is put in once.
+
+While any of these orders runs, the character keeps the items it names, as the ones below:
 it loots them, rolls need on them, and never sells, banks or destroys them.
 On the way it has the travel strategy and none of the town services, as `pay` at a counter has.
 
 The vault is on the core's `competition` branch until it is merged.
 The engine builds without it, by `__has_include("Guilds/GuildVault.h")`:
-then `kit` buys from vendors only, and `deposit` fails with `this server has no guild vault`.
+then `kit` buys from vendors only, `pay` uses only the character's own gold,
+and `deposit` and `withdraw` fail with `this server has no guild vault`.
 
 ## Statuses and reasons
 
 | Job | Working | Done | Failed |
 |---|---|---|---|
-| `pay` | `on its way to the Guild Master in Ironforge`, `on its way to the emissary of the Bronze Flight in Orgrimmar`; `waiting: in combat` and the like | `paid 20g, 2 Thorium Widget (ref 17)`, with ` to the Guild Master in Ironforge` at a counter; `already paid ref=17` | `has 12g, needs 20g`; `has 3 of 5 Thorium Widget`; `could not reach the Guild Master in Ironforge: came no nearer than 340 yards in 20 minutes`; `no Guild Master known for its faction`; a malformed order, such as `pay needs ref=<number>, and gold=<copper> or items=<entry>:<count>,...`, `pay: no item 99999` or `pay: at must be guild_master or emissary` |
+| `pay` | `on its way to the Guild Master in Ironforge`, `on its way to the emissary of the Bronze Flight in Orgrimmar`; `waiting: in combat` and the like | `paid 20g, 2 Thorium Widget (ref 17)`, with ` to the Guild Master in Ironforge` at a counter and `, 8g of it from the vault` when the vault made up the gold; `already paid ref=17` | `has 12g, needs 20g`, with `; the vault holds 3g` at a counter; `has 3 of 5 Thorium Widget`; `could not reach the Guild Master in Ironforge: came no nearer than 340 yards in 20 minutes`; `no Guild Master known for its faction`; a malformed order, such as `pay needs ref=<number>, and gold=<copper> or items=<entry>:<count>,...`, `pay: no item 99999` or `pay: at must be guild_master or emissary` |
 | `reset` | `waiting for Gbwar to arrive` | `reset Molten Core: 12 characters and 1 groups unbound` | `map 36 is not a raid`; `Gbwar is inside Molten Core`; `Gbwar is inside Molten Core, offline`; `Gbmage, in Gbwar's group, is inside Molten Core` |
 | `craft` | `made 2 of 5 Thorium Widget`, with `; waiting: in combat` and the like | `made 5 of 5 Thorium Widget` | The count, then why: `out of Thorium Bar, has 1, needs 3`; `needs a Blacksmith Hammer`; `needs an anvil nearby`; `Transmute: Arcanite is on cooldown`; `bags full`; `could not cast Thorium Widget`. Before any count: `knows no recipe for Thorium Widget`, `does not know <recipe>`, `<recipe> makes no item` |
 | `kit` | `on its way to the vaultkeeper in Stormwind`; `on its way to buy Sacred Candle from Keldric Boucher`; `on its way to buy from Keldric Boucher`; `stepping up to Keldric Boucher`; `waiting: in combat` and the like | `kitted molten_core`; `kitted molten_core; short 4 Major Mana Potion`, with `; bags full`, `; out of gold` or `; could not reach the vaultkeeper in Stormwind: came no nearer than 340 yards in 20 minutes` when one of those stopped it | `bags full; short 4 Major Mana Potion`; a malformed order, such as `kit needs items=<entry>:<count>,...` or `kit: no item 99999` |
-| `deposit` | `on its way to the vaultkeeper in Orgrimmar`; `waiting: dead` and the like | `deposited 20 Major Mana Potion`, with `; refused 1 Hearthstone (Soulbound items cannot go in the vault)` for each refusal and `; carries 6 of 10 Thorium Bar, none of Arcanite Bar` for what it had less of; `deposited nothing; ...` when the vault would take none, without travelling; `already deposited this order` | `this server has no guild vault`; `has no guild vault`; `no vaultkeeper known for its faction`; `could not reach the vaultkeeper in Orgrimmar: ...`; a malformed order, such as `deposit: items must be <entry>:<count>,<entry>:<count>` |
+| `deposit` | `on its way to the vaultkeeper in Orgrimmar`; `waiting: dead` and the like | `deposited 20 Major Mana Potion`, `deposited 112g 40s and 20 Major Mana Potion`, with `; had 30g of 50g to spare` when it carried less gold than `gold` above `keep`, with `; refused 1 Hearthstone (Soulbound items cannot go in the vault)` for each refusal and `; carries 6 of 10 Thorium Bar, none of Arcanite Bar` for what it had less of; `deposited nothing; ...` when the vault would take none, without travelling; `already deposited this order` | `this server has no guild vault`; `has no guild vault`; `no vaultkeeper known for its faction`; `could not reach the vaultkeeper in Orgrimmar: ...`; a malformed order, such as `deposit: items must be <entry>:<count>,<entry>:<count>` or `deposit: keep=<copper> goes with gold=, up to 2147483646` |
+| `withdraw` | `on its way to the vaultkeeper in Stormwind`; `waiting: dead` and the like | `took 50g and 10 Major Mana Potion`, with `; the vault was short of 4 Major Mana Potion`, `; bags full` or `; short 20g of gold`; `already withdrew this order` | `this server has no guild vault`; `has no guild vault`; `the vault holds none of it`, without travelling; `took nothing; bags full`; `could not reach the vaultkeeper in Stormwind: ...`; a malformed order, such as `withdraw: gold must be copper, from 1 up to 2147483646` |
 
 A craft cast that does not start six checks in a row, about half a minute, fails with `could not cast`.
 A cooldown fails the order rather than waiting for it, which may be a day for a transmute;
@@ -156,7 +175,8 @@ the guild service gives the order again once the cooldown is over.
 | `raid_reset` | A `reset` order cleared a raid; the detail is the map and what was unbound, such as `map=409 Molten Core characters=12 groups=1` |
 | `crafted` | A `craft` order made its amount; the detail is the item, the recipe and the count, such as `item=15994 spell=19791 made=5` |
 | `kitted` | A `kit` order is done; the detail is the loadout, what it took from the vault, what it bought and the copper that cost, and what is short, each part only when there is one, such as `loadout=molten_core vault=13444:6 bought=17029:10 spent=10000 short=13444:4` |
-| `deposited` | A `deposit` order put something in; the detail is the order's `job_seq` and what went in, such as `seq=12 items=13444:20,12359:5` |
+| `deposited` | A `deposit` order put something in; the detail is the order's `job_seq` and what went in, each part only when there is one, such as `seq=12 items=13444:20,12359:5 gold=1124000` |
+| `withdrew` | A `withdraw` order took something; the detail is the order's `job_seq` and what it took, as for `deposited`, such as `seq=14 items=13444:10 gold=500000` |
 
 The usual `job`, `job_done` and `job_failed` come with them,
 the last two with the job's name and the reason, such as `pay has 12g, needs 20g`.
