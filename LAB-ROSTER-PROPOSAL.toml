@@ -262,7 +262,7 @@ items = ["13444:5", "1645:4"]
 # `deposited 5g`, a `deposited` event `seq=<its job_seq> gold=50000`, 1g left on it, guildbot_vault_gold for
 # 'lab-vault' up by 50000 and a guildbot_vault_log line with item 0 and delta 50000.
 [[worker]]
-name = "Golddepositor"
+name = "Goldgiver"
 race = "orc"
 class = "warrior"
 account = "LABVAULT"
