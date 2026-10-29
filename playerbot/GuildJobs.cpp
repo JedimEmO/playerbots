@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <tuple>
 #include <sstream>
 #include <tuple>
 
@@ -208,12 +209,17 @@ namespace
             uint32(masters.size()), uint32(emissaries.size()), uint32(vaultkeepers.size()));
     }
 
+    // How far from a place the travel map's nearest node may be for a route to start or end there. The capitals'
+    // nodes are sparse: the nearest to the Guild Master in Ironforge is 150 yards off, in Orgrimmar 89.
+    constexpr float ROUTE_NODE_REACH = 200.0f;
+
     // The length of the travel map's route between two places, or -1 for none; as the dungeon job measures it.
+    // Boats and zeppelins count as no distance on the travel map, so a route across the sea can measure short.
     float RouteLength(const WorldPosition& from, const WorldPosition& to)
     {
         std::shared_lock<std::shared_timed_mutex> guard(sTravelNodeMap.m_nMapMtx);
-        std::vector<TravelNode*> starts = sTravelNodeMap.getNodes(from, 50.0f);
-        std::vector<TravelNode*> goals = sTravelNodeMap.getNodes(to, 50.0f);
+        std::vector<TravelNode*> starts = sTravelNodeMap.getNodes(from, ROUTE_NODE_REACH);
+        std::vector<TravelNode*> goals = sTravelNodeMap.getNodes(to, ROUTE_NODE_REACH);
         if (starts.empty() || goals.empty())
             return -1.0f;
         TravelNode* start = starts.front();
@@ -235,9 +241,10 @@ namespace
         return length;
     }
 
-    // The counter of the kind nearest the character among those of its faction: the shortest route on the travel map,
-    // or with no route to any, the nearest on its map, then the nearest by way of the map transfers. -1 for none.
-    // Called once the counters are indexed.
+    // The counter of the kind nearest the character among those of its faction. One on the character's own map comes
+    // first, since a boat or zeppelin measures as no distance but can take longer than a walk; among them the shortest
+    // route on the travel map, then with no route the nearest in a line. Off its map, the same by way of the map
+    // transfers. -1 for none. Called once the counters are indexed.
     int NearestCounter(Player* bot, CounterKind kind)
     {
         FactionTemplateEntry const* own = bot->GetFactionTemplateEntry();
@@ -245,7 +252,7 @@ namespace
             return -1;
         const WorldPosition from(bot);
         int best = -1;
-        std::pair<int, float> bestKey(2, FLT_MAX);
+        std::tuple<bool, int, float> bestKey(true, 2, FLT_MAX);
         for (size_t i = 0; i < counters.size(); ++i)
         {
             Counter const& c = counters[i];
@@ -256,7 +263,8 @@ namespace
                 continue;
             const float route = RouteLength(from, c.pos);
             const float straight = from.getMapId() == c.pos.getMapId() ? from.distance(c.pos) : sTravelMgr.MapTransDistance(from, c.pos);
-            const std::pair<int, float> key = route >= 0.0f ? std::make_pair(0, route) : std::make_pair(1, straight);
+            const bool otherMap = from.getMapId() != c.pos.getMapId();
+            const std::tuple<bool, int, float> key = route >= 0.0f ? std::make_tuple(otherMap, 0, route) : std::make_tuple(otherMap, 1, straight);
             if (best < 0 || key < bestKey)
             {
                 best = int(i);
