@@ -43,6 +43,17 @@ PlayerTravelInfo::PlayerTravelInfo(Player* player)
     {
         leftEntries = sGuildBotMgr.LeftDestinations(player);
         wantsExperience = sGuildBotMgr.GetActiveJob(player->GetGUIDLow()) == "level";
+        // Worn gear, for how hard a fight it takes on: the item level per armour and weapon slot, an empty one 0.
+        uint32 levels = 0, slots = 0;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        {
+            if (slot == EQUIPMENT_SLOT_BODY || slot == EQUIPMENT_SLOT_TABARD)
+                continue;
+            slots++;
+            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                levels += item->GetProto()->ItemLevel;
+        }
+        gearLevel = slots ? levels / slots : 0;
     }
 
     if (player->GetGroup())
@@ -586,6 +597,8 @@ bool ExploreTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& inf
 }
 
 static constexpr size_t MIN_LEVEL_GRIND_SPAWNS = 4;
+// A levelling character whose worn item level per slot is within this of its level takes on creatures of its own level.
+static constexpr int32 GEAR_SHORTFALL_EQUAL = 8;
 
 bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
 {
@@ -612,8 +625,13 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
     // Upstream keeps 3 to 5 levels below for safe coin. A character levelling fights its own level, as a player does:
     // within 1500 yards of the band 60 Horde in Felwood not one creature type was under the old cap, so they walked
     // 4000 yards to Azshara for creatures giving half the experience. Two below while it cannot take an equal fight.
+    // Poorly geared, it keeps three below: the play bench's levellers in greys and whites, worn item level 13 to 24 at
+    // level 25 to 34 with empty slots, died at their own level, Gbtroll six times in two hours.
     if (info.WantsExperience())
-        maxLevel = std::max(maxLevel, botLevel - (info.GetBoolValue("can fight equal") ? 0 : 2));
+    {
+        const bool geared = int32(info.GetGearLevel()) + GEAR_SHORTFALL_EQUAL >= botLevel;
+        maxLevel = std::max(maxLevel, botLevel - (info.GetBoolValue("can fight equal") && geared ? 0 : 3));
+    }
 
     if ((int32)cInfo->MaxLevel > maxLevel) //@lvl5 max = 3, @lvl60 max = 57
         return false;

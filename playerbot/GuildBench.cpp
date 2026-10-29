@@ -27,6 +27,9 @@ namespace
     {
         if (word.empty())
             return 0;
+        // White: a bench character geared like the play realm's levellers, for a lab test of poor gear.
+        if (word == "white" || word == "common")
+            return ITEM_QUALITY_NORMAL;
         if (word == "green" || word == "uncommon")
             return ITEM_QUALITY_UNCOMMON;
         if (word == "blue" || word == "rare")
@@ -133,7 +136,7 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
             second.clear();
         }
         if (ParseQuality(second) < 0)
-            return { "unknown quality " + second + "; use green, blue or epic" };
+            return { "unknown quality " + second + "; use white, green, blue or epic" };
         if (!dungeon.empty() && !GuildDungeon::Validate(dungeon).empty())
             return { GuildDungeon::Validate(dungeon) };
 
@@ -206,7 +209,7 @@ std::list<std::string> GuildBench::Gear(Player* bot, const std::string& qualityW
 {
     int quality = ParseQuality(qualityWord);
     if (quality < 0)
-        return { "unknown quality " + qualityWord + "; use green, blue or epic" };
+        return { "unknown quality " + qualityWord + "; use white, green, blue or epic" };
 
     PlayerbotAI* ai = bot->GetPlayerbotAI();
     uint32 before = ai->GetEquipGearScore(bot, false, false);

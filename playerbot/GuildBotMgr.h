@@ -160,6 +160,9 @@ private:
         time_t stuckNotedAt = 0;               // when that was last recorded
         int32 unreachableHandled = 0;          // the spot whose present cooldown has been counted, once
         int32 retrySpot = 0;                   // the grind spot its travel target's failed-move count belongs to
+        // Headway on the way to its grind spot: the spot, the nearest it has come, and since when no nearer.
+        struct Headway { int32 entry = 0; float best = 0.0f; time_t since = 0; };
+        Headway headway;
         time_t underwaterSince = 0; // since when it has been fully under water, or 0
         time_t stillTravelSince = 0; // since when its travel has counted as travelling with it standing still, or 0
         float stillTravelX = 0.0f, stillTravelY = 0.0f; // where it stood
@@ -215,6 +218,8 @@ private:
     void CheckStay(Character& c, Player* bot);
     // A levelling character whose moves to its grind spot keep failing passes over that spot for a while.
     void CheckUnreachable(Character& c, Player* bot);
+    // A levelling character that comes no nearer its grind spot for a while, out of combat, gives the spot up.
+    void CheckHeadway(Character& c, Player* bot);
     void CheckLoot(Character& c, Player* bot);
     static uint32 ZoneOf(Player* bot);
     // Count this check into the hourly measure, and write the counts when the hour or job changes, or every few minutes.

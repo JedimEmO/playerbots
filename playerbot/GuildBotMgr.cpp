@@ -68,6 +68,11 @@ namespace
     constexpr time_t IGNORE_TARGET_SECONDS = 10 * MINUTE;
     // Loot it has been after this long without taking it is out of reach, on a deck above or across water.
     constexpr time_t UNREACHED_LOOT_SECONDS = 45;
+    // A loot chase is forgotten only after this long with no loot target at all.
+    constexpr time_t LOOT_CHASE_FORGET_SECONDS = 3 * MINUTE;
+    // On the way to a grind spot, coming no nearer by this much in this long, out of combat, it gives the spot up.
+    constexpr float TRAVEL_HEADWAY_YARDS = 100.0f;
+    constexpr time_t TRAVEL_HEADWAY_SECONDS = 5 * MINUTE;
     // This many give-ups this close together mean the spot itself is out of reach: leave it for a while.
     constexpr size_t GIVE_UPS_TO_LEAVE = 3;
     constexpr time_t GIVE_UP_WINDOW_SECONDS = 10 * MINUTE;
@@ -337,13 +342,17 @@ void GuildBotMgr::CheckLoot(Character& c, Player* bot)
         return;
     AiObjectContext* context = ai->GetAiObjectContext();
     LootObject loot = context->GetValue<LootObject>("loot target")->Get();
+    const time_t now = time(nullptr);
     if (loot.IsEmpty() || bot->IsInCombat())
     {
-        lootChases.erase(c.guid);
+        // A moment without a loot target, between two goes at the same loot, does not start its clock again:
+        // Gbundead swung between its travel and the same loot for hours, the clock reset at every swing.
+        auto chase = lootChases.find(c.guid);
+        if (chase != lootChases.end() && now - chase->second.since > LOOT_CHASE_FORGET_SECONDS)
+            lootChases.erase(chase);
         return;
     }
 
-    const time_t now = time(nullptr);
     LootChase& chase = lootChases[c.guid];
     if (chase.target != loot.guid)
     {
@@ -593,6 +602,52 @@ void GuildBotMgr::CheckApproach(Character& c, Player* bot)
         travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_READY);
         travel->SetExpireIn(uint32(c.approachUntil - now) * IN_MILLISECONDS);
     }
+}
+
+void GuildBotMgr::CheckHeadway(Character& c, Player* bot)
+{
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (c.job != "level" || c.status != "working" || !bot->IsAlive() || !ai)
+    {
+        c.headway = Character::Headway();
+        return;
+    }
+    ai::TravelTarget* travel = ai->GetAiObjectContext()->GetValue<ai::TravelTarget*>("travel target")->Get();
+    const bool going = travel && travel->GetPosition() && dynamic_cast<ai::GrindTravelDestination*>(travel->GetDestination())
+        && (travel->GetStatus() == ai::TravelStatus::TRAVEL_STATUS_TRAVEL || travel->GetStatus() == ai::TravelStatus::TRAVEL_STATUS_READY);
+    if (!going)
+    {
+        c.headway = Character::Headway();
+        return;
+    }
+    const time_t now = time(nullptr);
+    const int32 entry = travel->GetEntry();
+    const float distance = travel->Distance(bot);
+    if (entry != c.headway.entry)
+    {
+        c.headway = Character::Headway{ entry, distance, now };
+        return;
+    }
+    // A fight on the way is no lack of headway; the clock waits.
+    if (bot->IsInCombat() || distance < c.headway.best - TRAVEL_HEADWAY_YARDS)
+    {
+        c.headway.best = std::min(c.headway.best, distance);
+        c.headway.since = now;
+        return;
+    }
+    if (now - c.headway.since < TRAVEL_HEADWAY_SECONDS)
+        return;
+
+    // On the way and no nearer for minutes: swinging between its path and something in town, as the play bench's
+    // levellers did after their hearthstone, Gbtroll 30 yards back and forth for an hour. Give the spot up and plan again.
+    leftDestinations[c.guid][entry] = now + LEAVE_DESTINATION_SECONDS;
+    travel->SetStatus(ai::TravelStatus::TRAVEL_STATUS_EXPIRED);
+    ai->GetAiObjectContext()->GetValue<ai::LastMovement&>("last movement")->Get().clear();
+    c.headway = Character::Headway();
+    std::string spot = std::to_string(entry);
+    if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry))
+        spot = info->Name;
+    Event(c.guid, "left_spot", spot + ": no headway, " + std::to_string(uint32(distance)) + " yards off");
 }
 
 void GuildBotMgr::CheckUnreachable(Character& c, Player* bot)
@@ -1654,6 +1709,7 @@ void GuildBotMgr::CheckJobs()
         CheckStillTravel(c, bot);
         CheckStay(c, bot);
         CheckUnreachable(c, bot);
+        CheckHeadway(c, bot);
         CheckLoot(c, bot);
 
         bool dead = sServerFacade.UnitIsDead(bot);

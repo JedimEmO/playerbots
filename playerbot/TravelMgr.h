@@ -54,6 +54,7 @@ namespace ai
 		// Guild characters walk everywhere, so they keep out of the other faction's zones.
 		bool AvoidsEnemyZones() const { return avoidEnemyZones; }
 		bool WantsExperience() const { return wantsExperience; }
+		uint32 GetGearLevel() const { return gearLevel; }
 		// A destination this character left lately because it could not work it.
 		bool HasLeft(int32 entry) const { return leftEntries.count(entry) > 0; }
 
@@ -76,6 +77,7 @@ namespace ai
 		bool avoidEnemyZones = false;
 		bool wantsExperience = false; // a guild character levelling: grind only what gives experience
 		std::set<int32> leftEntries;
+		uint32 gearLevel = 0; // a guild character's worn item level per slot, empty slots counting 0
 
 		focusQuestTravelList focusList = {};
 
