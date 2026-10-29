@@ -113,6 +113,8 @@ public:
     // Where a guild character in a group travels instead of following, when following cannot work:
     // its leader across a dungeon's entrance (the stone, when the dungeon has one), or far off on the same map.
     static bool FollowByTravel(Player* bot, WorldLocation& place);
+    // Adds the links the travel map lacks inside dungeons, from points walked by hand, once it is loaded.
+    static void AddHandLinks();
     // The one-at-a-time entry guard, for the trigger and the stone alike; guild characters also go after their leader.
     // Why not, when it is a reason that lasts: the leader not inside yet, or the group not bound.
     static bool MayEnterMap(Player* player, uint32 mapId, std::string* why = nullptr);

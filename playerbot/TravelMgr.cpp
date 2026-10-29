@@ -1,5 +1,6 @@
 #include "playerbot/TravelMgr.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 #include <sstream>
 #include <ctime>
 #include <cstdio>
@@ -1604,6 +1605,9 @@ void TravelMgr::LoadQuestTravelTable()
     sTravelNodeMap.printMap();
     sTravelNodeMap.printNodeStore();
     sTravelNodeMap.saveNodeStore();
+
+    // After the save, so the hand links stay out of the stored travel map.
+    GuildDungeon::AddHandLinks();
 
     LoadFishLocations();
 

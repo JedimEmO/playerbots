@@ -206,16 +206,28 @@ namespace
     // place and the navmesh's straight way leads somewhere the party cannot go on from: the map, the boss, the place.
     struct ViaPlace { uint32 map; int32 after; float x, y, z; };
     const ViaPlace VIAS[] = {
-        // Blackfathom Deeps: Lady Sarevess's node has no links, and the navmesh's way from her pool toward the Fires,
-        // Aku'mai or Ghamoo-ra's node ends on a spot in the water no path leaves. The leader goes back by the spot it came
-        // to her by from Kelris, where the travel map's route reached: from a spot further west, (-482, 289), no route
-        // built either, and the leader stood there until the run failed at Aku'mai.
-        { 48, 4831, -417.3f, 254.9f, -55.3f },
         // Blackfathom Deeps: on the way from Twilight Lord Kelris to Lady Sarevess the route can end in the shallows near
         // (-600, 55), where a leader stood until Sarevess was passed over. This spot short of her pool is where one leader's
         // way went on to her, and the travel map reaches it from Ghamoo-ra's node nearby.
         { 48, 4832, -417.3f, 254.9f, -55.3f },
     };
+    // Links the travel map lacks between two nodes inside a dungeon, by the points a leader walked between them: the
+    // map, the first node's place, the second node's place, and the points from the first to the second.
+    // Each is added both ways when the travel map is loaded.
+    struct HandLink { uint32 map; float fromX, fromY, fromZ, toX, toY, toZ; std::vector<std::array<float, 3>> points; };
+    const HandLink HAND_LINKS[] = {
+        // Blackfathom Deeps: Lady Sarevess's node has no links, and the navmesh's way out of her pool toward the Fires
+        // of Aku'mai ends in the water near (-480, 292) or (-355, 310), where leaders stood until the run failed at
+        // Aku'mai. These points are a leader's walk from Ghamoo-ra's node to her pool; from his node the travel map
+        // goes on to Kelris, the Fires and Aku'mai.
+        { 48, -442.4f, 211.8f, -52.6f, -299.9f, 413.8f, -57.1f, {
+            { -441.6f, 246.9f, -53.7f }, { -431.2f, 248.2f, -54.3f }, { -410.0f, 285.8f, -55.3f },
+            { -396.9f, 318.4f, -55.9f }, { -390.8f, 361.0f, -55.9f }, { -365.4f, 375.8f, -56.2f },
+            { -307.7f, 405.6f, -55.5f } } },
+    };
+    // A hand link's node is the travel node this near its place.
+    constexpr float HAND_LINK_NEAR = 5.0f;
+
     // The leader has come by a via place this near it, or gives it up after this long.
     constexpr float VIA_NEAR = 10.0f;
     constexpr time_t VIA_SECONDS = 3 * MINUTE;
@@ -583,6 +595,46 @@ std::string GuildDungeon::Validate(const std::string& name)
         return "no entrance known for " + name;
 
     return "";
+}
+
+void GuildDungeon::AddHandLinks()
+{
+    for (const HandLink& hand : HAND_LINKS)
+    {
+        const WorldPosition fromPlace(hand.map, hand.fromX, hand.fromY, hand.fromZ);
+        const WorldPosition toPlace(hand.map, hand.toX, hand.toY, hand.toZ);
+        std::vector<TravelNode*> froms = sTravelNodeMap.getNodes(fromPlace, HAND_LINK_NEAR);
+        std::vector<TravelNode*> tos = sTravelNodeMap.getNodes(toPlace, HAND_LINK_NEAR);
+        if (froms.empty() || tos.empty())
+        {
+            sLog.outError("Guild dungeon: no travel node for the hand link on map %u from (%.1f, %.1f) to (%.1f, %.1f)",
+                hand.map, hand.fromX, hand.fromY, hand.toX, hand.toY);
+            continue;
+        }
+        TravelNode* from = froms.front();
+        TravelNode* to = tos.front();
+
+        std::vector<WorldPosition> path = { *from->getPosition() };
+        for (const std::array<float, 3>& point : hand.points)
+            path.push_back(WorldPosition(hand.map, point[0], point[1], point[2]));
+        path.push_back(*to->getPosition());
+        float distance = 0.0f;
+        for (size_t i = 1; i < path.size(); ++i)
+            distance += path[i - 1].distance(path[i]);
+
+        for (int way = 0; way < 2; ++way)
+        {
+            TravelNodePath link(distance, 0.0f, (uint8)TravelNodePathType::walk, 0, true);
+            link.setPath(path);
+            link.setComplete(true);
+            from->setPathTo(to, link, true);
+            from->setLinked(true);
+            std::reverse(path.begin(), path.end());
+            std::swap(from, to);
+        }
+        sLog.outString("Guild dungeon: hand link on map %u between %s and %s, %.0f yards",
+            hand.map, from->getName().c_str(), to->getName().c_str(), distance);
+    }
 }
 
 bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dungeon, std::string& error)
