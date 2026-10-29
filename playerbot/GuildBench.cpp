@@ -187,6 +187,11 @@ std::list<std::string> GuildBench::Level(Player* bot, const std::string& name, u
 #ifndef MANGOSBOT_ONE
     bot->learnClassLevelSpells(true);
 #endif
+    // What a weapon master would teach: a warrior or rogue pulls with a bow, gun or thrown weapon.
+    if (bot->getClass() == CLASS_WARRIOR || bot->getClass() == CLASS_ROGUE)
+        for (uint32 spell : { 264u /* Bows */, 266u /* Guns */, 5011u /* Crossbows */, 2567u /* Thrown */ })
+            if (!bot->HasSpell(spell))
+                bot->learnSpell(spell, false);
     bot->UpdateSkillsForLevel(true);
 
     // Talents along the role's premade path, as the engine picks them for a guild character.
@@ -219,6 +224,30 @@ std::list<std::string> GuildBench::Gear(Player* bot, const std::string& qualityW
     // and then the old one is destroyed, not put in the bags. Mind that on a character with earned gear.
     PlayerbotFactory factory(bot, bot->GetLevel(), uint32(quality));
     factory.UpgradeGear(false);
+
+    // A warrior or rogue pulls with its ranged weapon, and the factory's picks leave the slot empty at some levels:
+    // the best bow, gun, crossbow or thrown weapon it can use, up to the quality asked for.
+    if ((bot->getClass() == CLASS_WARRIOR || bot->getClass() == CLASS_ROGUE)
+        && !bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED))
+    {
+        ItemPrototype const* best = nullptr;
+        for (uint32 itemId = 0; itemId < sItemStorage.GetMaxEntry(); ++itemId)
+        {
+            ItemPrototype const* proto = sObjectMgr.GetItemPrototype(itemId);
+            if (!proto || proto->Class != ITEM_CLASS_WEAPON || proto->Quality > uint32(quality)
+                || proto->RequiredLevel > bot->GetLevel() || proto->ItemLevel > bot->GetLevel() + 5
+                || bot->CanUseItem(proto) != EQUIP_ERR_OK)
+                continue;
+            if (proto->SubClass != ITEM_SUBCLASS_WEAPON_BOW && proto->SubClass != ITEM_SUBCLASS_WEAPON_GUN
+                && proto->SubClass != ITEM_SUBCLASS_WEAPON_CROSSBOW && proto->SubClass != ITEM_SUBCLASS_WEAPON_THROWN)
+                continue;
+            if (!best || proto->ItemLevel > best->ItemLevel)
+                best = proto;
+        }
+        uint16 dest;
+        if (best && bot->CanEquipNewItem(EQUIPMENT_SLOT_RANGED, dest, best->ItemId, false) == EQUIP_ERR_OK)
+            bot->EquipNewItem(dest, best->ItemId, true);
+    }
     bot->SaveToDB();
 
     uint32 after = ai->GetEquipGearScore(bot, false, false);

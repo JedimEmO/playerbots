@@ -4665,6 +4665,9 @@ void PlayerbotFactory::InitAmmo()
     uint32 entry = bot->GetUInt32Value(PLAYER_AMMO_ID);
     uint32 count = bot->GetItemCount(entry) / 200;
     uint32 maxCount = 5 + level / 10;
+    // A warrior or rogue shoots only to pull: one stack, not a hunter's bags of it.
+    if (bot->getClass() != CLASS_HUNTER)
+        maxCount = 1;
 
     if (ai->HasCheat(BotCheatMask::item))
         maxCount = 1;
