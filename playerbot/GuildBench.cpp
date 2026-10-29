@@ -5,6 +5,8 @@
 #include "playerbot/PlayerbotFactory.h"
 #include "playerbot/Talentspec.h"
 #include "playerbot/strategy/actions/ChangeTalentsAction.h"
+#include "playerbot/strategy/values/SharedValueContext.h"
+#include "playerbot/strategy/values/TrainerValues.h"
 
 #include <sstream>
 
@@ -187,6 +189,41 @@ std::list<std::string> GuildBench::Level(Player* bot, const std::string& name, u
 #ifndef MANGOSBOT_ONE
     bot->learnClassLevelSpells(true);
 #endif
+    // And whatever its class trainer still sells by this level, as the engine counts it, so a bench character with money
+    // has nothing to walk to a trainer for: given gold for repairs, every dungeon tank left its meeting stone to train,
+    // Dmtank for Ironforge, 5900 yards off. A rank learned in one pass opens the next.
+    // The trainers' spells are in the shared context, the same map for every character.
+    if (ai::trainableSpellMap* spellMap = GAI_VALUE(ai::trainableSpellMap*, "trainable spell map"))
+    {
+        auto classSpells = spellMap->find(TRAINER_TYPE_CLASS);
+        if (classSpells != spellMap->end())
+        {
+            auto own = classSpells->second.find(bot->getClass());
+            for (int pass = 0; own != classSpells->second.end() && pass < 20; ++pass)
+            {
+                bool learned = false;
+                for (auto& [trainerSpell, trainers] : own->second)
+                {
+                    uint32 reqLevel = trainerSpell->reqLevel;
+                    if (bot->GetTrainerSpellState(trainerSpell, reqLevel) != TRAINER_SPELL_GREEN)
+                        continue;
+                    SpellEntry const* teach = sServerFacade.LookupSpellInfo(trainerSpell->spell);
+                    bool taught = false;
+                    for (int j = 0; teach && j < 3; ++j)
+                        if (teach->Effect[j] == SPELL_EFFECT_LEARN_SPELL)
+                        {
+                            bot->learnSpell(teach->EffectTriggerSpell[j], false);
+                            taught = true;
+                        }
+                    if (!taught && trainerSpell->learnedSpell)
+                        bot->learnSpell(trainerSpell->learnedSpell, false);
+                    learned = true;
+                }
+                if (!learned)
+                    break;
+            }
+        }
+    }
     // What a weapon master would teach: a warrior or rogue pulls with a bow, gun or thrown weapon.
     if (bot->getClass() == CLASS_WARRIOR || bot->getClass() == CLASS_ROGUE)
         for (uint32 spell : { 264u /* Bows */, 266u /* Guns */, 5011u /* Crossbows */, 2567u /* Thrown */ })
