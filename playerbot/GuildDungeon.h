@@ -248,6 +248,7 @@ private:
         std::map<uint32, Still> stillInside;
         bool insideReached = false;    // the leader has come by the way out inside: from now on it goes out
         bool leaveResting = false;     // the leave waits for the party to finish its fight and rest first
+        time_t restSince = 0;          // since when the party has rested between fights inside, or 0
         std::string cleared;           // what the run did, for the job's reason once it is done
     };
 

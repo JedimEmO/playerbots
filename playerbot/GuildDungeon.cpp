@@ -58,6 +58,11 @@ namespace
     // The leave sets out once no member inside fights or is below this share of its health or, a caster, of its mana,
     // or this long after the last boss died, whichever comes first.
     constexpr uint32 LEAVE_REST_PERCENT = 50;
+    // Between fights inside, the leader goes on once every member inside is at this share of its health and, a caster,
+    // of its mana, or after this long: the party drinks and eats before the next pull, as players do.
+    constexpr uint32 FIGHT_REST_HEALTH = 60;
+    constexpr uint32 FIGHT_REST_MANA = 50;
+    constexpr time_t FIGHT_REST_SECONDS = 90;
     constexpr time_t LEAVE_REST_SECONDS = 3 * MINUTE;
     // A member inside that has stood still this long since the leader came out is stranded, somewhere no route leads
     // out of, and goes home by hearthstone, as a player would; tried again this often while it is on cooldown.
@@ -1375,6 +1380,46 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     const Dungeon& dungeon = run.dungeon;
     Map* map = leader->GetMap();
     OpenKeyDoors(leader, update);
+
+    // Out of every fight, a party low on health or mana rests before the leader goes on. With the creatures inside
+    // awake, a room answers a pull together: the Scholomance party drew nine at its first pull, the Stratholme one
+    // eleven, and a party that walked on into the next with its healer dry died in it.
+    if (Group* group = leader->GetGroup())
+    {
+        std::string low;
+        bool fight = false;
+        for (auto& slot : group->GetMemberSlots())
+        {
+            Player* member = sObjectMgr.GetPlayer(slot.guid);
+            if (!member || !member->IsInWorld() || member->GetMapId() != dungeon.mapId || !member->IsAlive())
+                continue;
+            if (member->IsInCombat())
+                fight = true;
+            else if (low.empty() && (member->GetHealth() * 100 < member->GetMaxHealth() * FIGHT_REST_HEALTH
+                || (member->GetPowerType() == POWER_MANA && member->GetMaxPower(POWER_MANA)
+                    && member->GetPower(POWER_MANA) * 100 < member->GetMaxPower(POWER_MANA) * FIGHT_REST_MANA)))
+                low = member->GetName();
+        }
+        const time_t restNow = time(nullptr);
+        if (low.empty())
+            run.restSince = 0;
+        else if (!fight && (!run.restSince || restNow - run.restSince < FIGHT_REST_SECONDS))
+        {
+            if (!run.restSince)
+                run.restSince = restNow;
+            run.headwaySince = restNow;
+            // It holds as it does for a member far behind: with "stay", and no travel target, it pulls nothing new.
+            if (!run.waiting)
+            {
+                run.waiting = true;
+                update.strategiesChanged = true;
+                if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+                    sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+            }
+            update.reason = "resting in " + dungeon.name + ", " + low + " is low; " + std::to_string(run.killed.size()) + " bosses down";
+            return;
+        }
+    }
 
     // A via place after a boss that died comes before the next step: the leader travels there, and its travel stays.
     run.viaPlace = nullptr;
