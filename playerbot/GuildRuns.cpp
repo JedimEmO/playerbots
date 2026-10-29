@@ -66,7 +66,7 @@ void GuildRuns::EnsureTables()
         " player_led TINYINT UNSIGNED NOT NULL DEFAULT 0,"
         " entered TIMESTAMP NULL DEFAULT NULL,"
         " closed TIMESTAMP NULL DEFAULT NULL,"
-        " ended VARCHAR(16) NOT NULL DEFAULT 'open',"       // open, reset, left
+        " ended VARCHAR(16) NOT NULL DEFAULT 'open',"       // open, reset, left, lost
         " outcome VARCHAR(16) NOT NULL DEFAULT 'none',"     // cleared, partial, none
         " bosses_killed INT UNSIGNED NOT NULL DEFAULT 0,"
         " bosses INT UNSIGNED NOT NULL DEFAULT 0,"
@@ -134,10 +134,20 @@ GuildRuns::Run* GuildRuns::OpenRun(Player* bot)
     run.opened = time(nullptr);
     run.lastInside = run.opened;
 
+    // The server gives a deleted instance's id to a new one, so an open run under this id of another map, or older
+    // than RESUME_HOURS, is another instance's that was never closed: it ends as lost. On the shared server the lab's
+    // restores delete its instances, and a Deadmines run left open by a play account two days before took in the
+    // lab's Deadmines tank.
+    constexpr uint32 RESUME_HOURS = 6;
+    CharacterDatabase.PExecute(
+        "UPDATE guildbot_run SET closed = NOW(), ended = 'lost' WHERE instance = %u AND ended = 'open' "
+        "AND (map <> %u OR opened < NOW() - INTERVAL %u HOUR)", run.instanceId, run.mapId, RESUME_HOURS);
+
     // A run still open from before a restart goes on: its members' counts and its dead bosses come back.
     auto open = CharacterDatabase.PQuery(
         "SELECT UNIX_TIMESTAMP(opened), COALESCE(UNIX_TIMESTAMP(entered), 0), wipes FROM guildbot_run "
-        "WHERE instance = %u AND ended = 'open' ORDER BY opened DESC LIMIT 1", run.instanceId);
+        "WHERE instance = %u AND ended = 'open' AND map = %u AND opened >= NOW() - INTERVAL %u HOUR "
+        "ORDER BY opened DESC LIMIT 1", run.instanceId, run.mapId, RESUME_HOURS);
     if (open)
     {
         Field* f = open->Fetch();
