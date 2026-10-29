@@ -883,6 +883,12 @@ bool RequestTravelTargetAction::isUseful() {
         && sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) != "level")
         return false;
 
+    // Inside a dungeon run the run chooses every move, so a guild character there requests no travel but the
+    // dungeon's. The Scholomance leader, waiting for its party with its gear broken, took a travel to a repairer
+    // in Alterac Valley, which no route reached, and stood by the entrance for the last 15 minutes of the hour.
+    if (sGuildBotMgr.IsGuildBot(bot) && getQualifier() != "dungeon" && sGuildDungeon.KeepsToMap(bot))
+        return false;
+
     if (!ai->AllowActivity(TRAVEL_ACTIVITY))
         return false;
 
