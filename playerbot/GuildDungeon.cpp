@@ -5,6 +5,8 @@
 #include "playerbot/TravelMgr.h"
 #include "playerbot/TravelNode.h"
 #include "playerbot/strategy/values/LastMovementValue.h"
+#include "playerbot/strategy/generic/PullStrategy.h"
+#include "MotionGenerators/PathFinder.h"
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
 #include "Maps/InstanceData.h"
@@ -35,6 +37,7 @@ std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::insides;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::stones;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::usePlaces;
 std::map<int32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::viaPlaces;
+std::vector<std::unique_ptr<PlaceTravelDestination>> GuildDungeon::repairPlaces;
 std::map<uint32, std::unique_ptr<PlaceTravelDestination>> GuildDungeon::bossPlaces;
 namespace
 {
@@ -103,6 +106,43 @@ namespace
     // party, then goes on without it. A release, the run from the graveyard and the walk in take one to three minutes.
     constexpr time_t REGROUP_SECONDS = 6 * MINUTE;
     constexpr float REGROUP_NEAR = 15.0f;
+
+    // The leader within INSIDE_WALK_RANGE of the place by the way in walks straight there, on leaving or regrouping, when
+    // the movement maps give a whole path at most INSIDE_WALK_RATIO times the straight distance that ends within
+    // INSIDE_WALK_END of the place. The travel map's route can start at a node the wrong way: in Scholomance the place is
+    // at the top of the stairs, and from the stairs the nearest node with a route to it is the Blood Steward of Kirtonos's,
+    // down in the first hall, so the leaving party walked into the hall's creatures and wiped there. A walk that comes no
+    // nearer by INSIDE_WALK_GAIN in INSIDE_WALK_STALL_SECONDS, or lasts INSIDE_WALK_SECONDS, stops, and the travel map's
+    // route takes over; a new walk waits INSIDE_WALK_RETRY_SECONDS.
+    constexpr float INSIDE_WALK_RANGE = 100.0f;
+    constexpr float INSIDE_WALK_RATIO = 1.5f;
+    constexpr float INSIDE_WALK_END = 5.0f;
+    constexpr float INSIDE_WALK_GAIN = 3.0f;
+    constexpr time_t INSIDE_WALK_STALL_SECONDS = 20;
+    constexpr time_t INSIDE_WALK_SECONDS = 90;
+    constexpr time_t INSIDE_WALK_RETRY_SECONDS = MINUTE;
+
+    // On the way to a boss the leader stops for a creature that would notice the party: hostile, out of a fight, in
+    // its sight, at most PULL_HEIGHT above it or PULL_BELOW below, and within the creature's own aggro distance and
+    // PULL_AHEAD more, plus the drop to a creature below. The party
+    // gathers within PULL_GATHER of it, for up to PULL_GATHER_SECONDS, and the tank pulls the creature to it.
+    // A pull that brings nothing in PULL_COME_SECONDS is tried again, and given up on after PULL_TRIES.
+    constexpr float PULL_AHEAD = 15.0f;
+    constexpr float PULL_LOOK = 60.0f;
+    constexpr float PULL_HEIGHT = 8.0f;
+    constexpr float PULL_BELOW = 20.0f;
+    constexpr float PULL_GATHER = 15.0f;
+    constexpr time_t PULL_GATHER_SECONDS = 20;
+    constexpr time_t PULL_COME_SECONDS = 20;
+    constexpr uint32 PULL_TRIES = 2;
+    // Creatures this near the pulled one, also out of a fight, are counted with it in the event: its pack.
+    constexpr float PULL_PACK = 15.0f;
+
+    // A member's gear broken, out of a fight, takes the party out to one repairer for up to REPAIR_SECONDS, and back
+    // in. The leader this near the repairer is there; the party's characters this near the repairer repair.
+    constexpr time_t REPAIR_SECONDS = 10 * MINUTE;
+    constexpr float REPAIR_AT = 8.0f;
+    constexpr float REPAIR_NEAR = 15.0f;
 
     // Why the stone last turned each member away, so the event log has each new reason once.
     std::mutex refusalLock;
@@ -210,6 +250,11 @@ namespace
     // place and the navmesh's straight way leads somewhere the party cannot go on from: the map, the boss, the place.
     struct ViaPlace { uint32 map; int32 after; float x, y, z; };
     const ViaPlace VIAS[] = {
+        // Blackfathom Deeps: from Ghamoo-ra the way to Gelihast can cut straight across the water and end below his
+        // ledge, 35 yards from him and 8 lower, where the travel target counts as there and no path leads up: the leader
+        // stood there until Gelihast was passed over, and from there no route reached Kelris, Sarevess or the Fires.
+        // The travel map's own route goes by its Blackfathom Deeps node to the southwest and comes to Gelihast at his level.
+        { 48, 4887, -570.4f, 0.9f, -47.1f },
         // Blackfathom Deeps: on the way from Twilight Lord Kelris to Lady Sarevess the route can end in the shallows near
         // (-600, 55), where a leader stood until Sarevess was passed over. This spot short of her pool is where one leader's
         // way went on to her, and the travel map reaches it from Ghamoo-ra's node nearby.
@@ -1135,6 +1180,11 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
             runs.erase(leader->GetGUIDLow());
         return update;
     }
+    if (run.phase == Phase::Repair)
+    {
+        TickRepair(leader, run, update);
+        return update;
+    }
 
     const Dungeon& dungeon = run.dungeon;
     Group* group = leader->GetGroup();
@@ -1436,6 +1486,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
 {
     const Dungeon& dungeon = run.dungeon;
     Map* map = leader->GetMap();
+    run.insideWalkedLast = run.insideWalking;
+    run.insideWalking = false;
     OpenKeyDoors(leader, update);
 
     // Out of every fight, a party low on health or mana rests before the leader goes on. With the creatures inside
@@ -1518,11 +1570,17 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 if (!resurrecting && run.nextBoss && way && way->getMapId() == leader->GetMapId()
                     && way->distance(WorldPosition(leader)) > REGROUP_NEAR)
                 {
-                    // It travels there as to a via place.
                     if (run.waiting)
                     {
                         run.waiting = false;
                         update.strategiesChanged = true;
+                    }
+                    // Straight there when a short path leads there, or else it travels there as to a via place.
+                    if (WalkToInside(leader, run, REGROUP_NEAR, update))
+                    {
+                        update.reason = "going straight back to the way in of " + dungeon.name + " for " + gone + "; "
+                            + std::to_string(run.killed.size()) + " bosses down";
+                        return;
                     }
                     run.viaPlace = dungeon.inside;
                     if (ai)
@@ -1549,6 +1607,48 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             }
             run.regroupedOut = true;
             update.events.push_back({ "member_behind", gone + ", going on without it after a death" });
+        }
+    }
+
+    // A member's gear broken, out of a fight, takes the party out to repair, and back in by the stone: an item at no
+    // durability gives none of its stats. The Scholomance leader, its gear broken after nine wipes, stood by the
+    // entrance for the last 15 minutes of the hour.
+    if (Group* group = leader->GetGroup())
+    {
+        std::string broken;
+        bool fight = false;
+        for (auto& slot : group->GetMemberSlots())
+        {
+            Player* member = sObjectMgr.GetPlayer(slot.guid);
+            if (!member || !member->IsInWorld() || member->GetMapId() != dungeon.mapId || !member->IsAlive())
+                continue;
+            if (member->IsInCombat())
+                fight = true;
+            else if (broken.empty())
+            {
+                const std::string item = BrokenGear(member);
+                if (!item.empty())
+                    broken = slot.name + "'s " + item;
+            }
+        }
+        if (!fight && !broken.empty() && !run.repairGaveUp)
+        {
+            run.repairTrip = true;
+            run.repairSince = 0;
+            run.repairPlace = nullptr;
+            run.repairArrived = false;
+            run.phase = Phase::Leave;
+            run.leaveStarted = time(nullptr);
+            run.leaderOutAt = 0;
+            run.insideReached = false;
+            run.leaveResting = false;
+            run.cleared = "out to repair, " + std::to_string(run.killed.size()) + " bosses down";
+            run.nextBoss = 0;
+            run.nextSpawn = 0;
+            update.strategiesChanged = true;
+            update.events.push_back({ "repair_trip", broken + " is broken" });
+            update.reason = "leaving " + dungeon.name + " to repair, " + broken + " is broken";
+            return;
         }
     }
 
@@ -1889,6 +1989,133 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         }
         run.waitedOut = true;
         update.events.push_back({ "member_behind", behind + ", going on to " + BossName(next) + " without it" });
+    }
+
+    // A creature ahead is pulled, not walked into. With the creatures inside awake, each that joins a fight calls
+    // for help, and a party walking on into a room fought it all at once: in Scholomance's first hall the leader's
+    // way brought 7 to 15 creatures on each pull, and the party wiped 8 times in half an hour. Of those it sees, the
+    // leader stops for the nearest, the edge of the pack it belongs to, and the tank pulls it back to the party.
+    // The wait is for members near, players as well as characters, never for something only a character does.
+    // Events count each pull: pulled, pull_skipped when the tank cannot pull, pull_given_up when one brought nothing.
+    if (killing.empty() && talkWait.empty() && !run.holding && leader->IsAlive() && leader->IsInWorld()
+        && !leader->IsBeingTeleported())
+    {
+        PlayerbotAI* pullAi = leader->GetPlayerbotAI();
+        Creature* pullTarget = !run.pullGuid.IsEmpty() ? map->GetCreature(run.pullGuid) : nullptr;
+        if (!run.pullGuid.IsEmpty() && (!pullTarget || !pullTarget->IsAlive() || leader->IsInCombat()))
+        {
+            // It came, or died, or went: done with it.
+            run.pullGuid.Clear();
+            run.pullAt = 0;
+            pullTarget = nullptr;
+        }
+        else if (pullTarget && run.pullAt && now - run.pullAt >= PULL_COME_SECONDS)
+        {
+            uint32& tries = run.pullTries[run.pullGuid];
+            if (++tries >= PULL_TRIES)
+            {
+                run.pullIgnored.insert(run.pullGuid);
+                update.events.push_back({ "pull_given_up", std::string(pullTarget->GetName()) + ", " + std::to_string(tries)
+                    + " pulls brought nothing" });
+                run.pullGuid.Clear();
+                pullTarget = nullptr;
+            }
+            run.pullAt = 0;
+        }
+
+        // What the party would meet next.
+        uint32 pack = 0;
+        if (!pullTarget && !leader->IsInCombat())
+        {
+            std::list<Unit*> found;
+            MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck check(leader, PULL_LOOK);
+            MaNGOS::UnitListSearcher<MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck> searcher(found, check);
+            Cell::VisitAllObjects(leader, searcher, PULL_LOOK);
+            float best = PULL_LOOK + 1.0f;
+            for (Unit* unit : found)
+            {
+                if (unit->GetTypeId() != TYPEID_UNIT || !unit->IsInWorld() || unit->IsInCombat() || !unit->IsEnemy(leader))
+                    continue;
+                Creature* creature = static_cast<Creature*>(unit);
+                if (creature->IsCritter() || creature->GetLevel() <= 1 || creature->GetCombatManager().IsEvadingHome()
+                    || creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE) || run.pullIgnored.count(creature->GetObjectGuid())
+                    || std::find(dungeon.bosses.begin(), dungeon.bosses.end(), int32(creature->GetEntry())) != dungeon.bosses.end())
+                    continue;
+                const float distance = leader->GetDistance(creature);
+                // Below the leader it looks farther down, in sight, and farther ahead by the drop: a party going
+                // down Scholomance's stairs closes on the hall below within a few seconds.
+                const float below = leader->GetPositionZ() - creature->GetPositionZ();
+                if (below > PULL_BELOW || -below > PULL_HEIGHT
+                    || distance > creature->GetAttackDistance(leader) + PULL_AHEAD + std::max(0.0f, below) || distance >= best
+                    || (below > PULL_HEIGHT && !leader->IsWithinLOSInMap(creature)))
+                    continue;
+                best = distance;
+                pullTarget = creature;
+            }
+            if (pullTarget)
+            {
+                for (Unit* unit : found)
+                    if (unit->GetTypeId() == TYPEID_UNIT && !unit->IsInCombat() && unit->IsEnemy(leader)
+                        && unit->GetDistance(pullTarget) <= PULL_PACK)
+                        ++pack;
+                run.pullGuid = pullTarget->GetObjectGuid();
+                run.pullSeenAt = now;
+                run.pullAt = 0;
+            }
+        }
+
+        if (pullTarget)
+        {
+            // It holds as it does for a member far behind: with "stay", and no travel target, it walks no farther.
+            run.waiting = true;
+            if (!wasWaiting)
+            {
+                update.strategiesChanged = true;
+                if (pullAi)
+                    sTravelMgr.SetNullTravelTarget(pullAi->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+            }
+            run.headwaySince = now;
+            const std::string name = pullTarget->GetName();
+            if (!run.pullAt)
+            {
+                bool gathered = true;
+                if (Group* group = leader->GetGroup())
+                    for (auto& slot : group->GetMemberSlots())
+                        if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                            if (member != leader && member->IsInWorld() && member->IsAlive() && member->GetMapId() == leader->GetMapId()
+                                && member->GetDistance(leader) > PULL_GATHER)
+                                gathered = false;
+                if (!gathered && now - run.pullSeenAt < PULL_GATHER_SECONDS)
+                {
+                    update.reason = "gathering to pull " + name + " in " + dungeon.name + ", " + count;
+                    return;
+                }
+                // Why the tank cannot pull, or empty.
+                std::string cannot;
+                PullStrategy* strategy = pullAi ? PullStrategy::Get(pullAi) : nullptr;
+                if (!strategy)
+                    cannot = "no pull strategy";
+                else if (leader->getClass() != CLASS_DRUID && leader->getClass() != CLASS_PALADIN
+                    && !leader->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED))
+                    cannot = "no ranged weapon";
+                else if (!strategy->CanDoPullAction(pullTarget))
+                    cannot = "cannot use " + strategy->GetPullActionName();
+                else if (!pullAi->DoSpecificAction("pull my target", Event("attack anything", pullTarget->GetObjectGuid()), true))
+                    cannot = "the pull did not start";
+                if (!cannot.empty())
+                {
+                    run.pullIgnored.insert(run.pullGuid);
+                    run.pullGuid.Clear();
+                    update.events.push_back({ "pull_skipped", name + ", " + cannot });
+                    update.reason = "on the way to " + BossName(next) + " in " + dungeon.name + ", " + count;
+                    return;
+                }
+                run.pullAt = now;
+                update.events.push_back({ "pulled", name + (pack > 1 ? ", one of " + std::to_string(pack) + " near it" : "") });
+            }
+            update.reason = "pulling " + name + " in " + dungeon.name + ", " + count;
+            return;
+        }
     }
     if (wasWaiting)
         update.strategiesChanged = true;
@@ -2386,10 +2613,226 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         update.reason = (dungeon.talks.count(next) ? "on the way to speak to " : "on the way to ") + BossName(next) + " in " + dungeon.name + ", " + count;
 }
 
+std::string GuildDungeon::BrokenGear(Player* member)
+{
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        if (Item* item = member->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            if (item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY) && !item->GetUInt32Value(ITEM_FIELD_DURABILITY))
+                return item->GetProto()->Name1;
+    return std::string();
+}
+
+void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
+{
+    const Dungeon& dungeon = run.dungeon;
+    const time_t now = time(nullptr);
+    Group* group = leader->GetGroup();
+
+    // Done when no character of the party has broken gear: a player repairs as they like.
+    std::string broken;
+    if (group)
+    {
+        for (auto& slot : group->GetMemberSlots())
+            if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                if (sGuildBotMgr.IsGuildBot(member) && member->IsInWorld() && broken.empty() && !BrokenGear(member).empty())
+                    broken = slot.name;
+    }
+    else if (!BrokenGear(leader).empty())
+        broken = leader->GetName();
+
+    auto back = [&](const std::string& kind, const std::string& detail)
+    {
+        update.events.push_back({ kind, detail });
+        if (kind == "gave_up")
+            run.repairGaveUp = true;
+        run.repairTrip = false;
+        run.repairSince = 0;
+        run.repairPlace = nullptr;
+        run.repairArrived = false;
+        run.phase = Phase::Check;
+        update.strategiesChanged = true;
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+        update.reason = "back to " + dungeon.name + " from repairing";
+    };
+    if (broken.empty())
+    {
+        back("repaired", dungeon.name + ", " + std::to_string(run.killed.size()) + " bosses down");
+        return;
+    }
+    if (now - run.repairSince > REPAIR_SECONDS)
+    {
+        back("gave_up", "repair, " + broken + " still broken after " + std::to_string(REPAIR_SECONDS / MINUTE) + " minutes");
+        return;
+    }
+
+    // A wipe on the way out brings the party back in, revived by its corpses inside: it sets out again, within the
+    // trip's time. In Scholomance the party wiped as it left, and its leader went on for the repairer from inside.
+    if (leader->IsAlive() && leader->GetMapId() == dungeon.mapId)
+    {
+        run.phase = Phase::Leave;
+        run.leaveStarted = now;
+        run.leaderOutAt = 0;
+        run.insideReached = false;
+        run.leaveResting = false;
+        run.repairPlace = nullptr;
+        run.repairArrived = false;
+        update.strategiesChanged = true;
+        update.reason = "leaving " + dungeon.name + " again to repair, " + broken + "'s gear is broken";
+        return;
+    }
+
+    // One repairer for the whole party: the leader's nearest on its own map, so that the party stays together and
+    // meets again at the stone. A repairer's spawns can lie on other maps, as Grelkor's in Alterac Valley.
+    if (!run.repairPlace)
+    {
+        if (!leader->IsInWorld() || leader->IsBeingTeleported())
+        {
+            update.reason = "out of " + dungeon.name + " to repair";
+            return;
+        }
+        const WorldPosition from(leader);
+        TravelDestination* best = nullptr;
+        WorldPosition bestAt;
+        float bestDistance = 0.0f;
+        for (TravelDestination* dest : sTravelMgr.GetDestinations(PlayerTravelInfo(leader), (uint32)TravelDestinationPurpose::Repair))
+        {
+            WorldPosition* at = dest->GetClosestPoint(from);
+            if (!at || at->getMapId() != leader->GetMapId() || dest->GetEntry() <= 0)
+                continue;
+            const float distance = at->distance(from);
+            if (!best || distance < bestDistance)
+            {
+                best = dest;
+                bestAt = *at;
+                bestDistance = distance;
+            }
+        }
+        if (!best)
+        {
+            back("gave_up", "repair, no repairer on this map");
+            return;
+        }
+        std::string name = "a repairer";
+        if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(best->GetEntry()))
+            name = info->Name;
+        {
+            std::lock_guard<std::mutex> guard(exitLock);
+            repairPlaces.push_back(std::make_unique<PlaceTravelDestination>(bestAt, name + " to repair"));
+            run.repairPlace = repairPlaces.back().get();
+        }
+        run.repairEntry = best->GetEntry();
+        update.events.push_back({ "repair_trip", "to " + name + ", " + std::to_string(uint32(bestDistance)) + " yards" });
+    }
+
+    WorldPosition* at = run.repairPlace->GetClosestPoint(WorldPosition(leader));
+    if (at && at->getMapId() == leader->GetMapId() && at->distance(WorldPosition(leader)) <= REPAIR_AT)
+        run.repairArrived = true;
+    if (!run.repairArrived)
+    {
+        update.reason = "on the way to " + run.repairPlace->GetTitle() + ", " + broken + "'s gear is broken";
+        return;
+    }
+
+    // There: the party's characters near the repairer repair all, as a player does at a repairer, and pay for it.
+    // The leader stays by it, with "stay", while the others come.
+    std::list<Unit*> found;
+    MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, uint32(run.repairEntry), REPAIR_NEAR * 2.0f);
+    MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
+    Cell::VisitAllObjects(leader, searcher, REPAIR_NEAR * 2.0f);
+    Unit* repairer = nullptr;
+    for (Unit* unit : found)
+        if (unit->IsAlive() && unit->IsInWorld())
+            repairer = unit;
+    if (!repairer)
+    {
+        update.reason = "at " + run.repairPlace->GetTitle() + ", no repairer there";
+        return;
+    }
+    if (group)
+    {
+        for (auto& slot : group->GetMemberSlots())
+            if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                if (sGuildBotMgr.IsGuildBot(member) && member->IsInWorld() && member->IsAlive() && !member->IsInCombat()
+                    && member->GetMapId() == repairer->GetMapId() && member->GetDistance(repairer) <= REPAIR_NEAR)
+                    member->DurabilityRepairAll(true, 1.0f);
+    }
+    else if (leader->GetDistance(repairer) <= REPAIR_NEAR)
+        leader->DurabilityRepairAll(true, 1.0f);
+    update.reason = "repairing at " + run.repairPlace->GetTitle() + ", waiting for " + broken;
+}
+
+bool GuildDungeon::WalkToInside(Player* leader, Run& run, float near, Update& update)
+{
+    const Dungeon& dungeon = run.dungeon;
+    const time_t now = time(nullptr);
+    auto stop = [&](bool failed)
+    {
+        run.insideWalkSince = 0;
+        if (failed)
+            run.insideWalkFailedAt = now;
+        return false;
+    };
+    Map* map = leader->GetMap();
+    if (!dungeon.inside || !leader->IsAlive() || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->IsInCombat()
+        || !map || !map->IsDungeon() || leader->GetMapId() != dungeon.mapId)
+        return stop(false);
+    WorldPosition* at = dungeon.inside->GetClosestPoint(WorldPosition(leader));
+    if (!at || at->getMapId() != leader->GetMapId())
+        return stop(false);
+    const float distance = at->distance(WorldPosition(leader));
+    if (distance <= near)
+        return stop(false);
+
+    // A new walk: only along a whole, short path that ends at the place.
+    if (!run.insideWalkedLast || !run.insideWalkSince)
+    {
+        run.insideWalkSince = 0;
+        if (distance > INSIDE_WALK_RANGE || now - run.insideWalkFailedAt < INSIDE_WALK_RETRY_SECONDS)
+            return false;
+        PathFinder path(leader);
+        path.calculate(at->getX(), at->getY(), at->getZ(), false);
+        const PathType type = path.getPathType();
+        if (!(type & PATHFIND_NORMAL) || (type & (PATHFIND_NOPATH | PATHFIND_INCOMPLETE | PATHFIND_SHORT | PATHFIND_SHORTCUT)))
+            return false;
+        const PointsArray& points = path.getPath();
+        if (points.size() < 2)
+            return false;
+        float length = 0.0f;
+        for (size_t i = 1; i < points.size(); ++i)
+            length += (points[i] - points[i - 1]).length();
+        const Vector3& end = points.back();
+        const float endOff = sqrtf((end.x - at->getX()) * (end.x - at->getX()) + (end.y - at->getY()) * (end.y - at->getY())
+            + (end.z - at->getZ()) * (end.z - at->getZ()));
+        if (length > distance * INSIDE_WALK_RATIO || endOff > INSIDE_WALK_END)
+            return false;
+        run.insideWalkSince = now;
+        run.insideWalkBest = distance;
+        run.insideWalkBestAt = now;
+        update.events.push_back({ "recovery", "straight to " + dungeon.inside->GetTitle() + ", " + std::to_string(uint32(length)) + " yards" });
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+    }
+
+    if (distance < run.insideWalkBest - INSIDE_WALK_GAIN)
+    {
+        run.insideWalkBest = distance;
+        run.insideWalkBestAt = now;
+    }
+    if (now - run.insideWalkBestAt > INSIDE_WALK_STALL_SECONDS || now - run.insideWalkSince > INSIDE_WALK_SECONDS)
+        return stop(true);
+    run.insideWalking = true;
+    if (!leader->IsMoving() && leader->IsInWorld() && !leader->IsBeingTeleported())
+        leader->GetMotionMaster()->MovePoint(0, at->getX(), at->getY(), at->getZ(), FORCED_MOVEMENT_RUN, true);
+    return true;
+}
+
 void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
 {
     const Dungeon& dungeon = run.dungeon;
     Group* group = leader->GetGroup();
+    run.insideWalkedLast = run.insideWalking;
+    run.insideWalking = false;
     if (leader->GetMapId() == dungeon.mapId)
         OpenKeyDoors(leader, update);
 
@@ -2522,6 +2965,14 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
             }
         }
 
+        // Far inside, straight to the place by the way out when a short path leads there.
+        if (leader->GetMapId() == dungeon.mapId && dungeon.inside && !run.insideReached
+            && WalkToInside(leader, run, EXIT_NEAR, update))
+        {
+            update.reason = "leaving " + dungeon.name + " straight by the way out, " + std::to_string(inside) + " inside; " + run.cleared;
+            return;
+        }
+
         // The leader inside goes for the way out; any other travel target goes, as at a dead boss.
         if (leader->GetMapId() == dungeon.mapId)
             if (PlayerbotAI* ai = leader->GetPlayerbotAI())
@@ -2538,6 +2989,19 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
                     target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
             }
         update.reason = "leaving " + dungeon.name + ", " + std::to_string(inside) + " inside; " + run.cleared;
+        return;
+    }
+
+    // Everyone is out on a repair trip: no reset, and the job goes on. The group's bind keeps the instance.
+    if (run.repairTrip)
+    {
+        run.phase = Phase::Repair;
+        if (!run.repairSince)
+            run.repairSince = now;
+        update.strategiesChanged = true;
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+        update.reason = "out of " + dungeon.name + " to repair";
         return;
     }
 
@@ -2602,8 +3066,13 @@ bool GuildDungeon::ShouldTravel(Player* bot) const
     const Run& run = it->second;
     if (run.phase == Phase::Go)
         return bot->GetMapId() != run.dungeon.mapId;
+    // Not while it walks straight to the place by the way in.
+    if (run.insideWalking)
+        return false;
     if (run.phase == Phase::Leave)
         return bot->GetMapId() == run.dungeon.mapId;
+    if (run.phase == Phase::Repair)
+        return run.repairPlace && !run.repairArrived;
     // Not while it stays by an event's creature, such as an escort: it moves with that instead.
     return run.phase == Phase::Bosses && run.nextBoss && !run.waiting && !run.holding && bot->GetMapId() == run.dungeon.mapId;
 }
@@ -2642,7 +3111,27 @@ bool GuildDungeon::IsHolding(Player* bot) const
     std::lock_guard<std::mutex> guard(lock);
     auto it = runs.find(bot->GetGUIDLow());
     // Holding: by the entrance while the party comes in, or before a boss while a member far behind catches up.
-    return it != runs.end() && (it->second.phase == Phase::Hold || (it->second.phase == Phase::Bosses && it->second.waiting));
+    return it != runs.end() && (it->second.phase == Phase::Hold || (it->second.phase == Phase::Bosses && it->second.waiting)
+        || (it->second.phase == Phase::Repair && it->second.repairArrived));
+}
+
+bool GuildDungeon::OnRepairTrip(Player* bot) const
+{
+    uint32 leaderGuid = bot->GetGUIDLow();
+    if (Group* group = bot->GetGroup())
+        leaderGuid = group->GetLeaderGuid().GetCounter();
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(leaderGuid);
+    return it != runs.end() && it->second.phase == Phase::Repair;
+}
+
+TravelDestination* GuildDungeon::RepairDestination(Player* bot) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(bot->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Repair || it->second.repairArrived)
+        return nullptr;
+    return it->second.repairPlace;
 }
 
 bool GuildDungeon::NoRpg(Player* bot) const

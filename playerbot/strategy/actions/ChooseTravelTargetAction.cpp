@@ -886,7 +886,9 @@ bool RequestTravelTargetAction::isUseful() {
     // Inside a dungeon run the run chooses every move, so a guild character there requests no travel but the
     // dungeon's. The Scholomance leader, waiting for its party with its gear broken, took a travel to a repairer
     // in Alterac Valley, which no route reached, and stood by the entrance for the last 15 minutes of the hour.
-    if (sGuildBotMgr.IsGuildBot(bot) && getQualifier() != "dungeon" && sGuildDungeon.KeepsToMap(bot))
+    // On a repair trip the run chose the one repairer for the party, and the others follow the leader to it.
+    if (sGuildBotMgr.IsGuildBot(bot) && getQualifier() != "dungeon"
+        && (sGuildDungeon.KeepsToMap(bot) || sGuildDungeon.OnRepairTrip(bot)))
         return false;
 
     if (!ai->AllowActivity(TRAVEL_ACTIVITY))
@@ -1068,7 +1070,10 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
         // On the way to a dungeon with a meeting stone: the stone, which takes the party in.
         // Inside, an object to use before the next boss comes first.
         // Then the spawn of a boss placed more than once that the dungeon job chose.
-        TravelDestination* stone = sGuildDungeon.StoneDestination(bot);
+        // Out to repair, the repairer the run chose.
+        TravelDestination* stone = sGuildDungeon.RepairDestination(bot);
+        if (!stone)
+            stone = sGuildDungeon.StoneDestination(bot);
         if (!stone)
             stone = sGuildDungeon.UseDestination(bot);
         if (!stone)

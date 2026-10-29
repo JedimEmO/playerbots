@@ -60,6 +60,8 @@ public:
     bool IsLeaving(Player* leader) const;
     // The leader, or a member of its group, is inside its dungeon in the bosses step: its routes stay on the map.
     bool KeepsToMap(Player* bot) const;
+    // The leader, or a member of its group, is out of its dungeon to repair, at the one repairer the run chose.
+    bool OnRepairTrip(Player* bot) const;
     // The keys to the locked doors of the dungeon a job names, for the bench to hand out.
     static std::vector<uint32> DungeonKeys(const std::string& name);
     int32 TravelEntry(Player* bot) const;
@@ -99,6 +101,8 @@ public:
     ai::TravelDestination* UseDestination(Player* bot) const;
     // The living spawn of a next boss with several spawns, which its boss destination would not pick out; null otherwise.
     ai::TravelDestination* BossDestination(Player* bot) const;
+    // The repairer the party goes to on a repair trip, for the leader; null otherwise.
+    ai::TravelDestination* RepairDestination(Player* bot) const;
     // For a member whose leader is at an object that needs more than one user: a place by it, near enough to use it.
     bool UseSpot(Player* leader, Player* member, WorldLocation& place) const;
     // The leader of an event stays by a creature or object of it, such as an escort: no travel, and back by it out of a fight.
@@ -158,7 +162,7 @@ public:
 private:
     GuildDungeon() = default;
 
-    enum class Phase { Check, Go, Hold, Bosses, Leave };
+    enum class Phase { Check, Go, Hold, Bosses, Leave, Repair };
 
     struct Dungeon
     {
@@ -243,6 +247,23 @@ private:
         bool waiting = false;          // the leader waits for a member far behind now, and travels nowhere
         time_t regroupSince = 0;       // since when the leader has waited for a member dead or outside, or 0
         bool regroupedOut = false;     // that wait is over, and the leader went on without the member
+        bool repairTrip = false;       // the party is out of the dungeon, or on its way out, to repair
+        time_t repairSince = 0;        // when it first came out to repair on this trip, or 0
+        ai::PlaceTravelDestination* repairPlace = nullptr; // the repairer it goes to; kept in repairPlaces
+        int32 repairEntry = 0;         // that repairer's creature entry
+        bool repairArrived = false;    // the leader has come to it, and stays there
+        bool repairGaveUp = false;     // a repair trip of this run gave up, and no other starts
+        bool insideWalking = false;    // this tick, the leader walks straight to the place by the way in, and travels nowhere
+        bool insideWalkedLast = false; // it did on the tick before
+        time_t insideWalkSince = 0;    // when that walk started, or 0
+        float insideWalkBest = 0.0f;   // the nearest it has come to the place on that walk
+        time_t insideWalkBestAt = 0;   // when it last came nearer by INSIDE_WALK_GAIN
+        time_t insideWalkFailedAt = 0; // when a walk last stopped without getting there
+        ObjectGuid pullGuid;           // the creature ahead the leader stopped to pull, or empty
+        time_t pullSeenAt = 0;         // when it stopped for it
+        time_t pullAt = 0;             // when the tank pulled it, or 0 while the party gathers
+        std::map<ObjectGuid, uint32> pullTries; // pulls that brought nothing, by creature
+        std::set<ObjectGuid> pullIgnored; // creatures the leader no longer stops for: given up on, or not pullable
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside
@@ -267,6 +288,12 @@ private:
     void TickBosses(Player* leader, Run& run, Update& update);
     // The finish step: out, then the reset.
     void TickLeave(Player* leader, Run& run, Update& update);
+    void TickRepair(Player* leader, Run& run, Update& update);
+    // Walks the leader straight to the place by the way in when a short path there exists, rather than by the travel
+    // map's route: true while it walks, and the travel waits.
+    bool WalkToInside(Player* leader, Run& run, float near, Update& update);
+    // An equipped item of the member's at no durability, by name, or empty.
+    static std::string BrokenGear(Player* member);
     // To a step's object or creature: by itself within APPROACH_RANGE, which holds it there, and by travel farther off.
     static void Approach(Player* leader, WorldObject* to, ai::TravelDestination* place, float near, float stand, Run& run);
 
@@ -278,6 +305,7 @@ private:
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> stones; // by dungeon map, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> usePlaces; // by object spawn, never freed
     static std::map<int32, std::unique_ptr<ai::PlaceTravelDestination>> viaPlaces; // by the boss before, never freed
+    static std::vector<std::unique_ptr<ai::PlaceTravelDestination>> repairPlaces; // repairers runs went to, never freed
     static std::map<uint32, std::unique_ptr<ai::PlaceTravelDestination>> bossPlaces; // by creature spawn, never freed
 
     static std::mutex entryLock;
