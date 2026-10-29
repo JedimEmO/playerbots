@@ -99,6 +99,10 @@ namespace
     constexpr uint32 GIVE_UPS_TO_PASS = 2;
     // Before each boss the leader waits this long for a member farther off than NEAR_LEADER, then goes on without it.
     constexpr time_t PARTY_WAIT_SECONDS = 3 * MINUTE;
+    // After a death the leader waits this long for the member to come back in, this near where the entrance puts a
+    // party, then goes on without it. A release, the run from the graveyard and the walk in take one to three minutes.
+    constexpr time_t REGROUP_SECONDS = 6 * MINUTE;
+    constexpr float REGROUP_NEAR = 15.0f;
 
     // Why the stone last turned each member away, so the event log has each new reason once.
     std::mutex refusalLock;
@@ -1157,8 +1161,9 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
             update.events.push_back({ "dungeon_entered", dungeon.name });
         }
 
-        // The whole party is in: on to the bosses.
-        if (run.entered && all)
+        // The whole party is in: on to the bosses. Once it has been in, a living leader inside stays in the boss
+        // phase while a member is dead or outside, and that phase waits for the member where it comes back in.
+        if (run.entered && (all || leader->IsAlive()))
         {
             if (run.phase != Phase::Bosses)
             {
@@ -1470,6 +1475,80 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             }
             update.reason = "resting in " + dungeon.name + ", " + low + " is low; " + std::to_string(run.killed.size()) + " bosses down";
             return;
+        }
+    }
+
+    // After a death the party comes back together before it goes on. While a member is dead, or outside after its
+    // release, the leader goes back to where the entrance puts a party, where that member comes back in, and waits
+    // there out of a fight for up to REGROUP_SECONDS. A member lying dead near a living healer, about to be
+    // resurrected, is waited for where the party stands. In Scholomance the leader went on while members lay dead,
+    // and each came back in alone through the first hall and died in it: 57 of the party's 81 deaths in an hour.
+    if (Group* group = leader->GetGroup())
+    {
+        std::string gone;
+        bool resurrecting = false;
+        for (auto& slot : group->GetMemberSlots())
+        {
+            Player* member = sObjectMgr.GetPlayer(slot.guid);
+            if (member == leader)
+                continue;
+            const bool here = member && member->IsInWorld() && member->GetMapId() == dungeon.mapId;
+            if (here && member->IsAlive())
+                continue;
+            if (here && WaitsForResurrect(member))
+                resurrecting = true;
+            if (gone.empty())
+                gone = slot.name;
+        }
+        const time_t regroupNow = time(nullptr);
+        if (gone.empty())
+        {
+            run.regroupSince = 0;
+            run.regroupedOut = false;
+        }
+        else if (!run.regroupedOut && !leader->IsInCombat())
+        {
+            if (!run.regroupSince)
+                run.regroupSince = regroupNow;
+            if (regroupNow - run.regroupSince <= REGROUP_SECONDS)
+            {
+                run.headwaySince = regroupNow;
+                PlayerbotAI* ai = leader->GetPlayerbotAI();
+                WorldPosition* way = dungeon.inside ? dungeon.inside->GetClosestPoint(WorldPosition(leader)) : nullptr;
+                if (!resurrecting && run.nextBoss && way && way->getMapId() == leader->GetMapId()
+                    && way->distance(WorldPosition(leader)) > REGROUP_NEAR)
+                {
+                    // It travels there as to a via place.
+                    if (run.waiting)
+                    {
+                        run.waiting = false;
+                        update.strategiesChanged = true;
+                    }
+                    run.viaPlace = dungeon.inside;
+                    if (ai)
+                    {
+                        TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+                        if (target && target->IsActive() && target->GetDestination() != dungeon.inside)
+                            target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+                    }
+                    update.reason = "going back to the way in of " + dungeon.name + " for " + gone + "; "
+                        + std::to_string(run.killed.size()) + " bosses down";
+                    return;
+                }
+                // It holds as it does for a member far behind: with "stay", and no travel target, it pulls nothing new.
+                if (!run.waiting)
+                {
+                    run.waiting = true;
+                    update.strategiesChanged = true;
+                    if (ai)
+                        sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+                }
+                update.reason = "waiting for " + gone + " to come back in " + dungeon.name + "; "
+                    + std::to_string(run.killed.size()) + " bosses down";
+                return;
+            }
+            run.regroupedOut = true;
+            update.events.push_back({ "member_behind", gone + ", going on without it after a death" });
         }
     }
 

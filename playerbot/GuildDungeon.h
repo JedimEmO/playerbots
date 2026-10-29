@@ -241,6 +241,8 @@ private:
         time_t waitSince = 0;          // when that wait started, or 0
         bool waitedOut = false;        // the wait before that boss is over, and the leader went on without the member
         bool waiting = false;          // the leader waits for a member far behind now, and travels nowhere
+        time_t regroupSince = 0;       // since when the leader has waited for a member dead or outside, or 0
+        bool regroupedOut = false;     // that wait is over, and the leader went on without the member
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside
