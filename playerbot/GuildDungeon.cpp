@@ -6,6 +6,7 @@
 #include "playerbot/TravelNode.h"
 #include "playerbot/strategy/values/LastMovementValue.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
+#include "playerbot/strategy/values/PositionValue.h"
 #include "MotionGenerators/PathFinder.h"
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
@@ -137,6 +138,31 @@ namespace
     constexpr uint32 PULL_TRIES = 2;
     // Creatures this near the pulled one, also out of a fight, are counted with it in the event: its pack.
     constexpr float PULL_PACK = 15.0f;
+
+    // A pulled creature with a caster near it, one of the mage or paladin class that stands and casts, is brought back to
+    // a corner: the newest place on the leader's own way, from CORNER_MIN to CORNER_RANGE back and at most PULL_HEIGHT
+    // from its height, that the pulled creature cannot see. The tank's pull returns there instead of to where it stood,
+    // and the party following it stands there too, so casters that cannot see the party walk round to it. In
+    // Scholomance's first hall the Neophytes and Acolytes stood back and cast at the healer, who died first in every wipe.
+    // The way is kept as places CORNER_STEP apart, the last CORNER_TRAIL of them.
+    constexpr float CORNER_STEP = 5.0f;
+    constexpr size_t CORNER_TRAIL = 24;
+    constexpr float CORNER_MIN = 8.0f;
+    constexpr float CORNER_RANGE = 40.0f;
+    // For a pull with a corner the party gathers at the corner before the pull, and for CORNER_HOLD_SECONDS after it the
+    // damage dealers within CORNER_HOLD_NEAR of the corner make no move toward a creature. Members that walked to their
+    // targets once the fight started stood in the casters' sight again: in Scholomance the tank came back to its corner
+    // up the stairs while the hunter and the mage stayed in the hall, and the healer, hunter and mage died 14 seconds later.
+    constexpr time_t CORNER_HOLD_SECONDS = 12;
+    constexpr float CORNER_HOLD_NEAR = 10.0f;
+
+    // While the leader gathers for or pulls a creature ahead, a member nearer that creature than the leader by PULL_HOLD_AHEAD
+    // goes back behind it: to the place on the leader's way from PULL_HOLD_MIN to PULL_HOLD_MAX back, or to the leader. In
+    // Scholomance the hunter and the mage, following, stood in the first hall while the tank was still on the stairs, and
+    // the hall's creatures came at them before any pull.
+    constexpr float PULL_HOLD_AHEAD = 2.0f;
+    constexpr float PULL_HOLD_MIN = 4.0f;
+    constexpr float PULL_HOLD_MAX = 15.0f;
 
     // A member's gear broken, out of a fight, takes the party out to one repairer for up to REPAIR_SECONDS, and back
     // in. The leader this near the repairer is there; the party's characters this near the repairer repair.
@@ -1491,6 +1517,28 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     Map* map = leader->GetMap();
     run.insideWalkedLast = run.insideWalking;
     run.insideWalking = false;
+
+    // The leader's way, for the corner a pull comes back to. A jump, as after a death, starts it afresh.
+    if (leader->IsAlive() && leader->IsInWorld() && !leader->IsBeingTeleported() && !leader->IsInCombat()
+        && leader->GetMapId() == dungeon.mapId)
+    {
+        const std::array<float, 3> here = { leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ() };
+        float step = CORNER_STEP;
+        if (!run.trail.empty())
+        {
+            const std::array<float, 3>& last = run.trail.back();
+            step = sqrtf((here[0] - last[0]) * (here[0] - last[0]) + (here[1] - last[1]) * (here[1] - last[1])
+                + (here[2] - last[2]) * (here[2] - last[2]));
+            if (step > CORNER_RANGE * 2.0f)
+                run.trail.clear();
+        }
+        if (run.trail.empty() || step >= CORNER_STEP)
+        {
+            run.trail.push_back(here);
+            if (run.trail.size() > CORNER_TRAIL)
+                run.trail.erase(run.trail.begin());
+        }
+    }
     OpenKeyDoors(leader, update);
 
     // Out of every fight, a party low on health or mana rests before the leader goes on. With the creatures inside
@@ -2010,6 +2058,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             // It came, or died, or went: done with it.
             run.pullGuid.Clear();
             run.pullAt = 0;
+            run.cornerGather = false;
             pullTarget = nullptr;
         }
         else if (pullTarget && run.pullAt && now - run.pullAt >= PULL_COME_SECONDS)
@@ -2021,6 +2070,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 update.events.push_back({ "pull_given_up", std::string(pullTarget->GetName()) + ", " + std::to_string(tries)
                     + " pulls brought nothing" });
                 run.pullGuid.Clear();
+                run.cornerGather = false;
                 pullTarget = nullptr;
             }
             run.pullAt = 0;
@@ -2064,6 +2114,32 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 run.pullGuid = pullTarget->GetObjectGuid();
                 run.pullSeenAt = now;
                 run.pullAt = 0;
+
+                // A caster near it: the party gathers at a corner it cannot see, if the way has one, and the pull comes back
+                // there, so the casters walk round to a party out of their sight.
+                run.cornerGather = false;
+                bool casters = false;
+                for (Unit* unit : found)
+                    if (unit->GetTypeId() == TYPEID_UNIT && unit->IsAlive() && unit->IsEnemy(leader)
+                        && (unit == pullTarget || unit->GetDistance(pullTarget) <= PULL_PACK))
+                        if (CreatureInfo const* info = static_cast<Creature*>(unit)->GetCreatureInfo())
+                            if (info->UnitClass == CLASS_MAGE || info->UnitClass == CLASS_PALADIN)
+                                casters = true;
+                if (casters)
+                {
+                    const float lx = leader->GetPositionX(), ly = leader->GetPositionY(), lz = leader->GetPositionZ();
+                    for (auto it = run.trail.rbegin(); it != run.trail.rend(); ++it)
+                    {
+                        const std::array<float, 3>& p = *it;
+                        const float back = sqrtf((p[0] - lx) * (p[0] - lx) + (p[1] - ly) * (p[1] - ly) + (p[2] - lz) * (p[2] - lz));
+                        if (back < CORNER_MIN || back > CORNER_RANGE || fabs(p[2] - lz) > PULL_HEIGHT
+                            || pullTarget->IsWithinLOS(p[0], p[1], p[2] + 2.0f))
+                            continue;
+                        run.cornerGather = true;
+                        run.cornerSpot = p;
+                        break;
+                    }
+                }
             }
         }
 
@@ -2081,16 +2157,21 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             const std::string name = pullTarget->GetName();
             if (!run.pullAt)
             {
+                // The members gather by the leader, or at the corner when the pull has one.
+                const float gx = run.cornerGather ? run.cornerSpot[0] : leader->GetPositionX();
+                const float gy = run.cornerGather ? run.cornerSpot[1] : leader->GetPositionY();
+                const float gz = run.cornerGather ? run.cornerSpot[2] : leader->GetPositionZ();
                 bool gathered = true;
                 if (Group* group = leader->GetGroup())
                     for (auto& slot : group->GetMemberSlots())
                         if (Player* member = sObjectMgr.GetPlayer(slot.guid))
                             if (member != leader && member->IsInWorld() && member->IsAlive() && member->GetMapId() == leader->GetMapId()
-                                && member->GetDistance(leader) > PULL_GATHER)
+                                && member->GetDistance(gx, gy, gz) > PULL_GATHER)
                                 gathered = false;
                 if (!gathered && now - run.pullSeenAt < PULL_GATHER_SECONDS)
                 {
-                    update.reason = "gathering to pull " + name + " in " + dungeon.name + ", " + count;
+                    update.reason = (run.cornerGather ? "gathering at a corner to pull " : "gathering to pull ") + name + " in "
+                        + dungeon.name + ", " + count;
                     return;
                 }
                 // Why the tank cannot pull, or empty.
@@ -2115,6 +2196,19 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 }
                 run.pullAt = now;
                 update.events.push_back({ "pulled", name + (pack > 1 ? ", one of " + std::to_string(pack) + " near it" : "") });
+
+                // With a corner, the pull comes back to the party gathered there, and the members hold there a while.
+                if (run.cornerGather)
+                {
+                    PositionMap& positions = pullAi->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get();
+                    PositionEntry corner = positions["pull"];
+                    corner.Set(run.cornerSpot[0], run.cornerSpot[1], run.cornerSpot[2], leader->GetMapId());
+                    positions["pull"] = corner;
+                    run.cornerUntil = now + CORNER_HOLD_SECONDS;
+                    const float back = leader->GetDistance(run.cornerSpot[0], run.cornerSpot[1], run.cornerSpot[2]);
+                    update.events.push_back({ "corner_pull", name + ", the party gathered at a corner " + std::to_string(uint32(back))
+                        + " yards back it cannot see" });
+                }
             }
             update.reason = "pulling " + name + " in " + dungeon.name + ", " + count;
             return;
@@ -3349,6 +3443,10 @@ bool GuildDungeon::FollowByTravel(Player* bot, WorldLocation& place)
     if (sGuildDungeon.UseSpot(leader, bot, place))
         return true;
 
+    // The leader gathers for or pulls a creature ahead: behind it, not nearer the creature than it.
+    if (sGuildDungeon.PullHoldSpot(leader, bot, place))
+        return true;
+
     {
         std::lock_guard<std::mutex> guard(refusalLock);
         stoneSince.erase(bot->GetGUIDLow());
@@ -3474,6 +3572,67 @@ void GuildDungeon::HoldNear(Player* leader, WorldObject* by, float near, float s
     float x, y, z;
     by->GetNearPoint(leader, x, y, z, leader->GetObjectBoundingRadius(), stand, by->GetAngle(leader));
     leader->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_RUN);
+}
+
+bool GuildDungeon::PullHoldSpot(Player* leader, Player* member, WorldLocation& place) const
+{
+    if (!member->IsAlive() || !member->IsInWorld() || member->IsBeingTeleported() || member->IsInCombat()
+        || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->GetMapId() != member->GetMapId())
+        return false;
+    ObjectGuid guid;
+    bool haveBehind = false;
+    std::array<float, 3> behind = {};
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        auto it = runs.find(leader->GetGUIDLow());
+        if (it == runs.end() || it->second.phase != Phase::Bosses || leader->GetMapId() != it->second.dungeon.mapId)
+            return false;
+        // Gathering at a corner, or holding there after the pull: every member to the corner.
+        const bool atCorner = (it->second.cornerGather && !it->second.pullGuid.IsEmpty()) || time(nullptr) < it->second.cornerUntil;
+        if (atCorner)
+        {
+            const std::array<float, 3>& c = it->second.cornerSpot;
+            if (member->GetDistance(c[0], c[1], c[2]) <= PULL_HOLD_MIN)
+                return false;
+            place = WorldLocation(leader->GetMapId(), c[0], c[1], c[2], 0.0f);
+            return true;
+        }
+        if (it->second.pullGuid.IsEmpty())
+            return false;
+        guid = it->second.pullGuid;
+        const float lx = leader->GetPositionX(), ly = leader->GetPositionY(), lz = leader->GetPositionZ();
+        for (auto p = it->second.trail.rbegin(); p != it->second.trail.rend(); ++p)
+        {
+            const float back = sqrtf(((*p)[0] - lx) * ((*p)[0] - lx) + ((*p)[1] - ly) * ((*p)[1] - ly) + ((*p)[2] - lz) * ((*p)[2] - lz));
+            if (back < PULL_HOLD_MIN || back > PULL_HOLD_MAX)
+                continue;
+            behind = *p;
+            haveBehind = true;
+            break;
+        }
+    }
+    Creature* target = leader->GetMap() ? leader->GetMap()->GetCreature(guid) : nullptr;
+    if (!target || !target->IsAlive() || member->GetDistance(target) >= leader->GetDistance(target) - PULL_HOLD_AHEAD)
+        return false;
+    if (haveBehind)
+        place = WorldLocation(leader->GetMapId(), behind[0], behind[1], behind[2], 0.0f);
+    else
+        leader->GetPosition(place);
+    return true;
+}
+
+bool GuildDungeon::HoldsAtCorner(Player* member) const
+{
+    Group* group = member->GetGroup();
+    if (!group || !sGuildBotMgr.IsGuildBot(member) || !member->IsInWorld() || member->IsBeingTeleported())
+        return false;
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(group->GetLeaderGuid().GetCounter());
+    if (it == runs.end() || it->second.phase != Phase::Bosses || time(nullptr) >= it->second.cornerUntil
+        || member->GetMapId() != it->second.dungeon.mapId)
+        return false;
+    const std::array<float, 3>& c = it->second.cornerSpot;
+    return member->GetDistance(c[0], c[1], c[2]) <= CORNER_HOLD_NEAR;
 }
 
 bool GuildDungeon::UseSpot(Player* leader, Player* member, WorldLocation& place) const

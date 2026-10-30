@@ -3,6 +3,7 @@
 #include "CombatStrategy.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildDungeon.h"
 
 using namespace ai;
 
@@ -180,6 +181,10 @@ float WaitForAttackMultiplier::GetValue(Action* action)
 {
     // Allow some movement and targeting actions and non threat actions (like cc!)
     const std::string& actionName = action->getName();
+    // A guild party holding at a corner just after a pull: no move toward a creature yet, so the casters come round to it.
+    if ((actionName == "reach spell" || actionName == "reach melee" || actionName == "wait for attack keep safe distance")
+        && sGuildDungeon.HoldsAtCorner(ai->GetBot()))
+        return 0.0f;
     if ((actionName != "wait for attack keep safe distance") && 
         (actionName != "dps assist") && 
         (actionName != "set facing") &&

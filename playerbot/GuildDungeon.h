@@ -105,6 +105,11 @@ public:
     ai::TravelDestination* RepairDestination(Player* bot) const;
     // For a member whose leader is at an object that needs more than one user: a place by it, near enough to use it.
     bool UseSpot(Player* leader, Player* member, WorldLocation& place) const;
+    // For a member whose leader gathers for or pulls a creature ahead, and which stands nearer that creature than the
+    // leader: a place behind the leader on its way, where it waits.
+    bool PullHoldSpot(Player* leader, Player* member, WorldLocation& place) const;
+    // The member's party holds at a corner just after a pull, and the member stands by it: it moves to no creature yet.
+    bool HoldsAtCorner(Player* member) const;
     // The leader of an event stays by a creature or object of it, such as an escort: no travel, and back by it out of a fight.
     static void HoldNear(Player* leader, WorldObject* by);
     // The same, staying this near and coming back to this near.
@@ -264,6 +269,10 @@ private:
         time_t pullAt = 0;             // when the tank pulled it, or 0 while the party gathers
         std::map<ObjectGuid, uint32> pullTries; // pulls that brought nothing, by creature
         std::set<ObjectGuid> pullIgnored; // creatures the leader no longer stops for: given up on, or not pullable
+        std::vector<std::array<float, 3>> trail; // the leader's last places inside, one every CORNER_STEP, newest last
+        bool cornerGather = false;     // the party gathers at cornerSpot for the creature being pulled, a caster near it
+        std::array<float, 3> cornerSpot = {}; // that corner: a place on the leader's way the creature cannot see
+        time_t cornerUntil = 0;        // after the pull, the members hold at the corner until then
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside
