@@ -14,7 +14,9 @@ namespace ai
             if (bot->GetTradeData())
                 return false;
 
-            if (!AI_VALUE(bool, "group ready"))
+            // Inside a guild dungeon run, the run's rest step decides when the leader's party has rested (GuildDungeon).
+            const bool restDecided = AI_VALUE2(bool, "manual bool", "guild dungeon rests") && !WorldPosition(bot).isOverworld();
+            if (!restDecided && !AI_VALUE(bool, "group ready"))
                 return false;
 
             if (AI_VALUE2(bool, "trigger active", "castnc"))

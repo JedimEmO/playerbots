@@ -279,6 +279,9 @@ private:
         float stillX = 0.0f, stillY = 0.0f, stillZ = 0.0f; // where the leader has stood, out of a fight, since stillSince
         time_t stillSince = 0;         // since when it has stood within LEADER_STILL_NEAR of that place, or 0
         time_t travelRestartAt = 0;    // when its travel was last started again for standing still on it
+        time_t idleSince = 0;          // since when it has been on its way to the next boss with no travel target, or 0
+        time_t idleSeenAt = 0;         // the last tick it was
+        time_t idleRestartAt = 0;      // when it was last given a travel target for that
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside
@@ -309,6 +312,9 @@ private:
     bool WalkToInside(Player* leader, Run& run, float near, Update& update);
     // Keeps where the leader stands still, and starts its travel again when the travel is on its way and the leader is not.
     void RestartStalledTravel(Player* leader, Run& run, Update& update);
+    // On the way to the next boss with no travel target at all, out of a fight, for IDLE_TRAVEL_SECONDS: a stall too.
+    // It records what held the leader, lets it out of that, and gives it a travel target to the boss.
+    void RestartIdleTravel(Player* leader, Run& run, int32 next, float bossDistance, Update& update);
     // An equipped item of the member's at no durability, by name, or empty.
     static std::string BrokenGear(Player* member);
     // To a step's object or creature: by itself within APPROACH_RANGE, which holds it there, and by travel farther off.

@@ -170,6 +170,11 @@ namespace
     constexpr float LEADER_STILL_NEAR = 5.0f;
     constexpr time_t TRAVEL_STALL_SECONDS = 30;
     constexpr time_t TRAVEL_RESTART_SECONDS = MINUTE;
+    // On its way to the next boss with no travel target, alive and out of a fight, for IDLE_TRAVEL_SECONDS, the leader
+    // gets one to the boss, at most once in TRAVEL_RESTART_SECONDS. After a wipe the Razorfen Downs leader stood where
+    // the entrance puts a party for 52 minutes with none, and the Scarlet Monastery one 2 to 5 minutes each time.
+    constexpr time_t IDLE_TRAVEL_SECONDS = MINUTE;
+    constexpr time_t IDLE_TRAVEL_GAP_SECONDS = 15;
     // A leader standing still out of a fight for LEADER_STUCK_SECONDS, farther than REGROUP_NEAR from the way in, waits no
     // longer: not for a member behind, nor for a member to come back, so the time without headway counts and the next
     // boss is passed over in time. By the way in it waits as before, for the corpse runs. The Scholomance leader stood on
@@ -1190,6 +1195,17 @@ namespace
         if (!context->GetValue<TravelTarget*>("travel target")->Get()->IsActive())
             context->GetValue<bool>("no active travel destinations", "dungeon")->Set(false);
     }
+
+    // Inside, the run's rest step decides when the party has rested enough to go on, and it waits FIGHT_REST_SECONDS at
+    // most. Upstream's "group ready" waits with no limit for every member's mana to reach mediumMana, and until then the
+    // leader neither chooses a travel target nor moves to one (CanMoveAroundValue). A healer that keeps spending its mana
+    // out of a fight never gets there: in Maraudon the leader stood with no target until its healer's mana went from 3%
+    // past 40%. CanMoveAroundValue skips that wait for a leader marked here.
+    void MarkRestDecided(Player* leader, bool decided)
+    {
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            ai->GetAiObjectContext()->GetValue<bool>("manual bool", "guild dungeon rests")->Set(decided);
+    }
 }
 
 GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
@@ -1199,6 +1215,7 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     AllowTravelRequest(leader);
 
     Run& run = runs[leader->GetGUIDLow()];
+    MarkRestDecided(leader, run.resolved && run.phase == Phase::Bosses && leader->GetMapId() == run.dungeon.mapId);
     if (!run.resolved)
     {
         std::string error;
@@ -2771,6 +2788,10 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (target && forNext && stopped)
             ai->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().clear();
     }
+    if (talkWait.empty() && killing.empty() && !dungeon.talks.count(next))
+        RestartIdleTravel(leader, run, next, bossPlace ? bossDistance : 0.0f, update);
+    else
+        run.idleSince = 0;
     if (!talkWait.empty())
         update.reason = "waiting for " + talkWait + " in " + dungeon.name + ", " + count;
     else if (!killing.empty())
@@ -2983,6 +3004,97 @@ void GuildDungeon::RestartStalledTravel(Player* leader, Run& run, Update& update
     ai->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().clear();
     update.events.push_back({ "recovery", "travel to " + title + " stalled for " + std::to_string(uint32(now - run.stillSince))
         + " seconds, started again" });
+}
+
+void GuildDungeon::RestartIdleTravel(Player* leader, Run& run, int32 next, float bossDistance, Update& update)
+{
+    const time_t now = time(nullptr);
+    PlayerbotAI* ai = leader->GetPlayerbotAI();
+    TravelTarget* target = ai ? ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get() : nullptr;
+    const TravelStatus status = target ? target->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
+    const bool travelling = status == TravelStatus::TRAVEL_STATUS_TRAVEL || status == TravelStatus::TRAVEL_STATUS_READY
+        || status == TravelStatus::TRAVEL_STATUS_WORK;
+    // Near the boss it fights, not travels; the node walk and the walk to the way in move it without a target.
+    if (!target || travelling || !leader->IsAlive() || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->IsInCombat()
+        || leader->GetVictim() || run.nodeWalking || run.insideWalkedLast || bossDistance <= APPROACH_RANGE)
+    {
+        run.idleSince = 0;
+        return;
+    }
+    // A tick that did not get here, such as one resting or pulling, starts the count afresh.
+    if (!run.idleSince || now - run.idleSeenAt > IDLE_TRAVEL_GAP_SECONDS)
+        run.idleSince = now;
+    run.idleSeenAt = now;
+    if (now - run.idleSince < IDLE_TRAVEL_SECONDS || now - run.idleRestartAt < TRAVEL_RESTART_SECONDS)
+        return;
+    run.idleRestartAt = now;
+
+    // What held it, for the event: the AI's own fight state, upstream's wait for the group, or the travel requests.
+    AiObjectContext* context = ai->GetAiObjectContext();
+    std::string held;
+    if (ai->IsStateActive(BotState::BOT_STATE_COMBAT))
+        held = "its AI in a fight with nothing to attack";
+    else if (!context->GetValue<bool>("can move around")->Get())
+    {
+        held = "it could not move around";
+        if (!context->GetValue<bool>("group ready")->Get())
+        {
+            std::string dead, low;
+            uint32 lowest = 100;
+            if (Group* group = leader->GetGroup())
+                for (auto& slot : group->GetMemberSlots())
+                    if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                    {
+                        if (!member->IsAlive())
+                        {
+                            if (dead.empty())
+                                dead = slot.name;
+                        }
+                        else if (member->GetPowerType() == POWER_MANA && member->GetMaxPower(POWER_MANA))
+                        {
+                            const uint32 mana = member->GetPower(POWER_MANA) * 100 / member->GetMaxPower(POWER_MANA);
+                            if (mana < lowest)
+                            {
+                                lowest = mana;
+                                low = slot.name;
+                            }
+                        }
+                    }
+            held = "the group not ready" + (!dead.empty() ? ", " + dead + " dead"
+                : !low.empty() ? ", " + low + " at " + std::to_string(lowest) + "% mana" : std::string());
+        }
+    }
+    else if (context->GetValue<bool>("no active travel destinations", "dungeon")->Get())
+        held = "no destination found for the dungeon";
+    else
+        held = "travel status " + std::to_string(uint32(status));
+
+    // The way out of each: the fight state ends, as it does when a fight with nothing to attack is left, and the marks
+    // of purposes that found nothing go. Upstream's group wait is skipped inside (MarkRestDecided).
+    if (ai->IsStateActive(BotState::BOT_STATE_COMBAT))
+        ai->OnCombatEnded();
+    context->ClearValues("no active travel destinations");
+
+    // A travel target straight to the boss, as the dungeon request would choose: the spawn the run chose when the boss
+    // has several, else the boss's destination.
+    TravelDestination* dest = run.nextPlace;
+    if (!dest)
+        for (TravelDestination* boss : sTravelMgr.GetDestinations(PlayerTravelInfo(leader), (uint32)TravelDestinationPurpose::Boss, { next }, false, 0))
+        {
+            dest = boss;
+            break;
+        }
+    std::list<uint8> nearest = { 0 };
+    WorldPosition* point = dest ? dest->GetNextPoint(WorldPosition(leader), nearest, true) : nullptr;
+    if (point)
+    {
+        target->SetTarget(dest, point);
+        target->SetForced(true);
+        target->SetStatus(TravelStatus::TRAVEL_STATUS_READY);
+        context->GetValue<LastMovement&>("last movement")->Get().clear();
+    }
+    update.events.push_back({ "recovery", "no travel target for " + std::to_string(uint32(now - run.idleSince)) + " seconds, "
+        + held + (point ? "; travelling to " + dest->GetTitle() : "; no destination for " + BossName(next)) });
 }
 
 bool GuildDungeon::WalkToInside(Player* leader, Run& run, float near, Update& update)
