@@ -163,6 +163,12 @@ namespace
     constexpr float LEADER_STILL_NEAR = 5.0f;
     constexpr time_t TRAVEL_STALL_SECONDS = 30;
     constexpr time_t TRAVEL_RESTART_SECONDS = MINUTE;
+    // A leader standing still out of a fight for LEADER_STUCK_SECONDS, farther than REGROUP_NEAR from the way in, waits no
+    // longer: not for a member behind, nor for a member to come back, so the time without headway counts and the next
+    // boss is passed over in time. By the way in it waits as before, for the corpse runs. The Scholomance leader stood on
+    // a ledge above Rattlegore for 43 minutes, waiting for its party and going back for it in turn, each of which held the
+    // headway clock, while the party died in the hall below 16 times.
+    constexpr time_t LEADER_STUCK_SECONDS = 3 * MINUTE;
     constexpr float CORNER_HOLD_NEAR = 10.0f;
 
     // While the leader gathers for or pulls a creature ahead, a member nearer that creature than the leader by PULL_HOLD_AHEAD
@@ -1531,6 +1537,11 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     run.insideWalking = false;
 
     RestartStalledTravel(leader, run, update);
+    bool leaderStuck = run.stillSince && time(nullptr) - run.stillSince >= LEADER_STUCK_SECONDS && !leader->IsInCombat();
+    if (leaderStuck && dungeon.inside)
+        if (WorldPosition* way = dungeon.inside->GetClosestPoint(WorldPosition(leader)))
+            if (way->getMapId() == leader->GetMapId() && way->distance(WorldPosition(leader)) <= REGROUP_NEAR)
+                leaderStuck = false;
 
     // The leader's way, for the corner a pull comes back to. A jump, as after a death, starts it afresh.
     if (leader->IsAlive() && leader->IsInWorld() && !leader->IsBeingTeleported() && !leader->IsInCombat()
@@ -1622,6 +1633,12 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         {
             run.regroupSince = 0;
             run.regroupedOut = false;
+        }
+        else if (!run.regroupedOut && leaderStuck)
+        {
+            run.regroupedOut = true;
+            update.events.push_back({ "member_behind", gone + ", going on without it: the leader has not moved for "
+                + std::to_string(LEADER_STUCK_SECONDS / MINUTE) + " minutes" });
         }
         else if (!run.regroupedOut && !leader->IsInCombat())
         {
@@ -2039,6 +2056,12 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     behind = slot.name;
                     break;
                 }
+    if (killing.empty() && !behind.empty() && !run.waitedOut && leaderStuck)
+    {
+        run.waitedOut = true;
+        update.events.push_back({ "member_behind", behind + ", going on to " + BossName(next) + " without it: the leader has not moved for "
+            + std::to_string(LEADER_STUCK_SECONDS / MINUTE) + " minutes" });
+    }
     if (killing.empty() && !behind.empty() && !run.waitedOut)
     {
         if (!run.waitSince)
