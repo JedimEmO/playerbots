@@ -128,7 +128,9 @@ void GuildRuns::EnsureTables()
         "ALTER TABLE guildbot_run"
         " ADD COLUMN IF NOT EXISTS moves_traced INT UNSIGNED NOT NULL DEFAULT 0,"
         " ADD COLUMN IF NOT EXISTS moves_straight INT UNSIGNED NOT NULL DEFAULT 0,"
-        " ADD COLUMN IF NOT EXISTS moves_off_mesh INT UNSIGNED NOT NULL DEFAULT 0");
+        " ADD COLUMN IF NOT EXISTS moves_off_mesh INT UNSIGNED NOT NULL DEFAULT 0,"
+        " ADD COLUMN IF NOT EXISTS moves_single INT UNSIGNED NOT NULL DEFAULT 0,"         // one segment, any length
+        " ADD COLUMN IF NOT EXISTS moves_single_yards INT UNSIGNED NOT NULL DEFAULT 0");  // the longest of them
     CharacterDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS guildbot_run_member ("
         " instance INT UNSIGNED NOT NULL,"
@@ -253,7 +255,8 @@ GuildRuns::Run* GuildRuns::OpenRun(Player* bot)
 
     // A run still open from before a restart goes on: its members' counts and its dead bosses come back.
     auto open = CharacterDatabase.PQuery(
-        "SELECT UNIX_TIMESTAMP(opened), COALESCE(UNIX_TIMESTAMP(entered), 0), wipes, moves_traced, moves_straight, moves_off_mesh "
+        "SELECT UNIX_TIMESTAMP(opened), COALESCE(UNIX_TIMESTAMP(entered), 0), wipes, moves_traced, moves_straight, moves_off_mesh, "
+        "moves_single, moves_single_yards "
         "FROM guildbot_run "
         "WHERE instance = %u AND ended = 'open' AND map = %u AND opened >= NOW() - INTERVAL %u HOUR "
         "ORDER BY opened DESC LIMIT 1", run.instanceId, run.mapId, RESUME_HOURS);
@@ -266,6 +269,8 @@ GuildRuns::Run* GuildRuns::OpenRun(Player* bot)
         run.movesTraced = f[3].GetUInt32();
         run.movesStraight = f[4].GetUInt32();
         run.movesOffMesh = f[5].GetUInt32();
+        run.movesSingle = f[6].GetUInt32();
+        run.movesSingleYards = f[7].GetUInt32();
         auto members = CharacterDatabase.PQuery(
             "SELECT guid, name, player, level_in, level_out, experience, money, deaths, seconds FROM guildbot_run_member "
             "WHERE instance = %u AND opened = FROM_UNIXTIME(%u)", run.instanceId, uint32(run.opened));
@@ -453,14 +458,16 @@ void GuildRuns::WriteRun(Run& run)
     std::string entered = run.entered ? "FROM_UNIXTIME(" + std::to_string(uint32(run.entered)) + ")" : "NULL";
     CharacterDatabase.PExecute(
         "INSERT INTO guildbot_run (instance, opened, map, dungeon, leader, player_led, entered, outcome, bosses_killed, bosses, wipes, "
-        "moves_traced, moves_straight, moves_off_mesh) "
-        "VALUES (%u, FROM_UNIXTIME(%u), %u, '%s', %u, %u, %s, '%s', %u, %u, %u, %u, %u, %u) "
+        "moves_traced, moves_straight, moves_off_mesh, moves_single, moves_single_yards) "
+        "VALUES (%u, FROM_UNIXTIME(%u), %u, '%s', %u, %u, %s, '%s', %u, %u, %u, %u, %u, %u, %u, %u) "
         "ON DUPLICATE KEY UPDATE leader = VALUES(leader), player_led = VALUES(player_led), entered = VALUES(entered), "
         "outcome = VALUES(outcome), bosses_killed = VALUES(bosses_killed), bosses = VALUES(bosses), wipes = VALUES(wipes), "
-        "moves_traced = VALUES(moves_traced), moves_straight = VALUES(moves_straight), moves_off_mesh = VALUES(moves_off_mesh)",
+        "moves_traced = VALUES(moves_traced), moves_straight = VALUES(moves_straight), moves_off_mesh = VALUES(moves_off_mesh), "
+        "moves_single = VALUES(moves_single), moves_single_yards = VALUES(moves_single_yards)",
         run.instanceId, uint32(run.opened), run.mapId, Escape(run.dungeon).c_str(), run.leader, run.playerLed ? 1 : 0,
         entered.c_str(), Outcome(run.killed.count(run.lastBoss) > 0, run.killed.size()).c_str(),
-        uint32(run.killed.size()), uint32(run.bosses.size()), run.wipes, run.movesTraced, run.movesStraight, run.movesOffMesh);
+        uint32(run.killed.size()), uint32(run.bosses.size()), run.wipes, run.movesTraced, run.movesStraight, run.movesOffMesh,
+        run.movesSingle, run.movesSingleYards);
 
     for (auto& [guid, m] : run.members)
     {
@@ -800,6 +807,8 @@ void GuildRuns::TraceMoves(Run& run, Group* group, uint32 nowMs)
         const float done = spline->Duration() ? 1.0f - float(std::max(spline->ComputeTimeToIndex(1), 0)) / spline->Duration() : 0.0f;
         const G3D::Vector3 from = done < 0.9f ? (at - to * done) / (1.0f - done) : at;
         const float yards = (to - from).length();
+        run.movesSingle++;
+        run.movesSingleYards = std::max(run.movesSingleYards, uint32(yards + 0.5f));
         if (yards < MOVE_TRACE_MIN_YARDS)
             continue;
         run.movesStraight++;

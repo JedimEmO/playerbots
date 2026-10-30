@@ -140,6 +140,9 @@ private:
         // The party's moves looked at by TraceMoves: new splines, straight ones of MOVE_TRACE_MIN_YARDS or more,
         // and those of them with an end off the navmesh.
         uint32 movesTraced = 0, movesStraight = 0, movesOffMesh = 0;
+        // Of the new splines, those of one segment at any length, and the longest of them in yards: a check that the
+        // straight test sees moves at all.
+        uint32 movesSingle = 0, movesSingleYards = 0;
     };
 
     struct Loot
