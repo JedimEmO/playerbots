@@ -143,6 +143,9 @@ namespace
     constexpr time_t REPAIR_SECONDS = 10 * MINUTE;
     constexpr float REPAIR_AT = 8.0f;
     constexpr float REPAIR_NEAR = 15.0f;
+    // At the place, the repairer is looked for this far off. A repair destination's point can lie well off the repairer's
+    // own spawn: Magnus Frostwake by Scholomance stands 82 yards from where the party stopped.
+    constexpr float REPAIR_SEARCH = 100.0f;
 
     // Why the stone last turned each member away, so the event log has each new reason once.
     std::mutex refusalLock;
@@ -2734,19 +2737,43 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
         return;
     }
 
-    // There: the party's characters near the repairer repair all, as a player does at a repairer, and pay for it.
-    // The leader stays by it, with "stay", while the others come.
+    // There: the nearest living repairer of the entry within REPAIR_SEARCH. One farther than REPAIR_NEAR becomes the place,
+    // and the leader travels on to it; at 30 yards the search by Scholomance found nobody, and the trip gave up.
     std::list<Unit*> found;
-    MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, uint32(run.repairEntry), REPAIR_NEAR * 2.0f);
+    MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, uint32(run.repairEntry), REPAIR_SEARCH);
     MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
-    Cell::VisitAllObjects(leader, searcher, REPAIR_NEAR * 2.0f);
+    Cell::VisitAllObjects(leader, searcher, REPAIR_SEARCH);
     Unit* repairer = nullptr;
     for (Unit* unit : found)
-        if (unit->IsAlive() && unit->IsInWorld())
+        if (unit->IsAlive() && unit->IsInWorld() && (!repairer || leader->GetDistance(unit) < leader->GetDistance(repairer)))
             repairer = unit;
     if (!repairer)
     {
         update.reason = "at " + run.repairPlace->GetTitle() + ", no repairer there";
+        return;
+    }
+    if (leader->GetDistance(repairer) > REPAIR_NEAR)
+    {
+        const WorldPosition by(repairer);
+        WorldPosition* place = run.repairPlace->GetClosestPoint(by);
+        if (!place || place->getMapId() != by.getMapId() || place->distance(by) > REPAIR_AT)
+        {
+            const std::string title = run.repairPlace->GetTitle();
+            std::lock_guard<std::mutex> guard(exitLock);
+            repairPlaces.push_back(std::make_unique<PlaceTravelDestination>(by, title));
+            run.repairPlace = repairPlaces.back().get();
+        }
+        run.repairArrived = false;
+        update.strategiesChanged = true;
+        // The travel to the old place counts as done there; it goes, so the dungeon's request takes the new one.
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+        {
+            TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+            if (target && target->GetDestination() != run.repairPlace)
+                target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+        }
+        update.reason = "on the way to " + run.repairPlace->GetTitle() + ", " + std::to_string(uint32(leader->GetDistance(repairer)))
+            + " yards off, " + broken + "'s gear is broken";
         return;
     }
     if (group)
