@@ -808,14 +808,17 @@ void GuildRuns::TraceMoves(Run& run, Group* group, uint32 nowMs)
         // the nearest poly is several yards away.
         const bool startOff = !OnNavMesh(query, at);
 
-        // A straight move: one segment, the core's shortcut when it finds no poly at an end. On it, the bot is
-        // the elapsed share of the way from the start, so the start is found back from where it stands.
+        // A straight move: one segment, the core's shortcut when it finds no poly at an end or the bot stays in one
+        // poly. A spline keeps a point before its path, so its first segment's index is not 0; by times instead, it
+        // is on its last segment (the current destination is the final one) and that segment starts at time 0.
+        // On it, the bot is the elapsed share of the way from the start, so the start is found back from where it stands.
         G3D::Vector3 from = at;
         bool fromOn = !startOff, toOn = true;
-        if (spline->GetRawPathIndex() == 0 && (spline->CurrentDestination() - to).squaredLength() <= 0.01f)
+        const int32 raw = spline->GetRawPathIndex();
+        const int32 passed = int32(spline->Duration()) - spline->ComputeTimeToIndex(raw + 1);
+        if ((spline->CurrentDestination() - to).squaredLength() <= 0.01f && spline->ComputeTimeToIndex(raw) + passed == 0)
         {
-            // The time left to the end of its one segment gives the time passed on it.
-            const float done = spline->Duration() ? 1.0f - float(std::max(spline->ComputeTimeToIndex(1), 0)) / spline->Duration() : 0.0f;
+            const float done = spline->Duration() ? float(std::max(passed, 0)) / spline->Duration() : 0.0f;
             if (done < 0.9f)
                 from = (at - to * done) / (1.0f - done);
             const float yards = (to - from).length();
