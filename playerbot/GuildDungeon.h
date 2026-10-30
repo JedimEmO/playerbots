@@ -197,8 +197,8 @@ private:
                      ai::PlaceTravelDestination* place = nullptr; };
         std::vector<Use> uses;
         // Creatures to kill before a boss: their entry, the boss, and the spawn of the door their deaths open, or 0.
-        // Only those within nearBoss of the boss's spawn, when it is set.
-        struct Kill { uint32 entry = 0; int32 before = 0; uint32 doorSpawn = 0; float nearBoss = 0.0f; };
+        // Only those within nearBoss of the boss's spawn, when it is set, and none within awayFromBoss of it.
+        struct Kill { uint32 entry = 0; int32 before = 0; uint32 doorSpawn = 0; float nearBoss = 0.0f; float awayFromBoss = 0.0f; };
         std::vector<Kill> kills;
         // Places the leader goes by once a boss is dead, before anything else: the boss, and the place.
         struct Via { int32 after = 0; ai::PlaceTravelDestination* place = nullptr; };

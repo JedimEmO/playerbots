@@ -117,6 +117,10 @@ namespace
     // route takes over; a new walk waits INSIDE_WALK_RETRY_SECONDS.
     constexpr float INSIDE_WALK_RANGE = 100.0f;
 
+    // A creature of a kill row that counts only those near its boss, out of a fight and this near the leader, is pulled
+    // back to the party by the pull step rather than fought where it stands, by the boss.
+    constexpr float KILL_PULL_REACH = 50.0f;
+
     // A ghost this near another way into its dungeon than its own steps straight at its own, off the travel map's route.
     constexpr float OTHER_ENTRANCE_NEAR = 40.0f;
     constexpr float INSIDE_WALK_RATIO = 1.5f;
@@ -433,9 +437,10 @@ namespace
     constexpr time_t USE_AGAIN_SECONDS = 10 * MINUTE;
 
     // Creatures with no spawn of their own, brought by an event, that a party kills before a boss, as players would:
-    // the creature, the boss, the door their deaths open, and how near the boss's spawn they must stand to count, or 0
-    // for anywhere. The step is done when none is alive near the leader, or when the door is open.
-    struct KillFirst { uint32 map; uint32 entry; int32 before; uint32 door; float nearBoss = 0.0f; };
+    // the creature, the boss, the door their deaths open, how near the boss's spawn they must stand to count, or 0
+    // for anywhere, and how near it they may not stand, or 0: those by the boss are left for the boss's own pull.
+    // The step is done when none is alive near the leader, or when the door is open.
+    struct KillFirst { uint32 map; uint32 entry; int32 before; uint32 door; float nearBoss = 0.0f; float awayFromBoss = 0.0f; };
     const KillFirst KILLS[] = {
         // Shadowfang Keep: Fenrus's death brings Arugal's four voidwalkers, and the Sorcerer's Gate opens when all four die.
         { 33, 4627, 3927, 18972 },
@@ -454,13 +459,15 @@ namespace
         // Scarlet Monastery Cathedral: Mograine calls every Abbot, Centurion, Champion, Chaplain, Monk and Wizard within
         // 80 yards into the fight, some fifty elites at once. As players do, the party clears them before it pulls him,
         // only those within 80 yards of him: 42 of the 86 on the map. Any of them near the leader once took it through the
-        // whole courtyard and chapel, fighting every pack there, for most of an hour.
-        { 189, 4303, 3976, 0, 80.0f },
-        { 189, 4301, 3976, 0, 80.0f },
-        { 189, 4302, 3976, 0, 80.0f },
-        { 189, 4299, 3976, 0, 80.0f },
-        { 189, 4540, 3976, 0, 80.0f },
-        { 189, 4300, 3976, 0, 80.0f },
+        // whole courtyard and chapel, fighting every pack there, for most of an hour. Those within 40 yards of him are left
+        // for his own pull, and the others are pulled back to the party rather than fought where they stand: a fight in his
+        // room brought him in, and he called the room after him, 11 to 15 at once, in all six wipes there.
+        { 189, 4303, 3976, 0, 80.0f, 40.0f },
+        { 189, 4301, 3976, 0, 80.0f, 40.0f },
+        { 189, 4302, 3976, 0, 80.0f, 40.0f },
+        { 189, 4299, 3976, 0, 80.0f, 40.0f },
+        { 189, 4540, 3976, 0, 80.0f, 40.0f },
+        { 189, 4300, 3976, 0, 80.0f, 40.0f },
         // Zul'Farrak: Nekrum Gutchewer and Shadowpriest Sezz'ziz come down the pyramid last; their deaths open the End Door.
         { 209, 7796, 7267, 146084 },
         { 209, 7275, 7267, 146084 },
@@ -982,6 +989,7 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         step.entry = kill.entry;
         step.before = kill.before;
         step.nearBoss = kill.nearBoss;
+        step.awayFromBoss = kill.awayFromBoss;
         if (kill.door)
         {
             auto findDoor = [&](auto const& pair)
@@ -1990,6 +1998,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     run.nextBoss = next;
     run.killGuid = ObjectGuid();
     std::string killing;
+    Creature* killPull = nullptr;     // a creature to kill first that the pull step takes, or null
     for (const Dungeon::Kill& kill : dungeon.kills)
     {
         // A row with no boss of its own is due whenever its creature is near and hostile.
@@ -2004,15 +2013,20 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, kill.entry, range);
         MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
         Cell::VisitAllObjects(leader, searcher, range);
-        // A row that counts only those near its boss: where the boss's spawn stands.
-        CreatureData const* bossData = kill.nearBoss > 0.0f && kill.before ? sObjectMgr.GetCreatureData(run.nextSpawn) : nullptr;
+        // A row that counts only those near its boss, or none right by it: where the boss's spawn stands.
+        CreatureData const* bossData = (kill.nearBoss > 0.0f || kill.awayFromBoss > 0.0f) && kill.before
+            ? sObjectMgr.GetCreatureData(run.nextSpawn) : nullptr;
         Unit* nearest = nullptr;
         for (Unit* unit : found)
         {
             if (!unit->IsAlive() || !unit->IsInWorld())
                 continue;
-            if (bossData && unit->GetDistance(bossData->posX, bossData->posY, bossData->posZ) > kill.nearBoss)
-                continue;
+            if (bossData)
+            {
+                const float fromBoss = unit->GetDistance(bossData->posX, bossData->posY, bossData->posZ);
+                if ((kill.nearBoss > 0.0f && fromBoss > kill.nearBoss) || (kill.awayFromBoss > 0.0f && fromBoss < kill.awayFromBoss))
+                    continue;
+            }
             if (!kill.before)
             {
                 // Hostile, and near, or farther off fighting one of the party.
@@ -2028,6 +2042,14 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         }
         if (!nearest)
             continue;
+        // By a boss that brings its room: out of a fight and within reach, the pull step brings it back to the party,
+        // away from the boss. One already fighting the party, or one the tank could not pull, is fought where it is.
+        if (kill.nearBoss > 0.0f && kill.before && nearest->GetTypeId() == TYPEID_UNIT && !nearest->IsInCombat()
+            && !run.pullIgnored.count(nearest->GetObjectGuid()) && leader->GetDistance(nearest) <= KILL_PULL_REACH)
+        {
+            killPull = static_cast<Creature*>(nearest);
+            break;
+        }
         run.killGuid = nearest->GetObjectGuid();
         killing = BossName(kill.entry);
         // Farther than the target picking reaches: the leader goes to it.
@@ -2149,6 +2171,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 best = distance;
                 pullTarget = creature;
             }
+            // A creature to kill first comes before what the party would meet next.
+            if (killPull)
+                pullTarget = killPull;
             if (pullTarget)
             {
                 for (Unit* unit : found)
