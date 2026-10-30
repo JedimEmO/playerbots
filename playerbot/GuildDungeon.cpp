@@ -116,6 +116,9 @@ namespace
     // nearer by INSIDE_WALK_GAIN in INSIDE_WALK_STALL_SECONDS, or lasts INSIDE_WALK_SECONDS, stops, and the travel map's
     // route takes over; a new walk waits INSIDE_WALK_RETRY_SECONDS.
     constexpr float INSIDE_WALK_RANGE = 100.0f;
+
+    // A ghost this near another way into its dungeon than its own steps straight at its own, off the travel map's route.
+    constexpr float OTHER_ENTRANCE_NEAR = 40.0f;
     constexpr float INSIDE_WALK_RATIO = 1.5f;
     constexpr float INSIDE_WALK_END = 5.0f;
     constexpr float INSIDE_WALK_GAIN = 3.0f;
@@ -3906,6 +3909,22 @@ bool GuildDungeon::CorpseGraveyard(Player* ghost, WorldLocation& place)
         return false;
     place = WorldLocation(grave->map_id, grave->x, grave->y, grave->z, grave->o);
     return true;
+}
+
+bool GuildDungeon::NearOtherEntrance(Player* ghost, uint32 triggerId, uint32 dungeonMap)
+{
+    for (uint32 i = 0; i < sAreaTriggerStore.GetNumRows(); ++i)
+    {
+        AreaTriggerEntry const* entry = sAreaTriggerStore.LookupEntry(i);
+        if (!entry || entry->id == triggerId || entry->mapid != ghost->GetMapId())
+            continue;
+        AreaTrigger const* at = sObjectMgr.GetAreaTrigger(entry->id);
+        if (!at || at->target_mapId != dungeonMap)
+            continue;
+        if (ghost->GetDistance(entry->x, entry->y, entry->z) <= OTHER_ENTRANCE_NEAR)
+            return true;
+    }
+    return false;
 }
 
 bool GuildDungeon::CorpseEntrance(Player* ghost, WorldLocation& place, uint32& triggerId, float& reach)

@@ -100,6 +100,14 @@ bool FindCorpseAction::Execute(Event& event)
                 bot->TeleportTo(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z, bot->GetOrientation());
                 return true;
             }
+            // Near another way into the same dungeon, it steps straight at its own: the travel map's route can lead through
+            // the other gate's portal and in by it. A Dire Maul East ghost came in so by the Warpwood Quarter, 260 yards
+            // from its party by Lariss's pavilion, and died walking back to it alone.
+            if (GuildDungeon::NearOtherEntrance(bot, triggerId, corpse->GetMapId()))
+            {
+                bot->GetMotionMaster()->MovePoint(0, entrance.coord_x, entrance.coord_y, entrance.coord_z, FORCED_MOVEMENT_RUN);
+                return true;
+            }
             if (distance > reach && MoveTo(entrance.mapid, entrance.coord_x, entrance.coord_y, entrance.coord_z, false, false))
                 return true;
             // No route the travel map knows, or near it and not in it: straight at it, as the area trigger action goes
