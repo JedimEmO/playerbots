@@ -120,6 +120,10 @@ namespace
     // A creature of a kill row that counts only those near its boss, out of a fight and this near the leader, is pulled
     // back to the party by the pull step rather than fought where it stands, by the boss.
     constexpr float KILL_PULL_REACH = 50.0f;
+    // One of those farther off is walked to only until it is this near, so the pull step takes it from there. Walked to
+    // as any other, the leader went on to a few yards of it: after each wipe in Scarlet Monastery the next one stood more
+    // than KILL_PULL_REACH from the way in, and the leader walked from there into the room and brought Mograine.
+    constexpr float KILL_PULL_STAND = 40.0f;
 
     // A ghost this near another way into its dungeon than its own steps straight at its own, off the travel map's route.
     constexpr float OTHER_ENTRANCE_NEAR = 40.0f;
@@ -2069,8 +2073,16 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         }
         run.killGuid = nearest->GetObjectGuid();
         killing = BossName(kill.entry);
+        // One the pull step could take, farther than its reach: the leader goes until it is within reach, and no nearer.
+        const bool pullable = kill.nearBoss > 0.0f && kill.before && nearest->GetTypeId() == TYPEID_UNIT && !nearest->IsInCombat()
+            && !run.pullIgnored.count(nearest->GetObjectGuid());
+        if (pullable)
+        {
+            HoldNear(leader, nearest, KILL_PULL_REACH, KILL_PULL_STAND);
+            run.holding = true;
+        }
         // Farther than the target picking reaches: the leader goes to it.
-        if (leader->GetDistance(nearest) > KILL_RANGE - 10.0f)
+        else if (leader->GetDistance(nearest) > KILL_RANGE - 10.0f)
         {
             HoldNear(leader, nearest, KILL_RANGE / 2.0f, HOLD_STAND);
             run.holding = true;
