@@ -191,6 +191,22 @@ void GuildRuns::EnsureTables()
         " PRIMARY KEY (instance, opened, seq)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guildbot_fight_creature ("
+        " instance INT UNSIGNED NOT NULL,"
+        " opened TIMESTAMP NOT NULL DEFAULT '2000-01-01 00:00:00',"
+        " seq INT UNSIGNED NOT NULL,"
+        " guid INT UNSIGNED NOT NULL,"                        // the creature's guid in the instance
+        " spawn INT UNSIGNED NOT NULL DEFAULT 0,"             // its row in the world database, 0 for a summon
+        " entry INT UNSIGNED NOT NULL DEFAULT 0,"
+        " joined INT UNSIGNED NOT NULL DEFAULT 0,"            // seconds after the fight's start it was first seen
+        " x FLOAT NOT NULL DEFAULT 0, y FLOAT NOT NULL DEFAULT 0, z FLOAT NOT NULL DEFAULT 0,"   // where, then
+        " summoned TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        " summoner INT UNSIGNED NOT NULL DEFAULT 0,"          // the summoning creature's entry, or 0
+        " pulled TINYINT UNSIGNED NOT NULL DEFAULT 0,"        // the dungeon job's pulled creature
+        " how VARCHAR(16) NOT NULL DEFAULT '',"               // pulled, attacked, was_attacked, both
+        " PRIMARY KEY (instance, opened, seq, guid)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    CharacterDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS guildbot_fight_member ("
         " instance INT UNSIGNED NOT NULL,"
         " opened TIMESTAMP NOT NULL DEFAULT '2000-01-01 00:00:00',"
@@ -517,12 +533,12 @@ void GuildRuns::Sweep()
     }
 }
 
-void GuildRuns::NotePull(Player* leader, uint32 entry)
+void GuildRuns::NotePull(Player* leader, Creature* creature)
 {
-    if (!leader)
+    if (!leader || !creature)
         return;
     std::lock_guard<std::mutex> guard(pullLock);
-    pulls[leader->GetGUIDLow()] = { entry, time(nullptr) };
+    pulls[leader->GetGUIDLow()] = { creature->GetEntry(), creature->GetObjectGuid(), time(nullptr) };
 }
 
 void GuildRuns::SampleFights()
@@ -581,6 +597,7 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
         fight.open = true;
         fight.seq = ++run.fightSeq;
         fight.started = now;
+        fight.startMs = nowMs;
         fight.lastMs = nowMs;
         fight.leader = group->GetLeaderGuid().GetCounter();
 
@@ -601,8 +618,11 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
             auto pull = pulls.find(fight.leader);
             if (pull != pulls.end())
             {
-                if (now - pull->second.second < FIGHT_PULL_SECONDS)
-                    fight.pulled = pull->second.first;
+                if (now - pull->second.at < FIGHT_PULL_SECONDS)
+                {
+                    fight.pulled = pull->second.entry;
+                    fight.pulledGuid = pull->second.guid;
+                }
                 pulls.erase(pull);
             }
         }
@@ -663,6 +683,8 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
     const bool tankUp = tank && tank->IsAlive() && inside(tank);
 
     std::set<Unit*> met;
+    // The creatures of this sample, by what links them to the party: bit 1 it attacks a member, bit 2 a member attacks it.
+    std::map<Unit*, uint8> links;
     bool alive = false;
     for (Player* member : party)
     {
@@ -699,13 +721,13 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
                 continue;
             attackers++;
             met.insert(attacker);
-            fight.creatures.insert(attacker->GetObjectGuid());
+            links[attacker] |= 1;
         }
         if (Unit* victim = member->GetVictim())
             if (victim->GetTypeId() == TYPEID_UNIT && victim->IsAlive())
             {
                 met.insert(victim);
-                fight.creatures.insert(victim->GetObjectGuid());
+                links[victim] |= 2;
             }
         if (attackers)
             m.attacked += step;
@@ -714,6 +736,27 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
         m.maxAttackers = std::max(m.maxAttackers, attackers);
     }
     fight.maxAttackers = std::max(fight.maxAttackers, uint32(met.size()));
+
+    // Each creature once, as it was when first seen. One that joins and dies between two samples is not seen.
+    for (auto& [unit, link] : links)
+    {
+        if (unit->GetTypeId() != TYPEID_UNIT || fight.creatures.count(unit->GetObjectGuid()))
+            continue;
+        Creature* creature = static_cast<Creature*>(unit);
+        FightCreature& c = fight.creatures[creature->GetObjectGuid()];
+        c.entry = creature->GetEntry();
+        c.spawn = creature->GetDbGuid();
+        c.joined = WorldTimer::getMSTimeDiff(fight.startMs, nowMs) / IN_MILLISECONDS;
+        c.x = creature->GetPositionX();
+        c.y = creature->GetPositionY();
+        c.z = creature->GetPositionZ();
+        c.summoned = creature->IsTemporarySummon();
+        // A creature's guid carries its entry; a player's gives 0.
+        if (c.summoned)
+            c.summoner = creature->GetSpawnerGuid().GetEntry();
+        c.pulled = !fight.pulledGuid.IsEmpty() && creature->GetObjectGuid() == fight.pulledGuid;
+        c.how = c.pulled ? "pulled" : link == 3 ? "both" : link == 1 ? "attacked" : "was_attacked";
+    }
 
     // Over once nobody alive inside has been in combat for FIGHT_QUIET_MS, or nobody is alive inside.
     if (!alive)
@@ -820,6 +863,29 @@ void GuildRuns::EndFight(Run& run, time_t now)
             "max_attackers, mana_start, mana_end, health_min) VALUES (%u, FROM_UNIXTIME(%u), %u, %u, '%s', %u, %u, %u, %u, %u, %u, %u)",
             run.instanceId, uint32(run.opened), fight.seq, guid, m.role.c_str(), m.deaths, uint32(m.attacked + 0.5f),
             uint32(m.loose + 0.5f), m.maxAttackers, uint32(m.manaStart), uint32(m.manaEnd), uint32(m.healthMin));
+    // The creatures, a few rows to a statement.
+    std::ostringstream rows;
+    uint32 count = 0;
+    auto flush = [&]()
+    {
+        if (!count)
+            return;
+        CharacterDatabase.Execute(("REPLACE INTO guildbot_fight_creature (instance, opened, seq, guid, spawn, entry, joined, x, y, z, "
+            "summoned, summoner, pulled, how) VALUES " + rows.str()).c_str());
+        rows.str("");
+        count = 0;
+    };
+    for (auto& [guid, c] : fight.creatures)
+    {
+        char row[256];
+        snprintf(row, sizeof(row), "%s(%u, FROM_UNIXTIME(%u), %u, %u, %u, %u, %u, %.2f, %.2f, %.2f, %u, %u, %u, '%s')",
+            count ? ", " : "", run.instanceId, uint32(run.opened), fight.seq, guid.GetCounter(), c.spawn, c.entry, c.joined,
+            c.x, c.y, c.z, c.summoned ? 1 : 0, c.summoner, c.pulled ? 1 : 0, c.how.c_str());
+        rows << row;
+        if (++count == 50)
+            flush();
+    }
+    flush();
 }
 
 void GuildRuns::CheckFates()

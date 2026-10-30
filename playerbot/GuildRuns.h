@@ -48,8 +48,8 @@ public:
     // About once a second, on the world thread: the fight log of each open run's party,
     // and an off_mesh_move event for each of its straight moves with an end off the navmesh.
     void SampleFights();
-    // The dungeon job's pull step pulled a creature of this entry for the leader's party; the next fight began with it.
-    void NotePull(Player* leader, uint32 entry);
+    // The dungeon job's pull step pulled this creature for the leader's party; the next fight began with it.
+    void NotePull(Player* leader, Creature* creature);
 
     std::list<std::string> HandleRuns(const std::string& args);
 
@@ -80,6 +80,19 @@ private:
         bool dead = false;
     };
 
+    // A creature's part in one fight, from the sample it was first seen in.
+    struct FightCreature
+    {
+        uint32 entry = 0;
+        uint32 spawn = 0;              // its row in the world database's creature table, 0 for a summon
+        uint32 joined = 0;             // seconds after the fight's start
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        bool summoned = false;
+        uint32 summoner = 0;           // the entry of the creature that summoned it, when the core keeps it
+        bool pulled = false;           // the dungeon job's pulled creature
+        std::string how;               // pulled, attacked (on a member), was_attacked (a member on it), or both
+    };
+
     // The fight a run's party is in, from the first member in combat inside until all alive have been out of it
     // FIGHT_QUIET_MS, or all are dead.
     struct Fight
@@ -87,6 +100,7 @@ private:
         bool open = false;
         uint32 seq = 0;
         time_t started = 0;
+        uint32 startMs = 0;
         uint32 lastMs = 0;             // the sample before
         uint32 quietSinceMs = 0;       // since when no member alive has been in combat, or 0
         uint32 leader = 0;
@@ -94,7 +108,8 @@ private:
         std::string began, leaderReason;
         uint32 pulled = 0, pack = 0, maxAttackers = 0, deaths = 0;
         uint8 healerMana = 255;
-        std::set<ObjectGuid> creatures;
+        ObjectGuid pulledGuid;
+        std::map<ObjectGuid, FightCreature> creatures;
         std::map<uint32, FightMember> members;
     };
 
@@ -157,9 +172,11 @@ private:
     std::vector<Loot> loots;                          // items whose fate is still to be seen
     std::vector<RollWon> rollsWon;                    // recent, to tell need and greed from loot taken
     std::map<std::string, uint32> recentPushes;       // receiver, entry, slot: when, to count a broadcast once
-    // Pulls the dungeon job made, by leader guid: the entry and when. Its own lock: the job notes them under its own.
+    // Pulls the dungeon job made, by leader guid: the creature, its entry and when. Its own lock: the job notes them
+    // under its own.
+    struct NotedPull { uint32 entry = 0; ObjectGuid guid; time_t at = 0; };
     std::mutex pullLock;
-    std::map<uint32, std::pair<uint32, time_t>> pulls;
+    std::map<uint32, NotedPull> pulls;
     // For each guild character in a run's party: the last move looked at, and when it last made an off_mesh_move.
     struct MoveTrace { uint32 splineId = 0; uint32 eventMs = 0; bool written = false; };
     std::map<uint32, MoveTrace> moveTraces;           // by guid
