@@ -7,6 +7,10 @@
 #include "Grids/GridNotifiers.h"
 #include "Grids/GridNotifiersImpl.h"
 #include "Grids/CellImpl.h"
+#include "MotionGenerators/MoveMap.h"
+#include "MotionGenerators/PathFinder.h"
+#include "Movement/MoveSpline.h"
+#include "playerbot/strategy/values/LastMovementValue.h"
 
 #include <algorithm>
 #include <sstream>
@@ -38,6 +42,26 @@ namespace
     constexpr float FIGHT_MAX_STEP = 5.0f;
     // Three or more of the party dead in one fight is a wipe, as the experiments count it.
     constexpr uint32 FIGHT_WIPE_DEATHS = 3;
+    // A straight move is traced from this long; shorter ones are steps.
+    constexpr float MOVE_TRACE_MIN_YARDS = 5.0f;
+    // One off_mesh_move a character at most this often.
+    constexpr uint32 MOVE_TRACE_GAP_MS = 10 * IN_MILLISECONDS;
+    // The box the core's path finder looks for a poly in, at its widest: half sizes, in yards.
+    constexpr float MOVE_TRACE_BOX = 10.0f;
+
+    // Whether the navmesh of this map and instance has a poly the core would path a bot from, within MOVE_TRACE_BOX.
+    bool OnNavMesh(dtNavMeshQuery const* query, const G3D::Vector3& point)
+    {
+        dtQueryFilter filter;
+        filter.setIncludeFlags(NAV_GROUND | NAV_WATER);
+        filter.setExcludeFlags(NAV_MAGMA_SLIME | NAV_GROUND_STEEP);
+        // Detour's points are (y, z, x).
+        const float at[3] = { point.y, point.z, point.x };
+        const float box[3] = { MOVE_TRACE_BOX, MOVE_TRACE_BOX, MOVE_TRACE_BOX };
+        dtPolyRef ref = 0;
+        float closest[3] = { 0.0f, 0.0f, 0.0f };
+        return dtStatusSucceed(query->findNearestPoly(at, box, &filter, &ref, closest)) && ref;
+    }
 
     // A percentage, 255 for no mana.
     uint8 ManaPercent(Player* player)
@@ -506,7 +530,10 @@ void GuildRuns::SampleFights()
             if (Player* member = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, it->first)))
                 group = member->GetGroup();
         if (group)
+        {
+            TraceMoves(group, nowMs);
             SampleFight(run, group, nowMs, now);
+        }
         else if (run.fight.open)
             EndFight(run, now);
     }
@@ -688,6 +715,74 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
         fight.quietSinceMs = nowMs;
     else if (WorldTimer::getMSTimeDiff(fight.quietSinceMs, nowMs) >= FIGHT_QUIET_MS)
         EndFight(run, now);
+}
+
+void GuildRuns::TraceMoves(Group* group, uint32 nowMs)
+{
+    for (auto& slot : group->GetMemberSlots())
+    {
+        Player* bot = sObjectMgr.GetPlayer(slot.guid);
+        // On a transport, a spline is in the transport's own coordinates.
+        if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported() || bot->GetTransport() || !bot->GetPlayerbotAI()
+            || !sGuildBotMgr.IsGuildBot(bot))
+            continue;
+        const Movement::MoveSpline* spline = bot->movespline;
+        if (!spline || !spline->Initialized() || spline->Finalized() || spline->isCyclic())
+            continue;
+        MoveTrace& trace = moveTraces[bot->GetGUIDLow()];
+        if (trace.splineId == spline->GetId())
+            continue;
+        trace.splineId = spline->GetId();
+
+        // A straight move: one segment, the core's shortcut when it finds no poly at an end. On it, the bot is
+        // the elapsed share of the way from the start, so the start is found back from where it stands.
+        const G3D::Vector3 to = spline->FinalDestination();
+        if (spline->GetRawPathIndex() != 0 || (spline->CurrentDestination() - to).squaredLength() > 0.01f)
+            continue;
+        const G3D::Vector3 at(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+        // The time left to the end of its one segment gives the time passed on it.
+        const float done = spline->Duration() ? 1.0f - float(std::max(spline->ComputeTimeToIndex(1), 0)) / spline->Duration() : 0.0f;
+        const G3D::Vector3 from = done < 0.9f ? (at - to * done) / (1.0f - done) : at;
+        const float yards = (to - from).length();
+        if (yards < MOVE_TRACE_MIN_YARDS)
+            continue;
+        if (trace.written && WorldTimer::getMSTimeDiff(trace.eventMs, nowMs) < MOVE_TRACE_GAP_MS)
+            continue;
+
+        dtNavMeshQuery const* query = MMAP::MMapFactory::createOrGetMMapManager()->GetNavMeshQuery(bot->GetMapId(), bot->GetInstanceId());
+        if (!query)
+            continue;
+        const bool fromOn = OnNavMesh(query, from), toOn = OnNavMesh(query, to);
+        if (fromOn && toOn)
+            continue;
+
+        // By playerbots' move when this move ends on a point of the path it last made: it moves to the last point
+        // it keeps of that path, which can be short of the path's end. Else by a move of ours or the core's.
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        ai::TravelPath& lastPath = ai->GetAiObjectContext()->GetValue<ai::LastMovement&>("last movement")->Get().lastPath;
+        const std::vector<WorldPosition> points = lastPath.getPointPath();
+        bool byPath = false;
+        for (const WorldPosition& point : points)
+            if (point.getMapId() == bot->GetMapId()
+                && (G3D::Vector3(point.getX(), point.getY(), point.getZ()) - to).squaredLength() < MOVE_TRACE_MIN_YARDS * MOVE_TRACE_MIN_YARDS)
+            {
+                byPath = true;
+                break;
+            }
+        std::ostringstream detail;
+        detail.setf(std::ios::fixed);
+        detail.precision(1);
+        detail << "action=" << ai->GetLastExecutedActionName(BotState::BOT_STATE_NON_COMBAT)
+               << " combat_action=" << ai->GetLastExecutedActionName(BotState::BOT_STATE_COMBAT)
+               << " by=" << (byPath ? "path" : "direct") << " path=" << points.size()
+               << " map=" << bot->GetMapId() << " from=" << from.x << "," << from.y << "," << from.z
+               << " to=" << to.x << "," << to.y << "," << to.z << " yd=" << uint32(yards + 0.5f)
+               << " from_mesh=" << (fromOn ? 1 : 0) << " to_mesh=" << (toOn ? 1 : 0)
+               << " combat=" << (bot->IsInCombat() ? 1 : 0) << (bot->IsAlive() ? "" : " ghost=1");
+        sGuildBotMgr.RecordEvent(bot->GetGUIDLow(), "off_mesh_move", detail.str());
+        trace.written = true;
+        trace.eventMs = nowMs;
+    }
 }
 
 void GuildRuns::EndFight(Run& run, time_t now)

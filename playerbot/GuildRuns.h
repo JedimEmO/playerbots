@@ -45,7 +45,8 @@ public:
     void InstanceReset(uint32 instanceId);
     // A packet a guild character received: the item pushes and roll results its group is told of.
     void OnPacket(Player* bot, const WorldPacket& packet);
-    // About once a second, on the world thread: the fight log of each open run's party.
+    // About once a second, on the world thread: the fight log of each open run's party,
+    // and an off_mesh_move event for each of its straight moves with an end off the navmesh.
     void SampleFights();
     // The dungeon job's pull step pulled a creature of this entry for the leader's party; the next fight began with it.
     void NotePull(Player* leader, uint32 entry);
@@ -145,6 +146,7 @@ private:
     void CheckFates();
     void SampleFight(Run& run, Group* group, uint32 nowMs, time_t now);
     void EndFight(Run& run, time_t now);
+    void TraceMoves(Group* group, uint32 nowMs);
 
     std::mutex lock;
     bool tablesReady = false;
@@ -155,6 +157,9 @@ private:
     // Pulls the dungeon job made, by leader guid: the entry and when. Its own lock: the job notes them under its own.
     std::mutex pullLock;
     std::map<uint32, std::pair<uint32, time_t>> pulls;
+    // For each guild character in a run's party: the last move looked at, and when it last made an off_mesh_move.
+    struct MoveTrace { uint32 splineId = 0; uint32 eventMs = 0; bool written = false; };
+    std::map<uint32, MoveTrace> moveTraces;           // by guid
 };
 
 #define sGuildRuns GuildRuns::instance()
