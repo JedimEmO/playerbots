@@ -123,7 +123,8 @@ void GuildRuns::EnsureTables()
         " wipes INT UNSIGNED NOT NULL DEFAULT 0,"
         " PRIMARY KEY (instance, opened), KEY opened (opened)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    // What TraceMoves saw of the party's moves: new splines, straight ones, and straight ones with an end off the navmesh.
+    // What TraceMoves saw of the party's moves: new splines, straight ones, and those off the navmesh (from off it, or
+    // straight with an end off it).
     CharacterDatabase.DirectExecute(
         "ALTER TABLE guildbot_run"
         " ADD COLUMN IF NOT EXISTS moves_traced INT UNSIGNED NOT NULL DEFAULT 0,"
@@ -797,32 +798,42 @@ void GuildRuns::TraceMoves(Run& run, Group* group, uint32 nowMs)
         trace.splineId = spline->GetId();
         run.movesTraced++;
 
-        // A straight move: one segment, the core's shortcut when it finds no poly at an end. On it, the bot is
-        // the elapsed share of the way from the start, so the start is found back from where it stands.
-        const G3D::Vector3 to = spline->FinalDestination();
-        if (spline->GetRawPathIndex() != 0 || (spline->CurrentDestination() - to).squaredLength() > 0.01f)
-            continue;
-        const G3D::Vector3 at(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
-        // The time left to the end of its one segment gives the time passed on it.
-        const float done = spline->Duration() ? 1.0f - float(std::max(spline->ComputeTimeToIndex(1), 0)) / spline->Duration() : 0.0f;
-        const G3D::Vector3 from = done < 0.9f ? (at - to * done) / (1.0f - done) : at;
-        const float yards = (to - from).length();
-        run.movesSingle++;
-        run.movesSingleYards = std::max(run.movesSingleYards, uint32(yards + 0.5f));
-        if (yards < MOVE_TRACE_MIN_YARDS)
-            continue;
-        run.movesStraight++;
-
         // The same query the core's path finder uses for this bot.
         dtNavMeshQuery const* query = MMAP::MMapFactory::createOrGetMMapManager()->GetNavMeshQuery(bot->GetMapId(), bot->GetInstanceId());
         if (!query)
             continue;
-        const bool fromOn = OnNavMesh(query, from), toOn = OnNavMesh(query, to);
-        if (fromOn && toOn)
+        const G3D::Vector3 to = spline->FinalDestination();
+        const G3D::Vector3 at(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+        // A move from off the navmesh, of any number of points: the core paths from where the bot stands even when
+        // the nearest poly is several yards away.
+        const bool startOff = !OnNavMesh(query, at);
+
+        // A straight move: one segment, the core's shortcut when it finds no poly at an end. On it, the bot is
+        // the elapsed share of the way from the start, so the start is found back from where it stands.
+        G3D::Vector3 from = at;
+        bool fromOn = !startOff, toOn = true;
+        if (spline->GetRawPathIndex() == 0 && (spline->CurrentDestination() - to).squaredLength() <= 0.01f)
+        {
+            // The time left to the end of its one segment gives the time passed on it.
+            const float done = spline->Duration() ? 1.0f - float(std::max(spline->ComputeTimeToIndex(1), 0)) / spline->Duration() : 0.0f;
+            if (done < 0.9f)
+                from = (at - to * done) / (1.0f - done);
+            const float yards = (to - from).length();
+            run.movesSingle++;
+            run.movesSingleYards = std::max(run.movesSingleYards, uint32(yards + 0.5f));
+            if (yards >= MOVE_TRACE_MIN_YARDS)
+            {
+                run.movesStraight++;
+                fromOn = OnNavMesh(query, from);
+                toOn = OnNavMesh(query, to);
+            }
+        }
+        if (!startOff && fromOn && toOn)
             continue;
         run.movesOffMesh++;
         if (trace.written && WorldTimer::getMSTimeDiff(trace.eventMs, nowMs) < MOVE_TRACE_GAP_MS)
             continue;
+        const float yards = (to - from).length();
 
         // By playerbots' move when this move ends on a point of the path it last made: it moves to the last point
         // it keeps of that path, which can be short of the path's end. Else by a move of ours or the core's.
@@ -846,7 +857,7 @@ void GuildRuns::TraceMoves(Run& run, Group* group, uint32 nowMs)
                << " map=" << bot->GetMapId() << " from=" << from.x << "," << from.y << "," << from.z
                << " to=" << to.x << "," << to.y << "," << to.z << " yd=" << uint32(yards + 0.5f)
                << " from_mesh=" << (fromOn ? 1 : 0) << " to_mesh=" << (toOn ? 1 : 0)
-               << " combat=" << (bot->IsInCombat() ? 1 : 0) << (bot->IsAlive() ? "" : " ghost=1");
+               << " combat=" << (bot->IsInCombat() ? 1 : 0) << (startOff ? " start_off=1" : "") << (bot->IsAlive() ? "" : " ghost=1");
         sGuildBotMgr.RecordEvent(bot->GetGUIDLow(), "off_mesh_move", detail.str());
         trace.written = true;
         trace.eventMs = nowMs;

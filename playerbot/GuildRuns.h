@@ -46,7 +46,7 @@ public:
     // A packet a guild character received: the item pushes and roll results its group is told of.
     void OnPacket(Player* bot, const WorldPacket& packet);
     // About once a second, on the world thread: the fight log of each open run's party,
-    // and an off_mesh_move event for each of its straight moves with an end off the navmesh.
+    // and an off_mesh_move event for each of its moves from off the navmesh, or straight with an end off it.
     void SampleFights();
     // The dungeon job's pull step pulled this creature for the leader's party; the next fight began with it.
     void NotePull(Player* leader, Creature* creature);
@@ -138,7 +138,7 @@ private:
         Fight fight;
         uint32 fightSeq = 0;           // the last fight's number in this run
         // The party's moves looked at by TraceMoves: new splines, straight ones of MOVE_TRACE_MIN_YARDS or more,
-        // and those of them with an end off the navmesh.
+        // and moves off the navmesh: those starting where the bot stands off it, and straight ones with an end off it.
         uint32 movesTraced = 0, movesStraight = 0, movesOffMesh = 0;
         // Of the new splines, those of one segment at any length, and the longest of them in yards: a check that the
         // straight test sees moves at all.
