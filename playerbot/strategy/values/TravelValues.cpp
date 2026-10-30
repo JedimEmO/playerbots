@@ -110,6 +110,14 @@ EntryTravelPurposeMap EntryTravelPurposeMapValue::Calculate()
         }
         else  //Added these specifically because dk start mobs drop no money but have sellable loot.
         {
+            // A creature that drops no coin, as most beasts, is a grind spot too: GrindTravelDestination::IsPossible keeps
+            // it to levelling guild characters, who grind for experience. Without it no beast was ever a spot, and below
+            // level 3 the Valley of Trials has nothing else (Mottled Boar, Scorpid Worker), so a new orc or troll stood at
+            // its spawn point for an hour. Not critters, not anyone's vendor or trainer, and nothing that cannot be attacked.
+            if (cInfo->CreatureType != CREATURE_TYPE_CRITTER && !cInfo->NpcFlags
+                && !(cInfo->UnitFlags & (UNIT_FLAG_SPAWNING | UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_UNTARGETABLE | UNIT_FLAG_UNINTERACTIBLE)))
+                purpose |= (uint32)TravelDestinationPurpose::Grind;
+
             switch (entry)
             {
                 case 28611: //Scarlet Captain           1

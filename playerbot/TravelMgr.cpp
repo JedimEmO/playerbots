@@ -634,7 +634,11 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
         maxLevel = std::max(maxLevel, botLevel - (info.GetBoolValue("can fight equal") && geared ? 0 : 3));
     }
 
-    if ((int32)cInfo->MaxLevel > maxLevel) //@lvl5 max = 3, @lvl60 max = 57
+    // In its first levels, where nothing is gray, a levelling character takes a camp whose lowest spawns are within
+    // its cap: no camp in the Valley of Trials or Mulgore tops out at level 1 (Mottled Boar and Plainstrider are 1 to 2),
+    // so a new orc, troll or tauren found no grind spot and stood at its spawn point for an hour.
+    const bool firstLevels = info.WantsExperience() && MaNGOS::XP::GetGrayLevel(botLevel) == 0;
+    if ((int32)(firstLevels ? cInfo->MinLevel : cInfo->MaxLevel) > maxLevel) //@lvl5 max = 3, @lvl60 max = 57
         return false;
 
     int32 minLevel = std::max(botLevel * (0.4f + levelMod), botLevel - 12.0f + levelBoost);
@@ -674,7 +678,20 @@ bool GrindTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& info)
     if (!IsPossible(info))
         return false;
 
-    return GuidPosition(bot).IsHostileTo(GuidPosition(HIGHGUID_UNIT, GetEntry()), bot->GetInstanceId());
+    const ReputationRank reaction = GuidPosition(bot).GetReactionTo(GuidPosition(HIGHGUID_UNIT, GetEntry()), bot->GetInstanceId());
+    if (reaction < REP_NEUTRAL)
+        return true;
+
+    // A levelling character also grinds neutral wildlife, as a player does. The faction template of a Mottled Boar (189)
+    // or a Scorpid Worker (7) has no group and no enemies, so the check above calls it neutral, not hostile. Only a
+    // faction with no standing to lose: a town's neutral faction, as Booty Bay's, has standing and is left alone.
+    if (!info.WantsExperience() || reaction != REP_NEUTRAL)
+        return false;
+
+    CreatureInfo const* cInfo = GetCreatureInfo();
+    const FactionTemplateEntry* factionTemplate = cInfo ? sFactionTemplateStore.LookupEntry(cInfo->Faction) : nullptr;
+    const FactionEntry* faction = factionTemplate ? sFactionStore.LookupEntry(factionTemplate->faction) : nullptr;
+    return faction && faction->reputationListID < 0;
 }
 
 std::string GrindTravelDestination::GetTitle() const
