@@ -122,6 +122,9 @@ private:
         bool dirty = false;
         Fight fight;
         uint32 fightSeq = 0;           // the last fight's number in this run
+        // The party's moves looked at by TraceMoves: new splines, straight ones of MOVE_TRACE_MIN_YARDS or more,
+        // and those of them with an end off the navmesh.
+        uint32 movesTraced = 0, movesStraight = 0, movesOffMesh = 0;
     };
 
     struct Loot
@@ -146,7 +149,7 @@ private:
     void CheckFates();
     void SampleFight(Run& run, Group* group, uint32 nowMs, time_t now);
     void EndFight(Run& run, time_t now);
-    void TraceMoves(Group* group, uint32 nowMs);
+    void TraceMoves(Run& run, Group* group, uint32 nowMs);
 
     std::mutex lock;
     bool tablesReady = false;

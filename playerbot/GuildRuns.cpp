@@ -123,6 +123,12 @@ void GuildRuns::EnsureTables()
         " wipes INT UNSIGNED NOT NULL DEFAULT 0,"
         " PRIMARY KEY (instance, opened), KEY opened (opened)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // What TraceMoves saw of the party's moves: new splines, straight ones, and straight ones with an end off the navmesh.
+    CharacterDatabase.DirectExecute(
+        "ALTER TABLE guildbot_run"
+        " ADD COLUMN IF NOT EXISTS moves_traced INT UNSIGNED NOT NULL DEFAULT 0,"
+        " ADD COLUMN IF NOT EXISTS moves_straight INT UNSIGNED NOT NULL DEFAULT 0,"
+        " ADD COLUMN IF NOT EXISTS moves_off_mesh INT UNSIGNED NOT NULL DEFAULT 0");
     CharacterDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS guildbot_run_member ("
         " instance INT UNSIGNED NOT NULL,"
@@ -231,7 +237,8 @@ GuildRuns::Run* GuildRuns::OpenRun(Player* bot)
 
     // A run still open from before a restart goes on: its members' counts and its dead bosses come back.
     auto open = CharacterDatabase.PQuery(
-        "SELECT UNIX_TIMESTAMP(opened), COALESCE(UNIX_TIMESTAMP(entered), 0), wipes FROM guildbot_run "
+        "SELECT UNIX_TIMESTAMP(opened), COALESCE(UNIX_TIMESTAMP(entered), 0), wipes, moves_traced, moves_straight, moves_off_mesh "
+        "FROM guildbot_run "
         "WHERE instance = %u AND ended = 'open' AND map = %u AND opened >= NOW() - INTERVAL %u HOUR "
         "ORDER BY opened DESC LIMIT 1", run.instanceId, run.mapId, RESUME_HOURS);
     if (open)
@@ -240,6 +247,9 @@ GuildRuns::Run* GuildRuns::OpenRun(Player* bot)
         run.opened = time_t(f[0].GetUInt64());
         run.entered = time_t(f[1].GetUInt64());
         run.wipes = f[2].GetUInt32();
+        run.movesTraced = f[3].GetUInt32();
+        run.movesStraight = f[4].GetUInt32();
+        run.movesOffMesh = f[5].GetUInt32();
         auto members = CharacterDatabase.PQuery(
             "SELECT guid, name, player, level_in, level_out, experience, money, deaths, seconds FROM guildbot_run_member "
             "WHERE instance = %u AND opened = FROM_UNIXTIME(%u)", run.instanceId, uint32(run.opened));
@@ -426,13 +436,15 @@ void GuildRuns::WriteRun(Run& run)
 
     std::string entered = run.entered ? "FROM_UNIXTIME(" + std::to_string(uint32(run.entered)) + ")" : "NULL";
     CharacterDatabase.PExecute(
-        "INSERT INTO guildbot_run (instance, opened, map, dungeon, leader, player_led, entered, outcome, bosses_killed, bosses, wipes) "
-        "VALUES (%u, FROM_UNIXTIME(%u), %u, '%s', %u, %u, %s, '%s', %u, %u, %u) "
+        "INSERT INTO guildbot_run (instance, opened, map, dungeon, leader, player_led, entered, outcome, bosses_killed, bosses, wipes, "
+        "moves_traced, moves_straight, moves_off_mesh) "
+        "VALUES (%u, FROM_UNIXTIME(%u), %u, '%s', %u, %u, %s, '%s', %u, %u, %u, %u, %u, %u) "
         "ON DUPLICATE KEY UPDATE leader = VALUES(leader), player_led = VALUES(player_led), entered = VALUES(entered), "
-        "outcome = VALUES(outcome), bosses_killed = VALUES(bosses_killed), bosses = VALUES(bosses), wipes = VALUES(wipes)",
+        "outcome = VALUES(outcome), bosses_killed = VALUES(bosses_killed), bosses = VALUES(bosses), wipes = VALUES(wipes), "
+        "moves_traced = VALUES(moves_traced), moves_straight = VALUES(moves_straight), moves_off_mesh = VALUES(moves_off_mesh)",
         run.instanceId, uint32(run.opened), run.mapId, Escape(run.dungeon).c_str(), run.leader, run.playerLed ? 1 : 0,
         entered.c_str(), Outcome(run.killed.count(run.lastBoss) > 0, run.killed.size()).c_str(),
-        uint32(run.killed.size()), uint32(run.bosses.size()), run.wipes);
+        uint32(run.killed.size()), uint32(run.bosses.size()), run.wipes, run.movesTraced, run.movesStraight, run.movesOffMesh);
 
     for (auto& [guid, m] : run.members)
     {
@@ -531,7 +543,7 @@ void GuildRuns::SampleFights()
                 group = member->GetGroup();
         if (group)
         {
-            TraceMoves(group, nowMs);
+            TraceMoves(run, group, nowMs);
             SampleFight(run, group, nowMs, now);
         }
         else if (run.fight.open)
@@ -717,7 +729,7 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
         EndFight(run, now);
 }
 
-void GuildRuns::TraceMoves(Group* group, uint32 nowMs)
+void GuildRuns::TraceMoves(Run& run, Group* group, uint32 nowMs)
 {
     for (auto& slot : group->GetMemberSlots())
     {
@@ -733,6 +745,7 @@ void GuildRuns::TraceMoves(Group* group, uint32 nowMs)
         if (trace.splineId == spline->GetId())
             continue;
         trace.splineId = spline->GetId();
+        run.movesTraced++;
 
         // A straight move: one segment, the core's shortcut when it finds no poly at an end. On it, the bot is
         // the elapsed share of the way from the start, so the start is found back from where it stands.
@@ -746,14 +759,17 @@ void GuildRuns::TraceMoves(Group* group, uint32 nowMs)
         const float yards = (to - from).length();
         if (yards < MOVE_TRACE_MIN_YARDS)
             continue;
-        if (trace.written && WorldTimer::getMSTimeDiff(trace.eventMs, nowMs) < MOVE_TRACE_GAP_MS)
-            continue;
+        run.movesStraight++;
 
+        // The same query the core's path finder uses for this bot.
         dtNavMeshQuery const* query = MMAP::MMapFactory::createOrGetMMapManager()->GetNavMeshQuery(bot->GetMapId(), bot->GetInstanceId());
         if (!query)
             continue;
         const bool fromOn = OnNavMesh(query, from), toOn = OnNavMesh(query, to);
         if (fromOn && toOn)
+            continue;
+        run.movesOffMesh++;
+        if (trace.written && WorldTimer::getMSTimeDiff(trace.eventMs, nowMs) < MOVE_TRACE_GAP_MS)
             continue;
 
         // By playerbots' move when this move ends on a point of the path it last made: it moves to the last point
