@@ -105,6 +105,8 @@ public:
     ai::TravelDestination* RepairDestination(Player* bot) const;
     // For a member whose leader is at an object that needs more than one user: a place by it, near enough to use it.
     bool UseSpot(Player* leader, Player* member, WorldLocation& place) const;
+    // For a member walking to the vendor at a trip's stop to buy drink or food (SupplyAt): a place by it.
+    bool SupplySpot(Player* leader, Player* member, WorldLocation& place) const;
     // For a member whose leader gathers for or pulls a creature ahead, and which stands nearer that creature than the
     // leader: a place behind the leader on its way, where it waits.
     bool PullHoldSpot(Player* leader, Player* member, WorldLocation& place) const;
@@ -262,6 +264,13 @@ private:
         int32 repairEntry = 0;         // that repairer's creature entry
         bool repairArrived = false;    // the leader has come to it, and stays there
         bool repairGaveUp = false;     // a repair trip of this run gave up, and no other starts
+        bool supplyChecked = false;    // the party's drink and food were looked at before it first set out
+        bool supplyTrip = false;       // the trip under way is for drink and food, not for broken gear
+        bool supplyDone = false;       // at the trip's stop, every member's buying is done or given up
+        time_t supplySince = 0;        // when buying began at that stop, or 0
+        ObjectGuid supplyVendor;       // the vendor the members buy from there
+        std::set<uint32> supplyWalkers;   // members, by guid, that walk to it to buy
+        std::set<uint32> supplyHandled;   // a member's guid times two, plus one for drink: bought or given up there
         bool insideWalking = false;    // this tick, the leader walks straight to the place by the way in, and travels nowhere
         bool insideWalkedLast = false; // it did on the tick before
         time_t insideWalkSince = 0;    // when that walk started, or 0
@@ -315,6 +324,13 @@ private:
     // The finish step: out, then the reset.
     void TickLeave(Player* leader, Run& run, Update& update);
     void TickRepair(Player* leader, Run& run, Update& update);
+    // At a trip's stop: each party member that uses mana buys drink suited to its level, up to SUPPLY_STACK, and each
+    // with no food suited to its level buys food, from the stop's vendor or one near it, with its own money. True when
+    // every member is done or given up; members still on their way to the vendor keep it false, to SUPPLY_SECONDS.
+    bool SupplyAt(Player* leader, Run& run, Unit* stop, Update& update);
+    // Before the party first sets out: when a member carries no drink (one that uses mana) or no food suited to its level,
+    // a trip to the nearest vendor on the leader's map that sells some, run as a repair trip is. True when one starts.
+    bool StartSupplyTrip(Player* leader, Run& run, Update& update);
     // Walks the leader straight to the place by the way in when a short path there exists, rather than by the travel
     // map's route: true while it walks, and the travel waits.
     bool WalkToInside(Player* leader, Run& run, float near, Update& update);

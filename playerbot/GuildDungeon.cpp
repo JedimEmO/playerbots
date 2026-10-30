@@ -7,6 +7,7 @@
 #include "playerbot/strategy/values/LastMovementValue.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "playerbot/strategy/values/PositionValue.h"
+#include "playerbot/strategy/values/ItemUsageValue.h"
 #include "MotionGenerators/PathFinder.h"
 #include "playerbot/ServerFacade.h"
 #include "Pools/PoolManager.h"
@@ -211,6 +212,17 @@ namespace
     // At the place, the repairer is looked for this far off. A repair destination's point can lie well off the repairer's
     // own spawn: Magnus Frostwake by Scholomance stands 82 yards from where the party stopped.
     constexpr float REPAIR_SEARCH = 100.0f;
+    // Drink for a member that uses mana, and food for one with none, at a trip's stop and before the party first sets
+    // out: suited to its level when its required level is no more than SUPPLY_LEVELS below the member's, bought up to a
+    // stack. The lab's healers carried only their starting water, 151 mana a drink, and a level-59 healer rested its 3
+    // minutes out and went on under 40 percent. A member buys within SUPPLY_REACH of the vendor, and gives up on one it
+    // has not come to after SUPPLY_SECONDS.
+    constexpr uint32 SUPPLY_STACK = 20;
+    constexpr uint32 SUPPLY_LEVELS = 15;
+    constexpr float SUPPLY_REACH = 4.5f;
+    constexpr time_t SUPPLY_SECONDS = 90;
+    // Before the party first sets out, it goes to a vendor no farther off than this.
+    constexpr float SUPPLY_TRIP_NEAR = 300.0f;
 
     // Why the stone last turned each member away, so the event log has each new reason once.
     std::mutex refusalLock;
@@ -1240,6 +1252,71 @@ namespace
         if (PlayerbotAI* ai = leader->GetPlayerbotAI())
             ai->GetAiObjectContext()->GetValue<bool>("manual bool", "guild dungeon boss guarded")->Set(guarded);
     }
+
+    // Drink (mana) or food (health only) the member could eat or drink at its level, and that suits its level.
+    bool SuitedSupply(Player* member, ItemPrototype const* proto, bool drink)
+    {
+        if (!proto)
+            return false;
+        const bool isDrink = ItemUsageValue::IsManaFoodOrDrink(proto);
+        if (drink ? !isDrink : (isDrink || !ItemUsageValue::IsHpFoodOrDrink(proto)))
+            return false;
+        return proto->RequiredLevel <= member->GetLevel() && proto->RequiredLevel + SUPPLY_LEVELS >= member->GetLevel()
+            && member->CanUseItem(proto) == EQUIP_ERR_OK;
+    }
+
+    // How much suited drink or food the member carries, in its backpack and bags.
+    uint32 SuppliesCarried(Player* member, bool drink)
+    {
+        uint32 count = 0;
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            if (Item* item = member->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                if (SuitedSupply(member, item->GetProto(), drink))
+                    count += item->GetCount();
+        for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+            if (Bag* bag = dynamic_cast<Bag*>(member->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot)))
+                for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                    if (Item* item = bag->GetItemByPos(uint8(slot)))
+                        if (SuitedSupply(member, item->GetProto(), drink))
+                            count += item->GetCount();
+        return count;
+    }
+
+    // What the member wants: drink up to a stack when it uses mana, and food when it carries none suited. At a stop it
+    // tops up; before the party first sets out, only one carrying none sends it to a vendor.
+    bool WantsSupply(Player* member, bool drink, bool topUp)
+    {
+        if (drink && (member->GetPowerType() != POWER_MANA || !member->GetMaxPower(POWER_MANA)))
+            return false;
+        const uint32 carried = SuppliesCarried(member, drink);
+        return drink && topUp ? carried < SUPPLY_STACK : carried == 0;
+    }
+
+    // The best suited drink or food a vendor's list sells: the highest required level, then the highest item level.
+    ItemPrototype const* VendorOffer(VendorItemData const* items, Player* member, bool drink)
+    {
+        ItemPrototype const* best = nullptr;
+        if (!items)
+            return nullptr;
+        for (VendorItem* entry : items->m_items)
+        {
+            ItemPrototype const* proto = entry ? sObjectMgr.GetItemPrototype(entry->item) : nullptr;
+            if (!SuitedSupply(member, proto, drink))
+                continue;
+            if (!best || proto->RequiredLevel > best->RequiredLevel
+                || (proto->RequiredLevel == best->RequiredLevel && proto->ItemLevel > best->ItemLevel))
+                best = proto;
+        }
+        return best;
+    }
+
+    // A vendor the member's faction may trade with.
+    bool TradesWith(Player* member, CreatureInfo const* info)
+    {
+        FactionTemplateEntry const* vendor = info ? sFactionTemplateStore.LookupEntry(info->Faction) : nullptr;
+        FactionTemplateEntry const* own = member->GetFactionTemplateEntry();
+        return vendor && own && !vendor->IsHostileTo(*own) && !own->IsHostileTo(*vendor);
+    }
 }
 
 GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
@@ -1382,6 +1459,15 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
             run.phase = Phase::Go;
             update.strategiesChanged = true;
         }
+    }
+
+    // Before the party first sets out, it stocks up on drink and food it lacks, as players do before a dungeon.
+    if (run.phase == Phase::Check && !run.entered && !run.supplyChecked && why.empty() && leader->IsAlive() && leader->IsInWorld()
+        && !leader->IsBeingTeleported())
+    {
+        run.supplyChecked = true;
+        if (StartSupplyTrip(leader, run, update))
+            return update;
     }
 
     // With a meeting stone, a member that is only far off does not keep the leader from setting out: the party meets
@@ -2935,12 +3021,20 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
     }
     else if (!BrokenGear(leader).empty())
         broken = leader->GetName();
+    // What the trip is for, for the reasons.
+    const std::string need = broken.empty() ? std::string("for drink and food") : broken + "'s gear is broken";
 
     auto back = [&](const std::string& kind, const std::string& detail)
     {
         update.events.push_back({ kind, detail });
-        if (kind == "gave_up")
+        if (kind == "gave_up" && !run.supplyTrip)
             run.repairGaveUp = true;
+        run.supplyTrip = false;
+        run.supplyDone = false;
+        run.supplySince = 0;
+        run.supplyVendor.Clear();
+        run.supplyWalkers.clear();
+        run.supplyHandled.clear();
         run.repairTrip = false;
         run.repairSince = 0;
         run.repairPlace = nullptr;
@@ -2951,14 +3045,16 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
             sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
         update.reason = "back to " + dungeon.name + " from repairing";
     };
-    if (broken.empty())
+    // Before the stop, a trip for broken gear ends once none is broken; at the stop, the buying decides (SupplyAt).
+    if (broken.empty() && !run.supplyTrip && !run.repairArrived)
     {
         back("repaired", dungeon.name + ", " + std::to_string(run.killed.size()) + " bosses down");
         return;
     }
     if (now - run.repairSince > REPAIR_SECONDS)
     {
-        back("gave_up", "repair, " + broken + " still broken after " + std::to_string(REPAIR_SECONDS / MINUTE) + " minutes");
+        back("gave_up", broken.empty() ? "drink and food, no stop reached in " + std::to_string(REPAIR_SECONDS / MINUTE) + " minutes"
+            : "repair, " + broken + " still broken after " + std::to_string(REPAIR_SECONDS / MINUTE) + " minutes");
         return;
     }
 
@@ -2974,7 +3070,7 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
         run.repairPlace = nullptr;
         run.repairArrived = false;
         update.strategiesChanged = true;
-        update.reason = "leaving " + dungeon.name + " again to repair, " + broken + "'s gear is broken";
+        update.reason = "leaving " + dungeon.name + " again to repair, " + need;
         return;
     }
 
@@ -3026,7 +3122,7 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
         run.repairArrived = true;
     if (!run.repairArrived)
     {
-        update.reason = "on the way to " + run.repairPlace->GetTitle() + ", " + broken + "'s gear is broken";
+        update.reason = "on the way to " + run.repairPlace->GetTitle() + ", " + need;
         return;
     }
 
@@ -3049,6 +3145,20 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
     {
         const WorldPosition by(repairer);
         WorldPosition* place = run.repairPlace->GetClosestPoint(by);
+        // Come off a stop already by the repairer, as after a walk to loot: back to it, and still there. Made afresh, the
+        // place sent the leader's travel off again, which a town's rpg targets kept from ever coming back.
+        if (run.repairArrived && place && place->getMapId() == by.getMapId() && place->distance(by) <= REPAIR_AT)
+        {
+            if (leader->IsInWorld() && !leader->IsBeingTeleported() && !leader->IsInCombat() && !leader->IsMoving())
+            {
+                float x, y, z;
+                repairer->GetNearPoint(leader, x, y, z, leader->GetObjectBoundingRadius(), 3.0f, repairer->GetAngle(leader));
+                leader->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_RUN);
+            }
+            update.reason = "back to " + run.repairPlace->GetTitle() + ", " + std::to_string(uint32(leader->GetDistance(repairer)))
+                + " yards off, " + need;
+            return;
+        }
         if (!place || place->getMapId() != by.getMapId() || place->distance(by) > REPAIR_AT)
         {
             const std::string title = run.repairPlace->GetTitle();
@@ -3066,20 +3176,282 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
                 target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
         }
         update.reason = "on the way to " + run.repairPlace->GetTitle() + ", " + std::to_string(uint32(leader->GetDistance(repairer)))
-            + " yards off, " + broken + "'s gear is broken";
+            + " yards off, " + need;
         return;
     }
-    if (group)
+    // A stop for drink and food only can be a vendor that repairs nothing.
+    if (repairer->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_REPAIR))
     {
-        for (auto& slot : group->GetMemberSlots())
-            if (Player* member = sObjectMgr.GetPlayer(slot.guid))
-                if (sGuildBotMgr.IsGuildBot(member) && member->IsInWorld() && member->IsAlive() && !member->IsInCombat()
-                    && member->GetMapId() == repairer->GetMapId() && member->GetDistance(repairer) <= REPAIR_NEAR)
-                    member->DurabilityRepairAll(true, 1.0f);
+        if (group)
+        {
+            for (auto& slot : group->GetMemberSlots())
+                if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+                    if (sGuildBotMgr.IsGuildBot(member) && member->IsInWorld() && member->IsAlive() && !member->IsInCombat()
+                        && member->GetMapId() == repairer->GetMapId() && member->GetDistance(repairer) <= REPAIR_NEAR)
+                        member->DurabilityRepairAll(true, 1.0f);
+        }
+        else if (leader->GetDistance(repairer) <= REPAIR_NEAR)
+            leader->DurabilityRepairAll(true, 1.0f);
     }
-    else if (leader->GetDistance(repairer) <= REPAIR_NEAR)
-        leader->DurabilityRepairAll(true, 1.0f);
-    update.reason = "repairing at " + run.repairPlace->GetTitle() + ", waiting for " + broken;
+    // The party buys there too, before it goes back.
+    const bool supplied = SupplyAt(leader, run, repairer, update);
+    if (broken.empty() && supplied)
+    {
+        back(run.supplyTrip ? "supplied" : "repaired", dungeon.name + ", " + std::to_string(run.killed.size()) + " bosses down");
+        return;
+    }
+    update.reason = broken.empty() ? "buying drink and food at " + run.repairPlace->GetTitle()
+        : "repairing at " + run.repairPlace->GetTitle() + ", waiting for " + broken;
+}
+
+bool GuildDungeon::SupplyAt(Player* leader, Run& run, Unit* stop, Update& update)
+{
+    const time_t now = time(nullptr);
+    if (run.supplyDone)
+        return true;
+    Group* group = leader->GetGroup();
+    if (!group || !stop || !stop->IsInWorld() || stop->GetMapId() != leader->GetMapId())
+    {
+        run.supplyDone = true;
+        return true;
+    }
+    if (!run.supplySince)
+        run.supplySince = now;
+
+    // Who wants what, of the party's own characters here: each want is the member's guid times two, plus one for drink.
+    std::vector<std::pair<Player*, bool>> wants;
+    for (auto& slot : group->GetMemberSlots())
+        if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+            if (sGuildBotMgr.IsGuildBot(member) && member->IsInWorld() && member->IsAlive() && member->GetMapId() == leader->GetMapId())
+                for (const bool drink : { true, false })
+                    if (!run.supplyHandled.count(member->GetGUIDLow() * 2 + (drink ? 1 : 0)) && WantsSupply(member, drink, true))
+                        wants.push_back({ member, drink });
+    if (wants.empty())
+    {
+        run.supplyDone = true;
+        run.supplyWalkers.clear();
+        return true;
+    }
+
+    // The vendor: the stop itself when it sells what is wanted, or else the nearest one by it that does.
+    auto sells = [&](Creature* vendor)
+    {
+        if (!vendor || !vendor->isVendor() || !vendor->IsAlive() || !TradesWith(leader, vendor->GetCreatureInfo()))
+            return false;
+        for (const auto& want : wants)
+            if (VendorOffer(vendor->GetVendorItems(), want.first, want.second))
+                return true;
+        return false;
+    };
+    Creature* vendor = run.supplyVendor.IsEmpty() ? nullptr : leader->GetMap()->GetCreature(run.supplyVendor);
+    if (!sells(vendor))
+    {
+        vendor = stop->GetTypeId() == TYPEID_UNIT && sells(static_cast<Creature*>(stop)) ? static_cast<Creature*>(stop) : nullptr;
+        if (!vendor)
+        {
+            std::list<Unit*> found;
+            MaNGOS::AnyUnitInObjectRangeCheck check(leader, REPAIR_SEARCH);
+            MaNGOS::UnitListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(found, check);
+            Cell::VisitAllObjects(leader, searcher, REPAIR_SEARCH);
+            for (Unit* unit : found)
+                if (unit->GetTypeId() == TYPEID_UNIT && sells(static_cast<Creature*>(unit))
+                    && (!vendor || leader->GetDistance(unit) < leader->GetDistance(vendor)))
+                    vendor = static_cast<Creature*>(unit);
+        }
+        run.supplyVendor = vendor ? vendor->GetObjectGuid() : ObjectGuid();
+    }
+
+    run.supplyWalkers.clear();
+    const std::string stopName = stop->GetName();
+    for (const auto& want : wants)
+    {
+        Player* member = want.first;
+        const bool drink = want.second;
+        const uint32 key = member->GetGUIDLow() * 2 + (drink ? 1 : 0);
+        const std::string what = drink ? "drink" : "food";
+        ItemPrototype const* proto = vendor ? VendorOffer(vendor->GetVendorItems(), member, drink) : nullptr;
+        if (!proto)
+        {
+            run.supplyHandled.insert(key);
+            update.events.push_back({ "not_bought", std::string(member->GetName()) + ": no vendor by " + stopName + " sells " + what
+                + " for level " + std::to_string(member->GetLevel()) });
+            continue;
+        }
+        if (member->IsInCombat() || member->GetDistance(vendor) > SUPPLY_REACH)
+        {
+            if (now - run.supplySince < SUPPLY_SECONDS)
+                run.supplyWalkers.insert(member->GetGUIDLow());
+            else
+            {
+                run.supplyHandled.insert(key);
+                update.events.push_back({ "not_bought", std::string(member->GetName()) + ": " + (member->IsInCombat() ? "in a fight" : "did not come")
+                    + " at " + vendor->GetName() + " for " + what + " after " + std::to_string(uint32(SUPPLY_SECONDS)) + " seconds" });
+            }
+            continue;
+        }
+        // As a player buys: whole lots of the vendor's count, as many as make up the stack and its money pays for.
+        run.supplyHandled.insert(key);
+        const uint32 carried = SuppliesCarried(member, drink);
+        const uint32 lot = std::max<uint32>(proto->BuyCount, 1);
+        const uint32 lotPrice = uint32(floor(proto->BuyPrice * member->GetReputationPriceDiscount(vendor)));
+        uint32 lots = (SUPPLY_STACK > carried ? SUPPLY_STACK - carried : lot) / lot;
+        lots = std::max<uint32>(lots, 1);
+        if (lotPrice)
+            lots = std::min<uint32>(lots, member->GetMoney() / lotPrice);
+        if (!lots)
+        {
+            update.events.push_back({ "not_bought", std::string(member->GetName()) + ": " + proto->Name1 + " at " + vendor->GetName()
+                + " costs " + std::to_string(lotPrice) + " copper a lot, it has " + std::to_string(member->GetMoney()) });
+            continue;
+        }
+        const uint32 before = member->GetItemCount(proto->ItemId);
+        const uint32 moneyBefore = member->GetMoney();
+        // The core's buy reports false even when it sold, as BuyAction notes: the count says whether a lot came.
+        for (uint32 n = 0; n < lots; ++n)
+        {
+            const uint32 had = member->GetItemCount(proto->ItemId);
+            member->BuyItemFromVendor(vendor->GetObjectGuid(), proto->ItemId, 1, NULL_BAG, NULL_SLOT);
+            if (member->GetItemCount(proto->ItemId) <= had)
+                break;
+        }
+        const uint32 bought = member->GetItemCount(proto->ItemId) - before;
+        if (bought)
+            update.events.push_back({ "bought", std::string(member->GetName()) + " " + std::to_string(bought) + " " + proto->Name1 + " at "
+                + vendor->GetName() + " for " + std::to_string(moneyBefore - member->GetMoney()) + " copper" });
+        else
+            update.events.push_back({ "not_bought", std::string(member->GetName()) + ": " + vendor->GetName() + " sold it no "
+                + proto->Name1 + ", its bags full or the stock out" });
+    }
+    if (run.supplyWalkers.empty() && std::all_of(wants.begin(), wants.end(), [&](const std::pair<Player*, bool>& want)
+        { return run.supplyHandled.count(want.first->GetGUIDLow() * 2 + (want.second ? 1 : 0)) != 0; }))
+    {
+        run.supplyDone = true;
+        return true;
+    }
+    return false;
+}
+
+bool GuildDungeon::StartSupplyTrip(Player* leader, Run& run, Update& update)
+{
+    Group* group = leader->GetGroup();
+    if (!group)
+        return false;
+    std::vector<std::pair<Player*, bool>> wants;
+    std::string names;
+    for (auto& slot : group->GetMemberSlots())
+        if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+            if (sGuildBotMgr.IsGuildBot(member) && member->IsInWorld() && member->IsAlive())
+            {
+                bool any = false;
+                for (const bool drink : { true, false })
+                    if (WantsSupply(member, drink, false))
+                    {
+                        wants.push_back({ member, drink });
+                        any = true;
+                    }
+                if (any)
+                    names += (names.empty() ? "" : ", ") + slot.name;
+            }
+    if (wants.empty())
+        return false;
+
+    // Of the vendors on the leader's map that trade with it and sell something a member wants: within SUPPLY_TRIP_NEAR,
+    // the one that sells drink to the most of the members that want it, then food to the most, then the nearest. The
+    // nearest alone sent three parties to food sellers with no drink for their healers. With none that near, the nearest
+    // of all, for the event.
+    const WorldPosition from(leader);
+    TravelDestination* best = nullptr;
+    WorldPosition bestAt;
+    float bestDistance = 0.0f;
+    uint32 bestDrinks = 0, bestWants = 0;
+    for (TravelDestination* dest : sTravelMgr.GetDestinations(PlayerTravelInfo(leader), (uint32)TravelDestinationPurpose::Vendor))
+    {
+        if (dest->GetEntry() <= 0)
+            continue;
+        CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(dest->GetEntry());
+        if (!TradesWith(leader, info))
+            continue;
+        VendorItemData const* items = sObjectMgr.GetNpcVendorItemList(dest->GetEntry());
+        if (std::none_of(wants.begin(), wants.end(), [&](const std::pair<Player*, bool>& want) { return VendorOffer(items, want.first, want.second); }))
+            continue;
+        WorldPosition* at = dest->GetClosestPoint(from);
+        if (!at || at->getMapId() != leader->GetMapId())
+            continue;
+        const float distance = at->distance(from);
+        uint32 drinks = 0, served = 0;
+        for (const auto& want : wants)
+            if (VendorOffer(items, want.first, want.second))
+            {
+                ++served;
+                drinks += want.second ? 1 : 0;
+            }
+        const bool near = distance <= SUPPLY_TRIP_NEAR, bestNear = best && bestDistance <= SUPPLY_TRIP_NEAR;
+        const bool better = !best || (near != bestNear ? near
+            : near ? (drinks != bestDrinks ? drinks > bestDrinks : served != bestWants ? served > bestWants : distance < bestDistance)
+            : distance < bestDistance);
+        if (better)
+        {
+            best = dest;
+            bestAt = *at;
+            bestDistance = distance;
+            bestDrinks = drinks;
+            bestWants = served;
+        }
+    }
+    if (!best)
+    {
+        update.events.push_back({ "not_bought", names + ": no vendor on this map sells the drink or food their levels want" });
+        return false;
+    }
+    // A vendor farther off is left to whoever runs the guild, by a kit order. In the lab, the stones' nearest vendors
+    // were 140 to 1240 yards off: the trips past 300 yards took 3 to 8 minutes, and 7 of them, from 640 yards on,
+    // reached nothing in the 10 minutes.
+    if (bestDistance > SUPPLY_TRIP_NEAR)
+    {
+        CreatureInfo const* far = ObjectMgr::GetCreatureTemplate(best->GetEntry());
+        update.events.push_back({ "not_bought", names + ": the nearest vendor with the drink or food their levels want, "
+            + std::string(far ? far->Name : "a vendor") + ", is " + std::to_string(uint32(bestDistance)) + " yards off" });
+        return false;
+    }
+    CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(best->GetEntry());
+    const std::string name = info ? info->Name : "a vendor";
+    {
+        std::lock_guard<std::mutex> guard(exitLock);
+        repairPlaces.push_back(std::make_unique<PlaceTravelDestination>(bestAt, name));
+        run.repairPlace = repairPlaces.back().get();
+    }
+    run.phase = Phase::Repair;
+    run.supplyTrip = true;
+    run.supplyDone = false;
+    run.supplySince = 0;
+    run.supplyVendor.Clear();
+    run.supplyWalkers.clear();
+    run.supplyHandled.clear();
+    run.repairEntry = best->GetEntry();
+    run.repairArrived = false;
+    run.repairSince = time(nullptr);
+    update.strategiesChanged = true;
+    if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+        sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+    update.events.push_back({ "supply_trip", "to " + name + ", " + std::to_string(uint32(bestDistance)) + " yards, for " + names });
+    update.reason = "on the way to " + name + " for drink and food, for " + names;
+    return true;
+}
+
+bool GuildDungeon::SupplySpot(Player* leader, Player* member, WorldLocation& place) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = runs.find(leader->GetGUIDLow());
+    if (it == runs.end() || it->second.phase != Phase::Repair || !it->second.repairArrived || it->second.supplyVendor.IsEmpty()
+        || !it->second.supplyWalkers.count(member->GetGUIDLow()) || leader->GetMapId() != member->GetMapId())
+        return false;
+    Creature* vendor = member->GetMap()->GetCreature(it->second.supplyVendor);
+    if (!vendor || !vendor->IsInWorld() || member->GetDistance(vendor) <= SUPPLY_REACH - 1.0f)
+        return false;
+    float x, y, z;
+    vendor->GetNearPoint(member, x, y, z, member->GetObjectBoundingRadius(), 2.0f, vendor->GetAngle(member));
+    place = WorldLocation(vendor->GetMapId(), x, y, z, 0.0f);
+    return true;
 }
 
 void GuildDungeon::RestartStalledTravel(Player* leader, Run& run, Update& update)
@@ -3615,8 +3987,9 @@ bool GuildDungeon::NoRpg(Player* bot) const
     if (it == runs.end())
         return false;
     const Run& run = it->second;
-    // Inside, the next boss, the steps before it and the way out are all its moves.
-    if (bot->GetMapId() == run.dungeon.mapId)
+    // Inside, the next boss, the steps before it and the way out are all its moves; so are a trip's. In Kharanos the
+    // Gnomeregan leader bought, then went off to sell and to its trainer, and never came back to the stop.
+    if (bot->GetMapId() == run.dungeon.mapId || run.phase == Phase::Repair)
         return true;
     // Near its stone on the way in, it waits there for the party. An rpg target walked the Gnomeregan leader
     // 57 yards off its stone to the Vator, which took it down below the stone.
@@ -3798,6 +4171,10 @@ bool GuildDungeon::FollowByTravel(Player* bot, WorldLocation& place)
 
     // The leader gathers for or pulls a creature ahead: behind it, not nearer the creature than it.
     if (sGuildDungeon.PullHoldSpot(leader, bot, place))
+        return true;
+
+    // The party buys drink or food at a trip's stop: to the vendor.
+    if (sGuildDungeon.SupplySpot(leader, bot, place))
         return true;
 
     {
