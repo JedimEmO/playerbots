@@ -67,6 +67,14 @@ namespace
     constexpr uint32 FIGHT_REST_HEALTH = 60;
     constexpr uint32 FIGHT_REST_MANA = 50;
     constexpr time_t FIGHT_REST_SECONDS = 90;
+    // A healer still under HEALER_REST_MANA percent of its mana, alive and out of a fight, when that rest is up: the party
+    // rests on, to HEALER_REST_SECONDS in all. The Scholomance party went down the stairs into the hall four times with its
+    // healer at 8 to 38 percent after the rest, and died there each time.
+    constexpr uint32 HEALER_REST_MANA = 40;
+    constexpr time_t HEALER_REST_SECONDS = 3 * MINUTE;
+    // A boss its company holds from the leader's grind (MarkBossGuarded) is let go after this long with the leader standing
+    // still: the pull step takes what it can, and a creature by the boss that no pull brings must not keep the boss for good.
+    constexpr time_t GUARD_WAIT_SECONDS = 90;
     constexpr time_t LEAVE_REST_SECONDS = 3 * MINUTE;
     // A member inside that has stood still this long since the leader came out is stranded, somewhere no route leads
     // out of, and goes home by hearthstone, as a player would; tried again this often while it is on cooldown.
@@ -1210,6 +1218,14 @@ namespace
         if (PlayerbotAI* ai = leader->GetPlayerbotAI())
             ai->GetAiObjectContext()->GetValue<bool>("manual bool", "guild dungeon rests")->Set(decided);
     }
+
+    // The leader's next boss has company the pull step can take (GuardOf), and the run has not let it go: the leader's grind
+    // leaves the boss to the pull step (AttackAnythingAction). The tick writes it, so AI code reads it without the dungeon's lock.
+    void MarkBossGuarded(Player* leader, bool guarded)
+    {
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            ai->GetAiObjectContext()->GetValue<bool>("manual bool", "guild dungeon boss guarded")->Set(guarded);
+    }
 }
 
 GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
@@ -1219,7 +1235,10 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name)
     AllowTravelRequest(leader);
 
     Run& run = runs[leader->GetGUIDLow()];
-    MarkRestDecided(leader, run.resolved && run.phase == Phase::Bosses && leader->GetMapId() == run.dungeon.mapId);
+    const bool inBosses = run.resolved && run.phase == Phase::Bosses && leader->GetMapId() == run.dungeon.mapId;
+    MarkRestDecided(leader, inBosses);
+    if (!inBosses)
+        MarkBossGuarded(leader, false);
     if (!run.resolved)
     {
         std::string error;
@@ -1604,6 +1623,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     if (Group* group = leader->GetGroup())
     {
         std::string low;
+        std::string dryHealer;    // the party's healer, out of a fight and under HEALER_REST_MANA
+        uint32 dryMana = 0;
         bool fight = false;
         for (auto& slot : group->GetMemberSlots())
         {
@@ -1612,18 +1633,41 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 continue;
             if (member->IsInCombat())
                 fight = true;
-            else if (low.empty() && (member->GetHealth() * 100 < member->GetMaxHealth() * FIGHT_REST_HEALTH
-                || (member->GetPowerType() == POWER_MANA && member->GetMaxPower(POWER_MANA)
-                    && member->GetPower(POWER_MANA) * 100 < member->GetMaxPower(POWER_MANA) * FIGHT_REST_MANA)))
-                low = member->GetName();
+            else
+            {
+                const bool hasMana = member->GetPowerType() == POWER_MANA && member->GetMaxPower(POWER_MANA);
+                const uint32 mana = hasMana ? member->GetPower(POWER_MANA) * 100 / member->GetMaxPower(POWER_MANA) : 100;
+                if (low.empty() && (member->GetHealth() * 100 < member->GetMaxHealth() * FIGHT_REST_HEALTH || mana < FIGHT_REST_MANA))
+                    low = member->GetName();
+                if (dryHealer.empty() && mana < HEALER_REST_MANA && PlayerbotAI::IsHeal(member))
+                {
+                    dryHealer = member->GetName();
+                    dryMana = mana;
+                }
+            }
         }
         const time_t restNow = time(nullptr);
         if (low.empty())
+        {
             run.restSince = 0;
-        else if (!fight && (!run.restSince || restNow - run.restSince < FIGHT_REST_SECONDS))
+            run.restExtended = false;
+        }
+        else if (!fight && (!run.restSince || restNow - run.restSince < FIGHT_REST_SECONDS
+            || (!dryHealer.empty() && restNow - run.restSince < HEALER_REST_SECONDS)))
         {
             if (!run.restSince)
+            {
                 run.restSince = restNow;
+                run.restExtended = false;
+            }
+            if (restNow - run.restSince >= FIGHT_REST_SECONDS && !run.restExtended)
+            {
+                run.restExtended = true;
+                update.events.push_back({ "rest_extended", dryHealer + " at " + std::to_string(dryMana) + "% mana after "
+                    + std::to_string(uint32(FIGHT_REST_SECONDS)) + " seconds" });
+            }
+            if (run.restExtended && !dryHealer.empty())
+                low = dryHealer;
             run.headwaySince = restNow;
             // It holds as it does for a member far behind: with "stay", and no travel target, it pulls nothing new.
             if (!run.waiting)
@@ -2800,6 +2844,31 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (target && forNext && stopped)
             ai->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().clear();
     }
+    // The boss its company holds from the grind: after GUARD_WAIT_SECONDS of that with the leader still, it is let go.
+    if (run.guardBoss != next)
+    {
+        run.guardBoss = next;
+        run.guardedSince = 0;
+        run.guardReleased = false;
+    }
+    Unit* bossGuard = nullptr;
+    if (!run.guardReleased && talkWait.empty() && killing.empty() && bossCreature
+        && leader->GetDistance(bossCreature) <= sPlayerbotAIConfig.sightDistance)
+        bossGuard = GuardOf(leader, bossCreature, run);
+    if (!bossGuard)
+        run.guardedSince = 0;
+    else
+    {
+        if (!run.guardedSince)
+            run.guardedSince = now;
+        if (now - run.guardedSince >= GUARD_WAIT_SECONDS && run.stillSince && now - run.stillSince >= GUARD_WAIT_SECONDS)
+        {
+            run.guardReleased = true;
+            update.events.push_back({ "recovery", BossName(next) + " let go after " + std::to_string(uint32(now - run.guardedSince))
+                + " seconds with " + bossGuard->GetName() + " by it, not pulled" });
+        }
+    }
+    MarkBossGuarded(leader, bossGuard && !run.guardReleased);
     if (talkWait.empty() && killing.empty() && !dungeon.talks.count(next))
         RestartIdleTravel(leader, run, next, bossPlace ? bossDistance : 0.0f, update);
     else
@@ -3967,6 +4036,29 @@ Creature* GuildDungeon::NextBoss(Player* bot, float within) const
     if (!boss || !boss->IsAlive() || !boss->IsInWorld() || bot->GetDistance(boss) > within)
         return nullptr;
     return boss;
+}
+
+Unit* GuildDungeon::GuardOf(Player* leader, Unit* boss, const Run& run)
+{
+    if (!boss || boss->IsInCombat() || !boss->IsInWorld() || !leader->IsInWorld() || boss->GetMapId() != leader->GetMapId())
+        return nullptr;
+    std::list<Unit*> found;
+    MaNGOS::AnyUnitInObjectRangeCheck check(boss, PULL_PACK);
+    MaNGOS::UnitListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(found, check);
+    Cell::VisitAllObjects(boss, searcher, PULL_PACK);
+    // The pull step's own filter: what it passes over would hold the boss for good.
+    for (Unit* unit : found)
+    {
+        if (unit == boss || unit->GetTypeId() != TYPEID_UNIT || unit->IsInCombat() || !unit->IsEnemy(leader))
+            continue;
+        Creature* creature = static_cast<Creature*>(unit);
+        if (creature->IsCritter() || creature->IsTotem() || creature->GetLevel() <= 1 || creature->GetCombatManager().IsEvadingHome()
+            || creature->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNINTERACTIBLE) || run.pullIgnored.count(creature->GetObjectGuid())
+            || std::find(run.dungeon.bosses.begin(), run.dungeon.bosses.end(), int32(creature->GetEntry())) != run.dungeon.bosses.end())
+            continue;
+        return unit;
+    }
+    return nullptr;
 }
 
 Creature* GuildDungeon::KillTarget(Player* bot, float within) const

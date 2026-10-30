@@ -41,6 +41,13 @@ bool AttackAnythingAction::isUseful()
         && (!bot->IsWithinLOSInMap(target, true) || target->GetPositionZ() < bot->GetPositionZ() - PULL_BELOW))
         return false;
 
+    // Nor its next boss out of a fight while a creature in none stands by it: the pull step takes that one first. A leader
+    // that took the Blood Steward of Kirtonos from the Scholomance stairs brought the whole hall with him, 15 times in an hour.
+    if (sGuildBotMgr.IsGuildBot(bot) && sGuildBotMgr.GetActiveJob(bot->GetGUIDLow()) == "dungeon" && bot->GetMap()->IsDungeon()
+        && !target->IsInCombat() && AI_VALUE2(bool, "manual bool", "guild dungeon boss guarded")
+        && target == sGuildDungeon.NextBoss(bot, sPlayerbotAIConfig.sightDistance))
+        return false;
+
     bool pinnedByOrder = ai->HasStrategy("stay", BotState::BOT_STATE_NON_COMBAT) || ai->HasStrategy("guard", BotState::BOT_STATE_NON_COMBAT);
     if (pinnedByOrder && target->GetDistance(bot) >= ai->GetRange("spell"))
         return false;

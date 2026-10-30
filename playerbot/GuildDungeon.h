@@ -295,6 +295,10 @@ private:
         bool insideReached = false;    // the leader has come by the way out inside: from now on it goes out
         bool leaveResting = false;     // the leave waits for the party to finish its fight and rest first
         time_t restSince = 0;          // since when the party has rested between fights inside, or 0
+        bool restExtended = false;     // that rest has gone past FIGHT_REST_SECONDS for a healer low on mana
+        int32 guardBoss = 0;           // the boss the three below are about
+        time_t guardedSince = 0;       // since when it has had company the pull step can take while the leader waited, or 0
+        bool guardReleased = false;    // waited out: the leader may take it with that company by it
         std::string cleared;           // what the run did, for the job's reason once it is done
     };
 
@@ -318,6 +322,9 @@ private:
     // On the way to the next boss with no travel target at all, out of a fight, for IDLE_TRAVEL_SECONDS: a stall too.
     // It records what held the leader, lets it out of that, and gives it a travel target to the boss.
     void RestartIdleTravel(Player* leader, Run& run, int32 next, float bossDistance, Update& update);
+    // A creature by the boss, within PULL_PACK, that the pull step would take: hostile to the leader, alive, in no fight, no
+    // boss of the dungeon, not given up on as a pull. Null when the boss is in a fight itself, or has none.
+    static Unit* GuardOf(Player* leader, Unit* boss, const Run& run);
     // An equipped item of the member's at no durability, by name, or empty.
     static std::string BrokenGear(Player* member);
     // To a step's object or creature: by itself within APPROACH_RANGE, which holds it there, and by travel farther off.
