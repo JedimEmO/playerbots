@@ -2803,7 +2803,10 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     if (talkWait.empty() && killing.empty() && !dungeon.talks.count(next))
         RestartIdleTravel(leader, run, next, bossPlace ? bossDistance : 0.0f, update);
     else
+    {
         run.idleSince = 0;
+        run.fightHeldSince = 0;
+    }
     if (!talkWait.empty())
         update.reason = "waiting for " + talkWait + " in " + dungeon.name + ", " + count;
     else if (!killing.empty())
@@ -3026,6 +3029,35 @@ void GuildDungeon::RestartIdleTravel(Player* leader, Run& run, int32 next, float
     const TravelStatus status = target ? target->GetStatus() : TravelStatus::TRAVEL_STATUS_NONE;
     const bool travelling = status == TravelStatus::TRAVEL_STATUS_TRAVEL || status == TravelStatus::TRAVEL_STATUS_READY
         || status == TravelStatus::TRAVEL_STATUS_WORK;
+
+    // Its AI in a fight state the core does not share, out of combat and standing still, with no victim or one out of its
+    // sight that fights no one: that fight is left, whatever the travel target. In the Stockade the leader stood 38
+    // minutes on the walkway above the cells taking one caged Defias Insurgent after another, 16 yards below and out of
+    // sight; each was given up on after 45 seconds, and the restarted travel never ran while the fight state held.
+    Unit* victim = leader->GetVictim();
+    Creature* boss = run.nextSpawn ? leader->GetMap()->GetCreature(run.nextSpawn) : nullptr;
+    const bool fightHeld = ai && ai->IsStateActive(BotState::BOT_STATE_COMBAT) && leader->IsAlive() && leader->IsInWorld()
+        && !leader->IsBeingTeleported() && !leader->IsInCombat() && run.stillSince
+        && (!victim || (victim != boss && !victim->IsInCombat() && !leader->IsWithinLOSInMap(victim)));
+    if (!fightHeld)
+        run.fightHeldSince = 0;
+    else
+    {
+        if (!run.fightHeldSince || now - run.fightSeenAt > IDLE_TRAVEL_GAP_SECONDS)
+            run.fightHeldSince = now;
+        run.fightSeenAt = now;
+        if (now - run.fightHeldSince >= IDLE_TRAVEL_SECONDS && now - run.stillSince >= IDLE_TRAVEL_SECONDS
+            && now - run.fightLeftAt >= TRAVEL_RESTART_SECONDS)
+        {
+            run.fightLeftAt = now;
+            const std::string held = victim ? std::string(victim->GetName()) + " out of sight" : std::string("nothing to attack");
+            update.events.push_back({ "recovery", "its AI in a fight for " + std::to_string(uint32(now - run.fightHeldSince))
+                + " seconds with " + held + ", left it" });
+            run.fightHeldSince = 0;
+            sGuildBotMgr.LeaveFight(leader, victim ? victim->GetObjectGuid() : ObjectGuid());
+            return;
+        }
+    }
     // Near the boss it fights, not travels; the node walk and the walk to the way in move it without a target.
     if (!target || travelling || !leader->IsAlive() || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->IsInCombat()
         || leader->GetVictim() || run.nodeWalking || run.insideWalkedLast || bossDistance <= APPROACH_RANGE)

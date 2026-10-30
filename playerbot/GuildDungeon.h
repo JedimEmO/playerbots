@@ -282,6 +282,9 @@ private:
         time_t idleSince = 0;          // since when it has been on its way to the next boss with no travel target, or 0
         time_t idleSeenAt = 0;         // the last tick it was
         time_t idleRestartAt = 0;      // when it was last given a travel target for that
+        time_t fightHeldSince = 0;     // since when its AI has held a fight the core does not see, with nothing to reach, or 0
+        time_t fightSeenAt = 0;        // the last tick it did
+        time_t fightLeftAt = 0;        // when it was last taken out of such a fight
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside

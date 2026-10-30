@@ -536,6 +536,18 @@ void GuildBotMgr::CheckEmptyFight(Character& c, Player* bot)
         }
 }
 
+void GuildBotMgr::LeaveFight(Player* bot, ObjectGuid victim)
+{
+    auto it = characters.find(bot->GetGUIDLow());
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    if (it == characters.end() || !ai)
+        return;
+    std::list<ObjectGuid> held = ai->GetAiObjectContext()->GetValue<std::list<ObjectGuid>>("attackers")->Get();
+    if (!victim.IsEmpty() && std::find(held.begin(), held.end(), victim) == held.end())
+        held.push_back(victim);
+    LeaveEmptyFight(it->second, bot, held, false);
+}
+
 void GuildBotMgr::LeaveEmptyFight(Character& c, Player* bot, const std::list<ObjectGuid>& attackers, bool record)
 {
     PlayerbotAI* ai = bot->GetPlayerbotAI();

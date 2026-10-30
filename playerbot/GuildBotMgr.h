@@ -69,6 +69,9 @@ public:
     bool IsIgnoredTarget(Player* bot, ObjectGuid target) const;  // also loot it gave up on
     // How many times the character has given up on this creature, as out of its reach.
     uint32 GiveUps(Player* bot, ObjectGuid target) const;
+    // Leaves the character's fight where it stands, as an empty fight is left: the victim and its attackers given up on for
+    // a while, its targets cleared, its AI out of its fight state. No event; the caller records why. World thread only.
+    void LeaveFight(Player* bot, ObjectGuid victim);
     // Travel destinations, by entry, the character left because it could not work them; set aside for a while.
     std::set<int32> LeftDestinations(Player* bot) const;
     // The experience per second that levelling characters earned at a grind spot, by creature entry, from all of them
