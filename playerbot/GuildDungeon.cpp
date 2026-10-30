@@ -345,6 +345,20 @@ namespace
     // A hand link's node is the travel node this near its place.
     constexpr float HAND_LINK_NEAR = 5.0f;
 
+    // A boss travelled to at a place on the walkable way to it, not at its spawn: the map, the boss, and the place, from
+    // where the leader takes the boss in sight. The run's travel and its pulls go on as for any boss; a via place would
+    // hold the pulls off on the way there.
+    struct BossApproach { uint32 map; int32 boss; float x, y, z; };
+    const BossApproach BOSS_APPROACHES[] = {
+        // Scholomance: Rattlegore, in the ossuary at (137, 172, 96). Travelled to at his spawn, the leader went from
+        // the stairs by the way in, off the navmesh at (203, 95, 137), up onto a ledge of navmesh that joins nothing,
+        // 48 yards above him at (140, 172, 144). There his travel counted as arrived, and the party went round by the
+        // hall without it; in three runs the leader dropped from there into his room and died. The place is on the
+        // travel map's own way from Lord Blackwood's node to his, along the corridor at z 110 and down the west stairs,
+        // 44 yards from him on his floor. Guessed: no character has walked it; it is the navmesh's path.
+        { 289, 11622, 93.3f, 178.3f, 93.8f },
+    };
+
     // The leader has come by a via place this near it, or gives it up after this long.
     constexpr float VIA_NEAR = 10.0f;
     constexpr time_t VIA_SECONDS = 3 * MINUTE;
@@ -2038,6 +2052,17 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                         BossName(next) + " in " + dungeon.name);
                 run.nextPlace = place.get();
             }
+    // A boss the table has a way to: that place, kept by the boss's spawn as the others.
+    for (const BossApproach& row : BOSS_APPROACHES)
+        if (!run.nextPlace && next && row.map == dungeon.mapId && row.boss == next && run.nextSpawn)
+        {
+            std::lock_guard<std::mutex> guard(exitLock);
+            auto& place = bossPlaces[run.nextSpawn];
+            if (!place)
+                place = std::make_unique<PlaceTravelDestination>(WorldPosition(row.map, row.x, row.y, row.z),
+                    BossName(next) + " in " + dungeon.name);
+            run.nextPlace = place.get();
+        }
 
     run.bossesSeen = true;
     std::string count = std::to_string(run.killed.size()) + " of " + std::to_string(present) + " bosses down";

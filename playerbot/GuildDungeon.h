@@ -218,7 +218,8 @@ private:
         bool entered = false;          // the whole party has been inside
         int32 nextBoss = 0;            // the boss the party is on its way to
         uint32 nextSpawn = 0;          // its spawn
-        ai::PlaceTravelDestination* nextPlace = nullptr; // where that spawn stands, when the boss has several; kept in bossPlaces
+        ai::PlaceTravelDestination* nextPlace = nullptr; // where that spawn stands, when the boss has several, or the place a
+                                                         // BOSS_APPROACHES row takes the boss at; kept in bossPlaces
         std::set<int32> killed;        // bosses reported dead
         std::set<int32> viasDone;      // the bosses whose via place the leader has come by, or given up on
         ai::PlaceTravelDestination* viaPlace = nullptr; // the via place it travels to now, or null
