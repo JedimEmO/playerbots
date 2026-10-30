@@ -28,6 +28,7 @@ namespace
     // How often the orders are read and acted on, and how often the state is written.
     constexpr uint32 ORDERS_MS = 5 * IN_MILLISECONDS;
     constexpr uint32 STATE_MS = 10 * IN_MILLISECONDS;
+    constexpr uint32 FIGHT_SAMPLE_MS = IN_MILLISECONDS;
     // A character a player logged out of waits this long before the engine takes it back,
     // so a quick relog by the player does not race the engine's login.
     constexpr time_t RELOGIN_SECONDS = 30;
@@ -216,6 +217,12 @@ bool GuildBotMgr::StaysWithParty(Player* bot) const
         return false;
     const std::string job = GetActiveJob(bot->GetGUIDLow());
     return job == "dungeon" || job == "party";
+}
+
+std::string GuildBotMgr::GetReason(uint32 guid) const
+{
+    auto it = characters.find(guid);
+    return it == characters.end() ? std::string() : it->second.reason;
 }
 
 std::string GuildBotMgr::GetActiveJob(uint32 guid) const
@@ -1171,6 +1178,14 @@ void GuildBotMgr::Tick(uint32 elapsed)
         ApplyOrders();
         CheckJobs();
         sGuildRuns.Sweep();
+    }
+
+    // The fight log samples every party in a run about once a second.
+    sinceFights += elapsed;
+    if (sinceFights >= FIGHT_SAMPLE_MS)
+    {
+        sinceFights = 0;
+        sGuildRuns.SampleFights();
     }
 
     if (sinceState >= STATE_MS)

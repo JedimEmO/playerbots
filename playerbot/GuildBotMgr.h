@@ -41,6 +41,8 @@ public:
 
     // The job the character should be doing: its order, or "idle" once that order is done or failed.
     std::string GetActiveJob(uint32 guid) const;
+    // The character's job reason as the state table shows it, or empty for one the engine does not play.
+    std::string GetReason(uint32 guid) const;
     // The role the player gave the character, which its talents follow; none if not a guild character.
     BotRoles GetRole(uint32 guid) const;
     // A guild character on its own: in no group, or in one with no other member alive near it.
@@ -273,6 +275,7 @@ private:
     bool tablesReady = false;
     uint32 sinceOrders = 0;
     uint32 sinceState = 0;
+    uint32 sinceFights = 0;
     uint32 createAccount = 0;
 };
 

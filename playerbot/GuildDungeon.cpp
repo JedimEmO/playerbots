@@ -2449,6 +2449,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 }
                 run.pullAt = now;
                 update.events.push_back({ "pulled", name + (pack > 1 ? ", one of " + std::to_string(pack) + " near it" : "") });
+                sGuildRuns.NotePull(leader, pullTarget->GetEntry());
 
                 // With a corner, the pull comes back to the party gathered there, and the members hold there a while.
                 if (run.cornerGather)

@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+class Group;
 class Player;
 class WorldPacket;
 
@@ -24,6 +25,8 @@ class WorldPacket;
 //   guildbot_run_member  per run and member: levels, experience, coin, deaths, seconds inside
 //   guildbot_run_boss    per run and boss: when it died, minutes since the run entered or the boss before
 //   guildbot_loot        per item looted in a run: who, how (need, greed, master, looted), its source and its fate
+//   guildbot_fight       per fight in a run: how it began, what the party met, deaths, the healer's mana at the start
+//   guildbot_fight_member per fight and member: its role, deaths, seconds attacked and attacked off the tank, mana, health
 class GuildRuns
 {
 public:
@@ -42,6 +45,10 @@ public:
     void InstanceReset(uint32 instanceId);
     // A packet a guild character received: the item pushes and roll results its group is told of.
     void OnPacket(Player* bot, const WorldPacket& packet);
+    // About once a second, on the world thread: the fight log of each open run's party.
+    void SampleFights();
+    // The dungeon job's pull step pulled a creature of this entry for the leader's party; the next fight began with it.
+    void NotePull(Player* leader, uint32 entry);
 
     std::list<std::string> HandleRuns(const std::string& args);
 
@@ -58,6 +65,36 @@ private:
         bool dead = false;
         time_t seenAt = 0;             // the last check it was counted inside
         bool dirty = false;
+    };
+
+    // A member's part in one fight. Percentages are 255 for no mana.
+    struct FightMember
+    {
+        std::string role;              // tank, healer or dps
+        uint32 deaths = 0;
+        float attacked = 0.0f;         // seconds anything attacked it
+        float loose = 0.0f;            // for a non-tank, seconds it was attacked while the tank lived
+        uint32 maxAttackers = 0;
+        uint8 manaStart = 255, manaEnd = 255, healthMin = 100;
+        bool dead = false;
+    };
+
+    // The fight a run's party is in, from the first member in combat inside until all alive have been out of it
+    // FIGHT_QUIET_MS, or all are dead.
+    struct Fight
+    {
+        bool open = false;
+        uint32 seq = 0;
+        time_t started = 0;
+        uint32 lastMs = 0;             // the sample before
+        uint32 quietSinceMs = 0;       // since when no member alive has been in combat, or 0
+        uint32 leader = 0;
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        std::string began, leaderReason;
+        uint32 pulled = 0, pack = 0, maxAttackers = 0, deaths = 0;
+        uint8 healerMana = 255;
+        std::set<ObjectGuid> creatures;
+        std::map<uint32, FightMember> members;
     };
 
     struct Run
@@ -82,6 +119,8 @@ private:
         time_t lastWrite = 0;
         std::map<uint32, Member> members;
         bool dirty = false;
+        Fight fight;
+        uint32 fightSeq = 0;           // the last fight's number in this run
     };
 
     struct Loot
@@ -104,6 +143,8 @@ private:
     void WriteRun(Run& run);
     void CloseRun(Run& run, const std::string& outcome);
     void CheckFates();
+    void SampleFight(Run& run, Group* group, uint32 nowMs, time_t now);
+    void EndFight(Run& run, time_t now);
 
     std::mutex lock;
     bool tablesReady = false;
@@ -111,6 +152,9 @@ private:
     std::vector<Loot> loots;                          // items whose fate is still to be seen
     std::vector<RollWon> rollsWon;                    // recent, to tell need and greed from loot taken
     std::map<std::string, uint32> recentPushes;       // receiver, entry, slot: when, to count a broadcast once
+    // Pulls the dungeon job made, by leader guid: the entry and when. Its own lock: the job notes them under its own.
+    std::mutex pullLock;
+    std::map<uint32, std::pair<uint32, time_t>> pulls;
 };
 
 #define sGuildRuns GuildRuns::instance()

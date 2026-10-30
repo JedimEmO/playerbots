@@ -2,6 +2,11 @@
 #include "playerbot/GuildRuns.h"
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildDungeon.h"
+#include "Groups/Group.h"
+#include "World/World.h"
+#include "Grids/GridNotifiers.h"
+#include "Grids/GridNotifiersImpl.h"
+#include "Grids/CellImpl.h"
 
 #include <algorithm>
 #include <sstream>
@@ -25,6 +30,27 @@ namespace
     // An item kept in the bags is watched this long for being equipped or sold, then left as kept.
     constexpr time_t FATE_WATCH_SECONDS = 3 * HOUR;
     constexpr uint32 FATE_CHECK_MS = MINUTE * IN_MILLISECONDS;
+    // A fight is over once no member alive has been in combat for this long.
+    constexpr uint32 FIGHT_QUIET_MS = 5 * IN_MILLISECONDS;
+    // A fight that starts within this of the dungeon job's pull began with that pull.
+    constexpr time_t FIGHT_PULL_SECONDS = 20;
+    // At most this much time is counted between two samples, as across a stall of the world.
+    constexpr float FIGHT_MAX_STEP = 5.0f;
+    // Three or more of the party dead in one fight is a wipe, as the experiments count it.
+    constexpr uint32 FIGHT_WIPE_DEATHS = 3;
+
+    // A percentage, 255 for no mana.
+    uint8 ManaPercent(Player* player)
+    {
+        if (player->GetPowerType() != POWER_MANA || !player->GetMaxPower(POWER_MANA))
+            return 255;
+        return uint8(player->GetPower(POWER_MANA) * 100 / player->GetMaxPower(POWER_MANA));
+    }
+
+    uint8 HealthPercent(Player* player)
+    {
+        return player->GetMaxHealth() ? uint8(player->GetHealth() * 100 / player->GetMaxHealth()) : 0;
+    }
 
     std::string Escape(std::string text)
     {
@@ -114,6 +140,42 @@ void GuildRuns::EnsureTables()
         " fate_at TIMESTAMP NULL DEFAULT NULL,"
         " PRIMARY KEY (id), KEY run (instance, opened), KEY item_guid (item_guid)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guildbot_fight ("
+        " instance INT UNSIGNED NOT NULL,"
+        " opened TIMESTAMP NOT NULL DEFAULT '2000-01-01 00:00:00',"
+        " seq INT UNSIGNED NOT NULL,"
+        " started TIMESTAMP NOT NULL DEFAULT '2000-01-01 00:00:00',"
+        " ended TIMESTAMP NULL DEFAULT NULL,"
+        " leader INT UNSIGNED NOT NULL DEFAULT 0,"
+        " x FLOAT NOT NULL DEFAULT 0, y FLOAT NOT NULL DEFAULT 0, z FLOAT NOT NULL DEFAULT 0,"   // the leader at the start
+        " began VARCHAR(16) NOT NULL DEFAULT '',"             // pull, walked_in, attacked, member
+        " leader_reason VARCHAR(255) NOT NULL DEFAULT '',"    // the job's reason at the start
+        " pulled INT NOT NULL DEFAULT 0,"                     // the creature entry pulled, or 0
+        " pack INT UNSIGNED NOT NULL DEFAULT 0,"              // hostiles within call-for-help reach of the first, out of combat
+        " creatures INT UNSIGNED NOT NULL DEFAULT 0,"         // distinct hostiles in combat with the party
+        " max_attackers INT UNSIGNED NOT NULL DEFAULT 0,"     // the most at any one sample
+        " deaths INT UNSIGNED NOT NULL DEFAULT 0,"
+        " wipe TINYINT UNSIGNED NOT NULL DEFAULT 0,"          // 3 or more members died
+        " healer_mana TINYINT UNSIGNED NOT NULL DEFAULT 255," // the healer's mana % at the start, 255 with no healer
+        " PRIMARY KEY (instance, opened, seq)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS guildbot_fight_member ("
+        " instance INT UNSIGNED NOT NULL,"
+        " opened TIMESTAMP NOT NULL DEFAULT '2000-01-01 00:00:00',"
+        " seq INT UNSIGNED NOT NULL,"
+        " guid INT UNSIGNED NOT NULL,"
+        " role VARCHAR(8) NOT NULL DEFAULT '',"               // tank, healer, dps
+        " deaths INT UNSIGNED NOT NULL DEFAULT 0,"
+        " attacked_seconds INT UNSIGNED NOT NULL DEFAULT 0,"  // seconds anything attacked it
+        " loose_seconds INT UNSIGNED NOT NULL DEFAULT 0,"     // for a non-tank, seconds it was attacked while the tank lived
+        " max_attackers INT UNSIGNED NOT NULL DEFAULT 0,"
+        " mana_start TINYINT UNSIGNED NOT NULL DEFAULT 255,"  // % values, 255 for no mana
+        " mana_end TINYINT UNSIGNED NOT NULL DEFAULT 255,"
+        " health_min TINYINT UNSIGNED NOT NULL DEFAULT 100,"
+        " PRIMARY KEY (instance, opened, seq, guid)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
     tablesReady = true;
 }
@@ -186,6 +248,11 @@ GuildRuns::Run* GuildRuns::OpenRun(Player* bot)
             } while (killed->NextRow());
         }
         run.bossesSeen = true;
+        // Fights go on numbering from the last one written.
+        auto fights = CharacterDatabase.PQuery("SELECT COALESCE(MAX(seq), 0) FROM guildbot_fight WHERE instance = %u AND opened = FROM_UNIXTIME(%u)",
+            run.instanceId, uint32(run.opened));
+        if (fights)
+            run.fightSeq = fights->Fetch()[0].GetUInt32();
     }
     run.dirty = true;
     return &run;
@@ -359,6 +426,8 @@ void GuildRuns::WriteRun(Run& run)
 
 void GuildRuns::CloseRun(Run& run, const std::string& ended)
 {
+    if (run.fight.open)
+        EndFight(run, time(nullptr));
     WriteRun(run);
     CharacterDatabase.PExecute(
         "UPDATE guildbot_run SET closed = NOW(), ended = '%s' WHERE instance = %u AND opened = FROM_UNIXTIME(%u)",
@@ -410,6 +479,236 @@ void GuildRuns::Sweep()
         lastFates = nowMs;
         CheckFates();
     }
+}
+
+void GuildRuns::NotePull(Player* leader, uint32 entry)
+{
+    if (!leader)
+        return;
+    std::lock_guard<std::mutex> guard(pullLock);
+    pulls[leader->GetGUIDLow()] = { entry, time(nullptr) };
+}
+
+void GuildRuns::SampleFights()
+{
+    std::lock_guard<std::mutex> guard(lock);
+    if (!tablesReady)
+        return;
+    const uint32 nowMs = WorldTimer::getMSTime();
+    const time_t now = time(nullptr);
+    for (auto& [instanceId, run] : runs)
+    {
+        // The group, through any member the run knows that is in the world.
+        Group* group = nullptr;
+        if (Player* leader = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, run.leader)))
+            group = leader->GetGroup();
+        for (auto it = run.members.begin(); !group && it != run.members.end(); ++it)
+            if (Player* member = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, it->first)))
+                group = member->GetGroup();
+        if (group)
+            SampleFight(run, group, nowMs, now);
+        else if (run.fight.open)
+            EndFight(run, now);
+    }
+}
+
+void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
+{
+    Fight& fight = run.fight;
+    auto inside = [&](Player* member)
+    {
+        return member->IsInWorld() && member->GetMapId() == run.mapId && member->GetInstanceId() == run.instanceId;
+    };
+
+    // The party in the instance, and whether any of it alive is in combat.
+    std::vector<Player*> party;
+    bool fighting = false;
+    for (auto& slot : group->GetMemberSlots())
+        if (Player* member = sObjectMgr.GetPlayer(slot.guid))
+        {
+            // A member already in the fight stays in it, as a ghost outside too, so its death is counted.
+            if (!inside(member) && !(fight.open && fight.members.count(member->GetGUIDLow())))
+                continue;
+            party.push_back(member);
+            if (inside(member) && member->IsAlive() && member->IsInCombat())
+                fighting = true;
+        }
+
+    if (!fight.open)
+    {
+        if (!fighting)
+            return;
+        fight = Fight();
+        fight.open = true;
+        fight.seq = ++run.fightSeq;
+        fight.started = now;
+        fight.lastMs = nowMs;
+        fight.leader = group->GetLeaderGuid().GetCounter();
+
+        Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+        const bool leaderInside = leader && inside(leader);
+        if (leaderInside)
+        {
+            fight.x = leader->GetPositionX();
+            fight.y = leader->GetPositionY();
+            fight.z = leader->GetPositionZ();
+        }
+        fight.leaderReason = sGuildBotMgr.GetReason(fight.leader).substr(0, 255);
+
+        // How it began: the job's pull, the leader walking into it on its way, the party set on where it stood,
+        // or a member before the leader. A pull begins one fight only.
+        {
+            std::lock_guard<std::mutex> pullGuard(pullLock);
+            auto pull = pulls.find(fight.leader);
+            if (pull != pulls.end())
+            {
+                if (now - pull->second.second < FIGHT_PULL_SECONDS)
+                    fight.pulled = pull->second.first;
+                pulls.erase(pull);
+            }
+        }
+        const bool leaderFirst = leaderInside && leader->IsAlive() && leader->IsInCombat();
+        const bool onTheWay = fight.leaderReason.rfind("on the way to", 0) == 0
+            || (fight.leaderReason.empty() && leaderInside && leader->IsMoving());
+        fight.began = fight.pulled ? "pull" : !leaderFirst ? "member" : onTheWay ? "walked_in" : "attacked";
+
+        // The first creature: one attacking the first member in combat, the leader when it is, or that member's victim.
+        Player* first = leaderFirst ? leader : nullptr;
+        for (Player* member : party)
+            if (!first && inside(member) && member->IsAlive() && member->IsInCombat())
+                first = member;
+        Unit* creature = nullptr;
+        if (first)
+        {
+            for (Unit* attacker : first->getAttackers())
+                if (attacker->GetTypeId() == TYPEID_UNIT && attacker->IsAlive())
+                {
+                    creature = attacker;
+                    break;
+                }
+            if (!creature && first->GetVictim() && first->GetVictim()->GetTypeId() == TYPEID_UNIT)
+                creature = first->GetVictim();
+        }
+        // Its pack: the creatures its call for help would bring, as the core reaches them, still out of combat.
+        if (creature && creature->IsInWorld())
+        {
+            Creature* caller = static_cast<Creature*>(creature);
+            float radius = sWorld.getConfig(CONFIG_FLOAT_CREATURE_FAMILY_ASSISTANCE_RADIUS);
+            if (caller->GetCreatureInfo() && caller->GetCreatureInfo()->CallForHelp > 0)
+                radius = caller->GetCreatureInfo()->CallForHelp;
+            CreatureList near;
+            MaNGOS::AnyAssistCreatureInRangeCheck check(caller, first, radius);
+            MaNGOS::CreatureListSearcher<MaNGOS::AnyAssistCreatureInRangeCheck> searcher(near, check);
+            Cell::VisitAllObjects(caller, searcher, radius);
+            for (Creature* other : near)
+                if (other != caller && other->IsAlive() && !other->IsInCombat())
+                    fight.pack++;
+        }
+        for (Player* member : party)
+            if (inside(member) && member->IsAlive() && PlayerbotAI::IsHeal(member))
+            {
+                fight.healerMana = ManaPercent(member);
+                break;
+            }
+    }
+
+    float step = fight.lastMs ? WorldTimer::getMSTimeDiff(fight.lastMs, nowMs) / 1000.0f : 1.0f;
+    step = std::min(step, FIGHT_MAX_STEP);
+    fight.lastMs = nowMs;
+
+    Player* tank = nullptr;
+    for (Player* member : party)
+        if (!tank && PlayerbotAI::IsTank(member))
+            tank = member;
+    // A creature on a member other than the tank, while the tank lives inside, is one the tank does not hold.
+    const bool tankUp = tank && tank->IsAlive() && inside(tank);
+
+    std::set<Unit*> met;
+    bool alive = false;
+    for (Player* member : party)
+    {
+        FightMember& m = fight.members[member->GetGUIDLow()];
+        if (m.role.empty())
+        {
+            m.role = member == tank ? "tank" : PlayerbotAI::IsHeal(member) ? "healer" : "dps";
+            m.manaStart = ManaPercent(member);
+            // Dead before the fight began: not a death of this fight.
+            m.dead = !member->IsAlive();
+        }
+        if (!member->IsAlive())
+        {
+            if (!m.dead)
+            {
+                m.deaths++;
+                fight.deaths++;
+                m.dead = true;
+            }
+            continue;
+        }
+        m.dead = false;
+        if (!inside(member))
+            continue;
+        alive = true;
+        m.healthMin = std::min(m.healthMin, HealthPercent(member));
+        m.manaEnd = ManaPercent(member);
+
+        // getAttackers holds the units whose victim is this member.
+        uint32 attackers = 0;
+        for (Unit* attacker : member->getAttackers())
+        {
+            if (!attacker->IsAlive())
+                continue;
+            attackers++;
+            met.insert(attacker);
+            fight.creatures.insert(attacker->GetObjectGuid());
+        }
+        if (Unit* victim = member->GetVictim())
+            if (victim->GetTypeId() == TYPEID_UNIT && victim->IsAlive())
+            {
+                met.insert(victim);
+                fight.creatures.insert(victim->GetObjectGuid());
+            }
+        if (attackers)
+            m.attacked += step;
+        if (attackers && tankUp && member != tank)
+            m.loose += step;
+        m.maxAttackers = std::max(m.maxAttackers, attackers);
+    }
+    fight.maxAttackers = std::max(fight.maxAttackers, uint32(met.size()));
+
+    // Over once nobody alive inside has been in combat for FIGHT_QUIET_MS, or nobody is alive inside.
+    if (!alive)
+    {
+        EndFight(run, now);
+        return;
+    }
+    if (fighting)
+        fight.quietSinceMs = 0;
+    else if (!fight.quietSinceMs)
+        fight.quietSinceMs = nowMs;
+    else if (WorldTimer::getMSTimeDiff(fight.quietSinceMs, nowMs) >= FIGHT_QUIET_MS)
+        EndFight(run, now);
+}
+
+void GuildRuns::EndFight(Run& run, time_t now)
+{
+    Fight& fight = run.fight;
+    if (!fight.open)
+        return;
+    fight.open = false;
+    CharacterDatabase.PExecute(
+        "REPLACE INTO guildbot_fight (instance, opened, seq, started, ended, leader, x, y, z, began, leader_reason, pulled, pack, "
+        "creatures, max_attackers, deaths, wipe, healer_mana) VALUES (%u, FROM_UNIXTIME(%u), %u, FROM_UNIXTIME(%u), FROM_UNIXTIME(%u), "
+        "%u, %f, %f, %f, '%s', '%s', %u, %u, %u, %u, %u, %u, %u)",
+        run.instanceId, uint32(run.opened), fight.seq, uint32(fight.started), uint32(now), fight.leader, fight.x, fight.y, fight.z,
+        fight.began.c_str(), Escape(fight.leaderReason).c_str(), fight.pulled, fight.pack, uint32(fight.creatures.size()),
+        fight.maxAttackers, fight.deaths, fight.deaths >= FIGHT_WIPE_DEATHS ? 1 : 0, uint32(fight.healerMana));
+    for (auto& [guid, m] : fight.members)
+        CharacterDatabase.PExecute(
+            "REPLACE INTO guildbot_fight_member (instance, opened, seq, guid, role, deaths, attacked_seconds, loose_seconds, "
+            "max_attackers, mana_start, mana_end, health_min) VALUES (%u, FROM_UNIXTIME(%u), %u, %u, '%s', %u, %u, %u, %u, %u, %u, %u)",
+            run.instanceId, uint32(run.opened), fight.seq, guid, m.role.c_str(), m.deaths, uint32(m.attacked + 0.5f),
+            uint32(m.loose + 0.5f), m.maxAttackers, uint32(m.manaStart), uint32(m.manaEnd), uint32(m.healthMin));
 }
 
 void GuildRuns::CheckFates()
