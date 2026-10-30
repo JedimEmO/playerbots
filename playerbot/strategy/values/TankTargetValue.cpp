@@ -98,20 +98,30 @@ ObjectGuid TankTargetValue::Calculate()
 {
     GuidSet exclusions = GatherStrategyTargetExclusions(ai, TargetValueExclusionType::TankTarget);
 
-    // The marked target, unless another bot tank following the same mark already holds it.
+    // The marked target, unless another bot tank following the same mark already holds it. Once the mark is on this
+    // tank, a creature no tank holds comes first, and the tank goes back to the mark when none is left: kept on the mark,
+    // the tank left the adds on the casters, and taunt only answers for its current target.
     ObjectGuid rti = RtiTargetValue::Calculate();
     Unit* rtiTarget = exclusions.count(rti) ? nullptr : ai->GetUnit(rti);
+    bool rtiHeld = false;
     if (rtiTarget)
     {
         Unit* victim = rtiTarget->GetVictim();
         Player* player = victim && victim != bot && victim->IsPlayer() ? static_cast<Player*>(victim) : nullptr;
         bool heldBySameMark = player && player->GetPlayerbotAI() && PlayerbotAI::IsTank(player) &&
             PAI_VALUE(std::string, "rti") == AI_VALUE(std::string, "rti");
-        if (!heldBySameMark)
+        rtiHeld = victim == bot;
+        if (!heldBySameMark && !rtiHeld)
             return rti;
     }
 
     FindTankTargetSmartStrategy strategy(ai);
     Unit* target = FindTarget(&strategy, exclusions);
+    if (rtiHeld)
+    {
+        Unit* victim = target ? target->GetVictim() : nullptr;
+        bool loose = victim && victim != bot && !(victim->IsPlayer() && PlayerbotAI::IsTank(static_cast<Player*>(victim)));
+        return loose ? target->GetObjectGuid() : rti;
+    }
     return target ? target->GetObjectGuid() : ObjectGuid();
 }

@@ -613,8 +613,13 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
 
         // A guild party member that deals damage gives its tank a moment to take hold of a fight before it strikes, as
         // in a party with a player; WaitForAttackStrategy::ShouldWait applies it to guild parties inside a dungeon.
+        // It also keeps under the tank's threat, as `threat` does: its threat actions stop at 80% of the tank's, and its
+        // area attacks at 50%. No default added it, so a party's dps pulled what their tank held.
         if (sGuildBotMgr.IsGuildBot(player) && player->GetGroup() && !PlayerbotAI::IsTank(player) && !PlayerbotAI::IsHeal(player))
+        {
             combatEngine->addStrategy("wait for attack");
+            combatEngine->addStrategy("threat");
+        }
     }
     else
     {
