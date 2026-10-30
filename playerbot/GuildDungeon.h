@@ -273,6 +273,9 @@ private:
         bool cornerGather = false;     // the party gathers at cornerSpot for the creature being pulled, a caster near it
         std::array<float, 3> cornerSpot = {}; // that corner: a place on the leader's way the creature cannot see
         time_t cornerUntil = 0;        // after the pull, the members hold at the corner until then
+        float stillX = 0.0f, stillY = 0.0f, stillZ = 0.0f; // where the leader has stood, out of a fight, since stillSince
+        time_t stillSince = 0;         // since when it has stood within LEADER_STILL_NEAR of that place, or 0
+        time_t travelRestartAt = 0;    // when its travel was last started again for standing still on it
         bool bossesSeen = false;       // the bosses have been looked at once in this run
         time_t leaveStarted = 0;       // when the last boss died and the party set out for the way out
         time_t leaderOutAt = 0;        // when the leader came out, with others still inside
@@ -301,6 +304,8 @@ private:
     // Walks the leader straight to the place by the way in when a short path there exists, rather than by the travel
     // map's route: true while it walks, and the travel waits.
     bool WalkToInside(Player* leader, Run& run, float near, Update& update);
+    // Keeps where the leader stands still, and starts its travel again when the travel is on its way and the leader is not.
+    void RestartStalledTravel(Player* leader, Run& run, Update& update);
     // An equipped item of the member's at no durability, by name, or empty.
     static std::string BrokenGear(Player* member);
     // To a step's object or creature: by itself within APPROACH_RANGE, which holds it there, and by travel farther off.

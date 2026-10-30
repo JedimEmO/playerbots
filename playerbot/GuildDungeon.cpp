@@ -154,6 +154,15 @@ namespace
     // targets once the fight started stood in the casters' sight again: in Scholomance the tank came back to its corner
     // up the stairs while the hunter and the mage stayed in the hall, and the healer, hunter and mage died 14 seconds later.
     constexpr time_t CORNER_HOLD_SECONDS = 12;
+
+    // A leader whose travel target is on its way, travelling or ready, while the leader stands within LEADER_STILL_NEAR of
+    // one place out of a fight for TRAVEL_STALL_SECONDS: the target goes, and the last path with it, so the travel starts
+    // again from where the leader stands, at most once in TRAVEL_RESTART_SECONDS. The way out of the Stockade's cells
+    // stood "travelling" 30 yards from its place on the wall tops for 15 minutes, and the way to Gelihast 35 yards
+    // below his ledge, with a path of one or two points that went nowhere.
+    constexpr float LEADER_STILL_NEAR = 5.0f;
+    constexpr time_t TRAVEL_STALL_SECONDS = 30;
+    constexpr time_t TRAVEL_RESTART_SECONDS = MINUTE;
     constexpr float CORNER_HOLD_NEAR = 10.0f;
 
     // While the leader gathers for or pulls a creature ahead, a member nearer that creature than the leader by PULL_HOLD_AHEAD
@@ -1517,6 +1526,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     Map* map = leader->GetMap();
     run.insideWalkedLast = run.insideWalking;
     run.insideWalking = false;
+
+    RestartStalledTravel(leader, run, update);
 
     // The leader's way, for the corner a pull comes back to. A jump, as after a death, starts it afresh.
     if (leader->IsAlive() && leader->IsInWorld() && !leader->IsBeingTeleported() && !leader->IsInCombat()
@@ -2883,6 +2894,39 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
     update.reason = "repairing at " + run.repairPlace->GetTitle() + ", waiting for " + broken;
 }
 
+void GuildDungeon::RestartStalledTravel(Player* leader, Run& run, Update& update)
+{
+    const time_t now = time(nullptr);
+    // A fight, a death, a teleport or a step of more than LEADER_STILL_NEAR: standing still starts afresh.
+    if (!leader->IsAlive() || !leader->IsInWorld() || leader->IsBeingTeleported() || leader->IsInCombat() || !run.stillSince
+        || leader->GetDistance(run.stillX, run.stillY, run.stillZ) > LEADER_STILL_NEAR)
+    {
+        run.stillX = leader->GetPositionX();
+        run.stillY = leader->GetPositionY();
+        run.stillZ = leader->GetPositionZ();
+        run.stillSince = now;
+        return;
+    }
+    if (now - run.stillSince < TRAVEL_STALL_SECONDS || now - run.travelRestartAt < TRAVEL_RESTART_SECONDS
+        || run.insideWalkedLast)
+        return;
+    PlayerbotAI* ai = leader->GetPlayerbotAI();
+    if (!ai)
+        return;
+    TravelTarget* target = ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+    if (!target || !target->IsActive())
+        return;
+    const TravelStatus status = target->GetStatus();
+    if (status != TravelStatus::TRAVEL_STATUS_TRAVEL && status != TravelStatus::TRAVEL_STATUS_READY)
+        return;
+    run.travelRestartAt = now;
+    const std::string title = target->GetDestination() ? target->GetDestination()->GetTitle() : std::string("its destination");
+    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+    ai->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().clear();
+    update.events.push_back({ "recovery", "travel to " + title + " stalled for " + std::to_string(uint32(now - run.stillSince))
+        + " seconds, started again" });
+}
+
 bool GuildDungeon::WalkToInside(Player* leader, Run& run, float near, Update& update)
 {
     const Dungeon& dungeon = run.dungeon;
@@ -2954,6 +2998,7 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
     Group* group = leader->GetGroup();
     run.insideWalkedLast = run.insideWalking;
     run.insideWalking = false;
+    RestartStalledTravel(leader, run, update);
     if (leader->GetMapId() == dungeon.mapId)
         OpenKeyDoors(leader, update);
 
