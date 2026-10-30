@@ -424,9 +424,9 @@ namespace
     constexpr time_t USE_AGAIN_SECONDS = 10 * MINUTE;
 
     // Creatures with no spawn of their own, brought by an event, that a party kills before a boss, as players would:
-    // the creature, the boss, and the door their deaths open. The step is done when none is alive near the leader,
-    // or when the door is open.
-    struct KillFirst { uint32 map; uint32 entry; int32 before; uint32 door; };
+    // the creature, the boss, the door their deaths open, and how near the boss's spawn they must stand to count, or 0
+    // for anywhere. The step is done when none is alive near the leader, or when the door is open.
+    struct KillFirst { uint32 map; uint32 entry; int32 before; uint32 door; float nearBoss = 0.0f; };
     const KillFirst KILLS[] = {
         // Shadowfang Keep: Fenrus's death brings Arugal's four voidwalkers, and the Sorcerer's Gate opens when all four die.
         { 33, 4627, 3927, 18972 },
@@ -443,13 +443,15 @@ namespace
         // the run; with no boss of its own the row has him killed whenever he is near and hostile.
         { 209, 7271, 0, 0 },
         // Scarlet Monastery Cathedral: Mograine calls every Abbot, Centurion, Champion, Chaplain, Monk and Wizard within
-        // 80 yards into the fight, some fifty elites at once. As players do, the party clears them before it pulls him.
-        { 189, 4303, 3976, 0 },
-        { 189, 4301, 3976, 0 },
-        { 189, 4302, 3976, 0 },
-        { 189, 4299, 3976, 0 },
-        { 189, 4540, 3976, 0 },
-        { 189, 4300, 3976, 0 },
+        // 80 yards into the fight, some fifty elites at once. As players do, the party clears them before it pulls him,
+        // only those within 80 yards of him: 42 of the 86 on the map. Any of them near the leader once took it through the
+        // whole courtyard and chapel, fighting every pack there, for most of an hour.
+        { 189, 4303, 3976, 0, 80.0f },
+        { 189, 4301, 3976, 0, 80.0f },
+        { 189, 4302, 3976, 0, 80.0f },
+        { 189, 4299, 3976, 0, 80.0f },
+        { 189, 4540, 3976, 0, 80.0f },
+        { 189, 4300, 3976, 0, 80.0f },
         // Zul'Farrak: Nekrum Gutchewer and Shadowpriest Sezz'ziz come down the pyramid last; their deaths open the End Door.
         { 209, 7796, 7267, 146084 },
         { 209, 7275, 7267, 146084 },
@@ -970,6 +972,7 @@ bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dun
         Dungeon::Kill step;
         step.entry = kill.entry;
         step.before = kill.before;
+        step.nearBoss = kill.nearBoss;
         if (kill.door)
         {
             auto findDoor = [&](auto const& pair)
@@ -1981,10 +1984,14 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         MaNGOS::AllCreaturesOfEntryInRangeCheck check(leader, kill.entry, range);
         MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
         Cell::VisitAllObjects(leader, searcher, range);
+        // A row that counts only those near its boss: where the boss's spawn stands.
+        CreatureData const* bossData = kill.nearBoss > 0.0f && kill.before ? sObjectMgr.GetCreatureData(run.nextSpawn) : nullptr;
         Unit* nearest = nullptr;
         for (Unit* unit : found)
         {
             if (!unit->IsAlive() || !unit->IsInWorld())
+                continue;
+            if (bossData && unit->GetDistance(bossData->posX, bossData->posY, bossData->posZ) > kill.nearBoss)
                 continue;
             if (!kill.before)
             {
