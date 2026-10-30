@@ -100,8 +100,12 @@ namespace
     constexpr time_t STILL_TRAVEL_SECONDS = 30;
     constexpr time_t UNDERWATER_IDLE_SECONDS = 20;
     constexpr time_t UNDERWATER_SECONDS = 40;
-    // A ghost under the world is taken out at most this often.
+    // A ghost under the world is taken out at most this often, and only once the check has held this long within
+    // GHOST_UNDER_MAP_NEAR of where it first did. Once alone, it also caught a ghost walking on the ground in the Barrens,
+    // on its way from the graveyard to Razorfen Downs: taken back to the graveyard every 75 seconds, the healer never got
+    // in until it was put at the entrance 7 minutes later. A walking ghost is 400 yards on in that time.
     constexpr time_t GHOST_UNDER_MAP_SECONDS = MINUTE;
+    constexpr float GHOST_UNDER_MAP_NEAR = 30.0f;
 
     std::string Trim(const std::string& s)
     {
@@ -790,10 +794,30 @@ void GuildBotMgr::CheckStay(Character& c, Player* bot)
 void GuildBotMgr::CheckGhostUnderMap(Character& c, Player* bot)
 {
     if (!bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+    {
+        c.underMapSeenAt = 0;
         return;
+    }
     const time_t now = time(nullptr);
-    if (now - c.underMapAt < GHOST_UNDER_MAP_SECONDS || !UnderTheMap(bot))
+    if (now - c.underMapAt < GHOST_UNDER_MAP_SECONDS)
         return;
+    if (!UnderTheMap(bot))
+    {
+        c.underMapSeenAt = 0;
+        return;
+    }
+    // The first time here, or far from the first: the check starts again from here.
+    if (!c.underMapSeenAt || bot->GetDistance(c.underMapX, c.underMapY, c.underMapZ) > GHOST_UNDER_MAP_NEAR)
+    {
+        c.underMapSeenAt = now;
+        c.underMapX = bot->GetPositionX();
+        c.underMapY = bot->GetPositionY();
+        c.underMapZ = bot->GetPositionZ();
+        return;
+    }
+    if (now - c.underMapSeenAt < GHOST_UNDER_MAP_SECONDS)
+        return;
+    c.underMapSeenAt = 0;
     c.underMapAt = now;
     WorldLocation grave;
     bool out;

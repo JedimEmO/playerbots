@@ -155,6 +155,8 @@ private:
         std::vector<time_t> emptyFightExits; // when it last left such fights, for a dungeon leader held outside
         time_t approachUntil = 0;   // a dungeon leader going straight to its stone through such fights, until then
         time_t underMapAt = 0;      // when a ghost of it was last taken out from under the world
+        time_t underMapSeenAt = 0;  // when its ghost was first found under the world at underMapX/Y/Z, or 0
+        float underMapX = 0.0f, underMapY = 0.0f, underMapZ = 0.0f;
         std::map<int32, time_t> unreachableAt; // grind spots its moves to have failed, and when they last did
         std::vector<time_t> unreachableTimes;  // when any spot's moves last failed, to tell a stuck character
         time_t stuckNotedAt = 0;               // when that was last recorded

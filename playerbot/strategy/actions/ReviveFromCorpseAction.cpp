@@ -9,7 +9,18 @@
 #include "playerbot/strategy/values/DeadValues.h"
 #include "playerbot/GuildDungeon.h"
 
+#include <map>
+#include <mutex>
+
 using namespace ai;
+
+namespace
+{
+    // By guid: the ghost time of a guild ghost's corpse, and how far the ghost stood from its entrance when first seen
+    // walking there. The put at the entrance measures the way from there.
+    std::mutex releaseLock;
+    std::map<uint32, std::pair<time_t, float>> releaseDistance;
+}
 
 bool ReviveFromCorpseAction::Execute(Event& event)
 {
@@ -90,7 +101,17 @@ bool FindCorpseAction::Execute(Event& event)
             // spirit healer outside were found at eight of the dungeons: short of entrances the travel map has no way
             // into, and pacing by the Dire Maul East gate.
             const time_t ran = time(nullptr) - corpse->GetGhostTime();
-            const time_t way = time_t(1.5f * distance / std::max(bot->GetSpeed(MOVE_RUN), 1.0f));
+            // The way from where it was released, not from where it stands: the Razorfen Downs healer's ghost, walking
+            // away from the entrance, put its own put off from 3 minutes to 7.
+            float released;
+            {
+                std::lock_guard<std::mutex> guard(releaseLock);
+                std::pair<time_t, float>& release = releaseDistance[bot->GetGUIDLow()];
+                if (release.first != corpse->GetGhostTime())
+                    release = { corpse->GetGhostTime(), distance };
+                released = release.second;
+            }
+            const time_t way = time_t(1.5f * released / std::max(bot->GetSpeed(MOVE_RUN), 1.0f));
             if (ran > std::max(time_t(3 * MINUTE), way) && !ai->HasActivePlayerMaster()
                 && !ai->HasPlayerNearby(at, 0.0f) && !ai->HasPlayerNearby(WorldPosition(bot), 0.0f))
             {
