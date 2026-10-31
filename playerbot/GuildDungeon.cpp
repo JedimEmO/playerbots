@@ -1355,14 +1355,26 @@ namespace
     }
 }
 
-GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name, bool controlled)
+bool GuildDungeon::StepWaits(Run& run, Update& update, const std::string& what)
+{
+    if (runrules::Job(run.control, runrules::JobAct::Step, true) == runrules::JobMay::Act)
+        return false;
+    run.stepWaiting = true;
+    update.stepDue = true;
+    update.reason = what + ", waiting for the run controller to hand over the party";
+    return true;
+}
+
+GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name, runrules::Control control)
 {
     Update update;
     std::lock_guard<std::mutex> guard(lock);
     AllowTravelRequest(leader);
 
     Run& run = runs[leader->GetGUIDLow()];
-    run.controlled = controlled;
+    bool phasedOut = false;
+    run.control = control;
+    run.controlled = control == runrules::Control::Lead || control == runrules::Control::Hold;
     const bool inBosses = run.resolved && run.phase == Phase::Bosses && leader->GetMapId() == run.dungeon.mapId;
     MarkRestDecided(leader, inBosses);
     if (!inBosses)
@@ -1396,28 +1408,17 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name,
                 run.cleared = run.dungeon.name + " cleared to " + BossName(run.dungeon.lastBoss) + " before a restart";
                 update.strategiesChanged = true;
             }
+            phasedOut = run.phase == Phase::Leave;
         }
     }
 
-    if (run.phase == Phase::Leave)
-    {
-        TickLeave(leader, run, update);
-        if (update.status != "working")
-            runs.erase(leader->GetGUIDLow());
-        return update;
-    }
-    if (run.phase == Phase::Repair)
-    {
-        TickRepair(leader, run, update);
-        return update;
-    }
-
+    // What this tick does, by the run's control and where the party is (GuildRunRules' Decide, which the tests run).
     const Dungeon& dungeon = run.dungeon;
     Group* group = leader->GetGroup();
-
-    if (leader->GetMapId() == dungeon.mapId)
+    uint32 members = group ? group->GetMembersCount() : 1, inside = 0;
+    const bool onDungeonMap = leader->GetMapId() == dungeon.mapId;
+    if (onDungeonMap)
     {
-        uint32 members = group ? group->GetMembersCount() : 1, inside = 0;
         if (group)
         {
             for (auto& slot : group->GetMemberSlots())
@@ -1429,17 +1430,51 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name,
         }
         else
             inside = 1;
-        const bool all = inside == members && members >= PARTY_SIZE;
+    }
+    const bool all = inside == members && members >= PARTY_SIZE;
+    if (onDungeonMap && !run.entered && all)
+    {
+        run.entered = true;
+        update.events.push_back({ "dungeon_entered", dungeon.name });
+    }
+    runrules::DispatchFacts facts;
+    facts.control = control;
+    facts.phase = runrules::Phase(uint8(run.phase));
+    facts.leaderAlive = leader->IsAlive();
+    facts.phasedOut = phasedOut;
+    facts.onDungeonMap = onDungeonMap;
+    // Once the party has been in, a living leader inside stays in the boss phase while a member is dead or outside, and
+    // that phase waits for the member where it comes back in.
+    facts.partyIn = run.entered && (all || leader->IsAlive());
+    const runrules::Dispatch dispatch = runrules::Decide(facts);
+    // Out on purpose, for the run state: the repair trip, or out and the reset at the end. Its departure is no reason to hold.
+    update.leaving = run.phase == Phase::Leave || run.phase == Phase::Repair;
 
-        if (!run.entered && all)
-        {
-            run.entered = true;
-            update.events.push_back({ "dungeon_entered", dungeon.name });
-        }
+    switch (dispatch)
+    {
+        case runrules::Dispatch::WaitRelease:
+            update.reason = (run.cleared.empty() ? std::string("leaving") : run.cleared) + ", waiting for the run controller to hand over the party";
+            return update;
+        case runrules::Dispatch::Holds:
+            update.inside = update.status == "working" && run.phase == Phase::Bosses;
+            update.reason = "the run holds the party";
+            return update;
+        case runrules::Dispatch::Leave:
+            TickLeave(leader, run, update);
+            if (update.status != "working")
+                runs.erase(leader->GetGUIDLow());
+            return update;
+        case runrules::Dispatch::Repair:
+            TickRepair(leader, run, update);
+            return update;
+        default:
+            break;
+    }
 
-        // The whole party is in: on to the bosses. Once it has been in, a living leader inside stays in the boss
-        // phase while a member is dead or outside, and that phase waits for the member where it comes back in.
-        if (run.entered && (all || leader->IsAlive()))
+    if (onDungeonMap)
+    {
+        // The whole party is in: on to the bosses.
+        if (dispatch == runrules::Dispatch::Bosses || dispatch == runrules::Dispatch::HandBack)
         {
             if (run.phase != Phase::Bosses)
             {
@@ -1451,11 +1486,24 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name,
                 run.waiting = false;
                 update.strategiesChanged = true;
             }
+            // Back on the bosses after a release: the party is handed back before anything of TickBosses acts.
+            if (dispatch == runrules::Dispatch::HandBack)
+            {
+                update.inside = update.status == "working";
+                update.reason = "back on the bosses, handing the party to the run controller";
+                return update;
+            }
             TickBosses(leader, run, update);
             // For the run state: the party is in, and whether a step of the tables is the job's now.
             update.inside = update.status == "working" && run.phase == Phase::Bosses;
-            update.stepDue = run.useSpawn || !run.killGuid.IsEmpty() || run.sleeperWaiting
-                || run.dungeon.talks.count(run.nextBoss);
+            runrules::StepFacts step;
+            step.waiting = run.stepWaiting;
+            step.use = run.useSpawn != 0;
+            step.kill = !run.killGuid.IsEmpty();
+            step.killPull = !run.killPullGuid.IsEmpty();
+            step.sleeper = run.sleeperWaiting;
+            step.talk = run.dungeon.talks.count(run.nextBoss) > 0;
+            update.stepDue = update.stepDue || runrules::StepDue(step);
             if (update.status != "working")
                 runs.erase(leader->GetGUIDLow());
             return update;
@@ -1727,8 +1775,13 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     Map* map = leader->GetMap();
     run.insideWalkedLast = run.insideWalking;
     run.insideWalking = false;
+    run.stepWaiting = false;
+    // With a run state, the job's own moves on (rest, regroup, the via place, its pulls and travel) stand down: under lead
+    // and hold the controller has the party, and under released only the step it was released for is the job's.
+    const bool ownMoves = runrules::Job(run.control, runrules::JobAct::MoveOn, leader->IsAlive()) == runrules::JobMay::Act;
 
-    RestartStalledTravel(leader, run, update);
+    if (ownMoves || run.controlled)
+        RestartStalledTravel(leader, run, update);
     bool leaderStuck = run.stillSince && time(nullptr) - run.stillSince >= LEADER_STUCK_SECONDS && !leader->IsInCombat();
     if (leaderStuck && dungeon.inside)
         if (WorldPosition* way = dungeon.inside->GetClosestPoint(WorldPosition(leader)))
@@ -1761,8 +1814,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     // Out of every fight, a party low on health or mana rests before the leader goes on. With the creatures inside
     // awake, a room answers a pull together: the Scholomance party drew nine at its first pull, the Stratholme one
     // eleven, and a party that walked on into the next with its healer dry died in it.
-    // Not while the run controller has the party: it rests the party at its pull spot before the next pull.
-    if (Group* group = run.controlled ? nullptr : leader->GetGroup())
+    // Not while there is a run state: the controller rests the party at its pull spot before the next pull.
+    if (Group* group = ownMoves ? leader->GetGroup() : nullptr)
     {
         std::string low;
         std::string dryHealer;    // the party's healer, out of a fight and under HEALER_REST_MANA
@@ -1829,7 +1882,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     // there out of a fight for up to REGROUP_SECONDS. A member lying dead near a living healer, about to be
     // resurrected, is waited for where the party stands. In Scholomance the leader went on while members lay dead,
     // and each came back in alone through the first hall and died in it: 57 of the party's 81 deaths in an hour.
-    if (Group* group = leader->GetGroup())
+    // Not while there is a run state: the controller's gather waits for a dead member, or one away, at its pull spot.
+    if (Group* group = ownMoves ? leader->GetGroup() : nullptr)
     {
         std::string gone;
         bool resurrecting = false;
@@ -1934,6 +1988,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (!fight && !broken.empty() && !run.repairGaveUp)
         {
             run.repairTrip = true;
+            update.leaving = true;
             run.repairSince = 0;
             run.repairPlace = nullptr;
             run.repairArrived = false;
@@ -1953,9 +2008,12 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     }
 
     // A via place after a boss that died comes before the next step: the leader travels there, and its travel stays.
+    // Not while there is a run state: the route covers the way.
     run.viaPlace = nullptr;
     for (const Dungeon::Via& via : dungeon.vias)
     {
+        if (!ownMoves)
+            break;
         if (!run.killed.count(via.after) || run.viasDone.count(via.after))
             continue;
         const time_t viaNow = time(nullptr);
@@ -2058,6 +2116,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 }
                 if (escort)
                 {
+                    if (StepWaits(run, update, "walking with " + BossName(entry)))
+                        return;
                     HoldNear(leader, creature);
                     run.holding = true;
                     talkWait = BossName(entry) + " to finish its walk" + WalkState(creature, dungeon.spawns[i].front());
@@ -2069,6 +2129,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             // Near but not near enough to speak: the leader walks the rest of the way itself.
             if (offers && leader->GetDistance(creature) > TALK_DISTANCE && leader->GetDistance(creature) <= APPROACH_RANGE)
             {
+                if (StepWaits(run, update, "on the way to speak to " + BossName(entry)))
+                    return;
                 HoldNear(leader, creature, TALK_DISTANCE - 1.0f, TALK_DISTANCE / 2.0f);
                 run.holding = true;
             }
@@ -2076,6 +2138,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 && (spoken == run.talkedAt.end() || now - spoken->second >= TALK_RETRY_SECONDS))
             {
                 // As a player picks the option in its gossip: the script does the rest, such as an escort to a door.
+                if (StepWaits(run, update, "speaking to " + BossName(entry)))
+                    return;
                 sScriptDevAIMgr.OnGossipSelect(leader, creature, GOSSIP_SENDER_MAIN, talk->second, nullptr);
                 run.talkedAt[entry] = now;
                 update.events.push_back({ "talked", BossName(entry) });
@@ -2160,9 +2224,11 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             run.sleeper = 0;
         else if (time(nullptr) - run.sleeperSince < SLEEPER_WAIT_SECONDS)
         {
+            run.sleeperWaiting = true;
+            if (StepWaits(run, update, "waiting by " + BossName(run.sleeper)))
+                return;
             HoldNear(leader, sleeper);
             run.holding = true;
-            run.sleeperWaiting = true;
             talkWait = BossName(run.sleeper) + " to wake";
         }
     }
@@ -2207,7 +2273,11 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         run.nextBoss = 0;
         run.nextSpawn = 0;
         update.strategiesChanged = true;
-        TickLeave(leader, run, update);
+        update.leaving = true;
+        // With a run state, the release comes first: the report, not on the bosses, releases the run in this pass, and
+        // the leave tick runs from the next under released.
+        if (ownMoves)
+            TickLeave(leader, run, update);
         return;
     }
 
@@ -2215,6 +2285,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     // as its target, on its way or not. Done once none is alive near the leader, or the door they open is open.
     run.nextBoss = next;
     run.killGuid = ObjectGuid();
+    run.killPullGuid = ObjectGuid();
     std::string killing;
     Creature* killPull = nullptr;     // a creature to kill first that the pull step takes, or null
     for (const Dungeon::Kill& kill : dungeon.kills)
@@ -2265,11 +2336,17 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         if (kill.nearBoss > 0.0f && kill.before && nearest->GetTypeId() == TYPEID_UNIT && !nearest->IsInCombat()
             && !run.pullIgnored.count(nearest->GetObjectGuid()) && leader->GetDistance(nearest) <= KILL_PULL_REACH)
         {
+            // A step of the tables like any kill: recorded, so that it asks for the release and keeps it until it is done.
+            run.killPullGuid = nearest->GetObjectGuid();
+            if (StepWaits(run, update, "pulling " + BossName(kill.entry) + " first"))
+                return;
             killPull = static_cast<Creature*>(nearest);
             break;
         }
         run.killGuid = nearest->GetObjectGuid();
         killing = BossName(kill.entry);
+        if (StepWaits(run, update, "killing " + killing))
+            return;
         // One the pull step could take, farther than its reach: the leader goes until it is within reach, and no nearer.
         const bool pullable = kill.nearBoss > 0.0f && kill.before && nearest->GetTypeId() == TYPEID_UNIT && !nearest->IsInCombat()
             && !run.pullIgnored.count(nearest->GetObjectGuid());
@@ -2307,13 +2384,14 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     behind = slot.name;
                     break;
                 }
-    if (killing.empty() && !behind.empty() && !run.waitedOut && leaderStuck)
+    if (ownMoves && killing.empty() && !behind.empty() && !run.waitedOut && leaderStuck)
     {
         run.waitedOut = true;
         update.events.push_back({ "member_behind", behind + ", going on to " + BossName(next) + " without it: the leader has not moved for "
             + std::to_string(LEADER_STUCK_SECONDS / MINUTE) + " minutes" });
     }
-    if (killing.empty() && !behind.empty() && !run.waitedOut)
+    // Not while there is a run state: its gather waits for every member.
+    if (ownMoves && killing.empty() && !behind.empty() && !run.waitedOut)
     {
         if (!run.waitSince)
             run.waitSince = now;
@@ -2341,8 +2419,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     // The wait is for members near, players as well as characters, never for something only a character does.
     // Events count each pull: pulled, pull_skipped when the tank cannot pull, pull_given_up when one brought nothing.
     // Not while the run controller has the party: it pulls from the dungeon model's pull spots.
-    if (!run.controlled && killing.empty() && talkWait.empty() && !run.holding && leader->IsAlive() && leader->IsInWorld()
-        && !leader->IsBeingTeleported())
+    // Under released only the kill step's own pull, of a creature the step names.
+    if ((ownMoves || (run.control == runrules::Control::Released && killPull)) && killing.empty() && talkWait.empty()
+        && !run.holding && leader->IsAlive() && leader->IsInWorld() && !leader->IsBeingTeleported())
     {
         PlayerbotAI* pullAi = leader->GetPlayerbotAI();
         Creature* pullTarget = !run.pullGuid.IsEmpty() ? map->GetCreature(run.pullGuid) : nullptr;
@@ -2560,6 +2639,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     if (unit->IsAlive() && unit->IsInWorld())
                         by = unit;
             }
+            if (StepWaits(run, update, "holding by the " + objectName + "'s event"))
+                return;
             HoldNear(leader, by);
             run.holding = true;
             run.headwaySince = now;
@@ -2583,6 +2664,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             continue;
 
         run.useSpawn = use.spawn;
+        if (StepWaits(run, update, "using the " + itemName + " on the " + objectName))
+            return;
         if (leader->GetDistance(object) > USE_DISTANCE)
         {
             Approach(leader, object, use.place, USE_DISTANCE - 1.0f, USE_STAND, run);
@@ -2672,11 +2755,15 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     continue;
                 }
                 run.killGuid = brought->GetObjectGuid();
+                if (StepWaits(run, update, "killing " + BossName(use.brings) + " at the " + name))
+                    return;
                 run.headwaySince = now;
                 update.reason = "killing " + BossName(use.brings) + " at the " + name + " in " + dungeon.name + ", " + count;
                 return;
             }
             run.useSpawn = use.spawn;
+            if (StepWaits(run, update, "using the " + name))
+                return;
             // Not used again long after its last use, shut or not: given up on, and on to the next boss.
             if (times && now - run.usedAt[use.spawn] >= USE_AGAIN_SECONDS)
             {
@@ -2780,6 +2867,8 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         }
         const std::string name = object->GetGOInfo()->name;
         run.useSpawn = use.spawn;
+        if (StepWaits(run, update, "using the " + name))
+            return;
         if (leader->GetDistance(object) <= USE_DISTANCE)
         {
             // At it, it stays by it between uses, out of a fight, instead of fighting its way off.
@@ -2883,7 +2972,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     // The run controller makes its headway pack by pack, and waits at a pull spot for its party as long as that takes:
     // while it has the party, the clock stands, or a long wait would pass the boss over or fail the run.
     const bool idle = dungeon.talks.count(next) || !killing.empty() || !talkWait.empty() || fighting
-        || !leader->IsAlive() || !bossPlace || run.controlled;
+        || !leader->IsAlive() || !bossPlace || !ownMoves;
     const float bossDistance = bossPlace ? WorldPosition(leader).distance(bossPlace) : 0.0f;
     const bool nearer = bossPlace && (run.headwayBest < 0.0f || bossDistance < run.headwayBest - HEADWAY);
     if (nearer)
@@ -2938,9 +3027,9 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         }
         // Not while the run controller has the party: its steps are straight moves off any path, and the controller
         // moves the leader by paths only. A walk under way when it takes over ends there.
-        if (run.controlled)
+        if (!ownMoves)
             run.nodeWalking = false;
-        if (!run.controlled && !run.nodeWalking && forNext && stopped && status == TravelStatus::TRAVEL_STATUS_COOLDOWN && target->IsMaxRetry(true)
+        if (ownMoves && !run.nodeWalking && forNext && stopped && status == TravelStatus::TRAVEL_STATUS_COOLDOWN && target->IsMaxRetry(true)
             && now - run.nodeWalkAt >= NODE_WALK_SECONDS && run.nodeWalks < NODE_WALKS_PER_BOSS
             && leader->IsInWorld() && !leader->IsBeingTeleported())
         {
@@ -3032,7 +3121,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     MarkBossGuarded(leader, bossGuard && !run.guardReleased);
     // Not while the run controller has the party: its leader stands with no travel on purpose, and ending its AI's
     // fight state could end a pull under way.
-    if (!run.controlled && talkWait.empty() && killing.empty() && !dungeon.talks.count(next))
+    if (ownMoves && talkWait.empty() && killing.empty() && !dungeon.talks.count(next))
         RestartIdleTravel(leader, run, next, bossPlace ? bossDistance : 0.0f, update);
     else
     {

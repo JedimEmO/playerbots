@@ -1075,8 +1075,14 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     engine->addStrategy("roll");
 
     // Inside a run's dungeon with a living pack ahead, the run controller has the party: its strategy, and none of
-    // travel, grind, rpg, free or follow, which pick moves of their own (GuildRunStates).
+    // travel, grind, rpg, free or follow, which pick moves of their own (GuildRunStates). While the run holds, a living
+    // member inside stays where the run placed it, and the party job's follow stays off.
     const GuildRunView run = sGuildRunStates.View(player);
+    if (run.valid && run.mode == GuildRunMode::Hold && run.holds)
+    {
+        engine->addStrategy("run holding");
+        return;
+    }
     if (run.valid && run.controls)
     {
         engine->addStrategy(run.lead ? "run lead" : "run party");
@@ -1187,9 +1193,13 @@ void GuildBotMgr::Tick(uint32 elapsed)
         LoadAssignments();
         LoginLogout();
         ApplyOrders();
+        // Every run, after this tick's orders, logins and membership and before any job moves or pulls.
+        ReconcileRuns();
         CheckJobs();
         sGuildRuns.Sweep();
     }
+    else
+        ReconcileRuns();
 
     // The fight log samples every party in a run about once a second.
     sinceFights += elapsed;
@@ -1204,6 +1214,14 @@ void GuildBotMgr::Tick(uint32 elapsed)
         sinceState = 0;
         WriteState();
     }
+}
+
+void GuildBotMgr::ReconcileRuns()
+{
+    if (!tablesReady)
+        return;
+    for (auto& [guid, kind, detail] : sGuildRunStates.Reconcile())
+        Event(guid, kind, detail);
 }
 
 void GuildBotMgr::EnsureTables()
@@ -1697,7 +1715,7 @@ void GuildBotMgr::ApplyOrders()
         c.reason.clear();
         c.runsDone = 0;
         sGuildDungeon.Stop(guid);
-        sGuildRunStates.End(guid);
+        sGuildRunStates.End(guid, "job_changed");
         c.progressAt = 0;
         c.stalled = false;
         uint32 farmItem = uint32(atoi(ArgValue(c, "item").c_str()));
@@ -1852,8 +1870,8 @@ void GuildBotMgr::CheckJobs()
             // made or brought up to date before the job's tick, so that its pull step stands down from the first tick
             // inside, and told after it whether the party is in and a step of the tables is due.
             std::vector<std::pair<std::string, std::string>> runEvents;
-            const bool controlled = sGuildRunStates.Prepare(bot, ArgValue(c, "name"), runEvents);
-            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"), controlled);
+            const runrules::Control control = sGuildRunStates.Prepare(bot, ArgValue(c, "name"), runEvents);
+            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"), control);
             if (!waiting.empty() && update.status == "working" && update.reason.rfind("waiting", 0) == 0)
                 update.reason = waiting;
             for (auto& [kind, detail] : runEvents)
@@ -1862,11 +1880,15 @@ void GuildBotMgr::CheckJobs()
                 Event(guid, kind, detail);
             if (update.status == "working")
             {
-                for (auto& [kind, detail] : sGuildRunStates.Settle(bot, update.inside, update.stepDue))
+                runrules::JobReport report;
+                report.inside = update.inside;
+                report.stepDue = update.stepDue;
+                report.leaving = update.leaving;
+                for (auto& [kind, detail] : sGuildRunStates.Settle(bot, report))
                     Event(guid, kind, detail);
             }
             else
-                sGuildRunStates.End(guid);
+                sGuildRunStates.End(guid, "job_" + update.status);
             c.reason = update.reason;
             if (update.status == "failed")
             {
@@ -2279,6 +2301,15 @@ uint32 GuildBotMgr::GetOrCreateAccount(Player* master, std::string& error)
 std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
 {
     auto [sub, rest] = SplitWord(args);
+
+    // `run state [leader]`: every run the controller keeps, read only, before anything here could make a table.
+    if (sub == "run")
+    {
+        auto [what, leader] = SplitWord(rest);
+        if (what == "state")
+            return sGuildRunStates.Describe(leader);
+        return { "guildbot run state [leader]   every run the controller keeps: its mode, members and holds; reads only" };
+    }
 
     if (!tablesReady)
         EnsureTables();

@@ -3,12 +3,18 @@
 #include "Common.h"
 #include "Entities/ObjectGuid.h"
 #include "playerbot/GuildPacks.h"
+#include "playerbot/GuildRunCore.h"
 #include "playerbot/WorldPosition.h"
 
+#include <atomic>
+#include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -46,6 +52,10 @@ struct GuildRunStop
 // at the stop before's spot, for up to WAIT_SECONDS, for another pack's creature to leave the pull spot's reach.
 enum class GuildRunPull : uint8 { Approach, Gather, Pull, Wait };
 
+using GuildRunMode = runrules::Mode;
+using GuildRunControl = runrules::Control;
+using GuildRunStamp = runrules::Stamp;
+
 // A copy of a run state for one bot, so that its strategies read it without a lock.
 struct GuildRunView
 {
@@ -67,17 +77,28 @@ struct GuildRunView
     bool waited = false;       // it waited as long as it may, and pulls with the other pack's creature still in reach
     bool ownSpot = false;      // a creature reaches the spot for good, and pulling from the stop before failed: from its own
     uint32 pullTries = 0;      // pulls of this stop that brought nothing
+    GuildRunMode mode = GuildRunMode::Ended;
+    GuildRunStamp stamp;       // the run's generation and plan revision
+    bool choose = false;       // the leader is to choose its stop again from where it stands
+    uint32 instanceId = 0;
+    std::vector<uint32> expected; // the members the run waits for, the leader among them
+    // In hold: where this bot holds, when it is a living member the engine plays inside the instance.
+    bool holds = false;
+    ai::WorldPosition holdAt;
 };
 
 // The shared state of a guild party's run inside one dungeon instance, which the party's AI plays by: the route of
 // packs from GuildPacks, the stop the party is at, and where the leader's pull stands. See docs/dungeon-runs.md.
 //
-// Who writes what: the guild tick creates a run state when the run's party is inside, keeps whether the controller
-// has the party, and ends it; the leader's AI moves the stop and the pull on; members only read.
+// Who writes what (docs/run-contract.md): the guild tick creates a run state when the run's party is inside, and writes
+// its mode and the reason for it, the generation, the expected members and the hold places, in runcore::RunCore. It
+// reconciles every run it keeps on each tick, by the run, so a run whose leader is dead, outside, offline or a player's is
+// still looked at. The leader's AI writes the stop, the pull phase and the last stop it saw cleared, only in the mode lead
+// and under the stamp of the trigger that fired it; each such write counts a plan revision. Members write nothing.
 // The tick runs on the world thread before the maps update, and a bot's AI inside its map's update, so the two never
 // run at once. A member on another map, such as a ghost outside, can read while the leader writes, so each run state
-// has its own lock, held only to copy plain values in or out. The registry has its own lock too. Neither is taken
-// while GuildDungeon's lock is held, nor that one while either is: a std::mutex does not nest.
+// has its own lock, held only to copy plain values in or out. The registry has its own lock too, never taken while a
+// state's is held. Neither is taken while GuildDungeon's lock is held, nor that one while either is.
 class GuildRunStates
 {
 public:
@@ -101,38 +122,55 @@ public:
 
     // From the guild tick, for a dungeon leader, outside GuildDungeon's lock, on either side of the job's own tick.
     // Before it: with the leader in a dungeon's instance, the run state is made the first time, from GuildPacks' route
-    // at the first stop with a living pack whose pull spot is not behind the party (FirstLiveStop by position), and
-    // whether the controller has the party is worked out from the job's
-    // last tick. So the job's pull step stands down from the first tick inside. Out of the instance, it is ended.
-    // Returns whether the controller has the party.
-    bool Prepare(Player* leader, const std::string& dungeon, std::vector<std::pair<std::string, std::string>>& events);
-    // After it: whether the run's party is in on its bosses and whether a step of the tables is due. Events for the job:
-    // a new pull, the leader's notes (waits, skips, pulls from the pack's own spot), and a leader the controller holds
-    // still for a minute, with what it waits for.
-    std::vector<std::pair<std::string, std::string>> Settle(Player* leader, bool inside, bool stepDue);
-    // The job ended, changed or left the instance: forget the leader's run state.
-    void End(uint32 leaderGuid);
+    // at the first stop with a living pack whose pull spot is not behind the party (FirstLiveStop by position). While the
+    // job has the party, the stop follows the packs it kills. A leader outside its instance leaves the run as it is.
+    // Returns what the job is told: no run, or the run's mode (GuildRunRules' Job table says what the job may do by it).
+    GuildRunControl Prepare(Player* leader, const std::string& dungeon, std::vector<std::pair<std::string, std::string>>& events);
+    // After it: the job's report. Events for the job: a new pull, and a leader the controller holds still for a minute.
+    std::vector<std::pair<std::string, std::string>> Settle(Player* leader, const runrules::JobReport& report);
+    // The job ended, changed or failed: the leader's run ends in order, and is removed two ticks on.
+    void End(uint32 leaderGuid, const std::string& why);
+    // The guild tick, on the world thread before the maps update, once a tick and before the jobs: every run it keeps.
+    // Returns its events, as (the leader's guid, kind, detail).
+    std::vector<std::tuple<uint32, std::string, std::string>> Reconcile();
+    // The console's `run state`: every run kept, ended ones and those with a leader offline included, from what each state
+    // stores. Reads only.
+    std::list<std::string> Describe(const std::string& leaderName) const;
 
     // Any thread: the run state as one bot sees it.
     GuildRunView View(Player* bot) const;
+    // Where a member's run move takes it, from a view: its place in hold, its stand at the stop, or, on the way, the leader.
+    // Empty when there is none.
+    static ai::WorldPosition PlaceOf(const GuildRunView& view, Player* bot);
+    // Whether a run action fired under this stamp may still act, in a fresh view of the bot's run (GuildRunRules'
+    // Accepts). A refusal is counted for the console.
+    bool Current(Player* bot, const GuildRunView& view, const GuildRunStamp& stamp, bool leaderWrite);
+    // Counts a run action refused for a stale stamp, for the console.
+    void Refused(Player* bot);
+    // Whether every expected member of the leader's run is there for a pull (GuildRunRules' Present), looked up through
+    // the leader's own map, which is the run's instance. On the leader's map thread.
+    static bool Present(Player* leader, const GuildRunView& view);
 
-    // The leader's AI, on its map's thread: it stands at its pull spot, it pulled a creature, a pull brought nothing,
-    // it goes on to another stop.
-    void Gather(Player* leader);
-    void Pulled(Player* leader, ObjectGuid creature);
-    void PullFailed(Player* leader);
-    void SetStop(Player* leader, size_t index);
+    // The leader's AI, on its map's thread, each under the stamp of the trigger that fired it, and only in the mode lead:
+    // it stands at its pull spot, it pulled a creature, a pull brought nothing. Each that changes something counts a
+    // plan revision, with its own event.
+    void Gather(Player* leader, const GuildRunStamp& stamp);
+    void Pulled(Player* leader, const GuildRunStamp& stamp, ObjectGuid creature);
+    void PullFailed(Player* leader, const GuildRunStamp& stamp);
     // On to the first stop with a living pack from the current one, or past it with skip, as for a pack that pulls
-    // bring nothing of; a stop passed over is passed again. Looks at the leader's own map, so only from its map's thread.
-    void Advance(Player* leader, bool skip);
+    // bring nothing of; a stop passed over is passed again. Without skip, the current stop's pack is dead: the leader saw
+    // it cleared. Looks at the leader's own map, so only from its map's thread.
+    void Advance(Player* leader, const GuildRunStamp& stamp, bool skip);
+    // After a hold, a hand-back or a change of members: the first living stop ahead of where the leader stands, as for a
+    // party set down mid-route. The tick never chooses a stop.
+    void Choose(Player* leader, const GuildRunStamp& stamp);
     // It waits at the stop before for another pack's wanderer or patrol to leave; it goes on when none is in reach, or when
     // it has waited WAIT_SECONDS; it pulls its pack from its own spot after the stop before's failed; it passes the stop over.
-    // Each carries the event's detail, which the tick says.
-    void Wait(Player* leader, const std::string& detail);
-    void Go(Player* leader);
-    void WaitedOut(Player* leader, const std::string& detail);
-    void UseOwnSpot(Player* leader, const std::string& detail);
-    void Skip(Player* leader, const std::string& detail);
+    void Wait(Player* leader, const GuildRunStamp& stamp, const std::string& detail);
+    void Go(Player* leader, const GuildRunStamp& stamp);
+    void WaitedOut(Player* leader, const GuildRunStamp& stamp, const std::string& detail);
+    void UseOwnSpot(Player* leader, const GuildRunStamp& stamp, const std::string& detail);
+    void Skip(Player* leader, const GuildRunStamp& stamp, const std::string& detail);
 
     // Where the party fights a stop: its pull spot, or the stop before's while it waits there, or when a creature that
     // stands still or is of the pack's own reaches the pull spot, unless pulling from there failed. The stand points there.
@@ -164,9 +202,10 @@ private:
         std::shared_ptr<const GuildPacks::Route> packs;
         std::vector<GuildRunStop> route; // the packs' stops with the places the controller moves bots to
         size_t index = 0;
-        bool controls = false;
-        bool inside = true;        // the job's last word: its party is in on its bosses
-        bool stepDue = false;      // and a step of its tables is due
+        runcore::RunCore core;     // the mode, generation, plan revision, members and holds
+        int32 lastCleared = -1;    // the last stop the leader saw cleared, or -1
+        std::string dungeon;
+        std::map<uint32, uint32> refused; // run actions refused for a stale stamp, by bot
         GuildRunPull pull = GuildRunPull::Approach;
         ObjectGuid pulled;
         time_t pullAt = 0;
@@ -177,16 +216,22 @@ private:
         bool waited = false;
         bool ownSpot = false;
         time_t changedAt = 0;      // the stop or the pull last changed
-        std::vector<std::pair<std::string, std::string>> notes; // the leader's events, for the tick to say
         time_t reportedPullAt = 0; // the pull the tick last reported as an event
         time_t stallReportedAt = 0;
     };
 
     std::shared_ptr<State> Find(uint32 instanceId) const;
+    // The run state of a group in any instance, or of a leader, or none.
+    std::shared_ptr<State> FindGroup(uint32 groupId) const;
+    std::shared_ptr<State> FindLeader(uint32 leaderGuid) const;
     // The stop's per-stop fields back to their start, for a new stop. Under the state's lock.
     static void Reset(State& state, size_t index);
-    // The leader's write, under the state's lock, when it is the leader. False otherwise.
-    std::shared_ptr<State> LeaderState(Player* leader) const;
+    // A leader's write: the leader in the world and not between maps, its state found by its instance, then under the
+    // state's lock the mode lead and the stamp the state's; only then is the map looked at and the change made. A change
+    // counts a plan revision with an event; a refusal is counted.
+    bool Write(Player* leader, const GuildRunStamp& stamp, const char* what,
+        const std::function<bool(State&, Map*, std::string&)>& write);
+    static const char* PullName(GuildRunPull pull);
 
     // Where a held leader stands and what keeps it: loot, its AI's fight state, and each member not ready for the pull.
     static std::string StallReason(Player* leader, size_t index, const GuildRunStop& stop, GuildRunPull pull, bool ownSpot);
@@ -197,6 +242,16 @@ private:
 
     mutable std::mutex registryLock;
     std::map<uint32, std::shared_ptr<State>> byInstance;
+    // Leaders and instances whose dungeon has no route, told once: the job has the party alone there, as before.
+    std::set<std::pair<uint32, uint32>> unrouted;
+    // The generations of every run, never reused while the server runs, told with its start.
+    struct Counter : runcore::Generations
+    {
+        std::atomic<uint32> next{ 0 };
+        uint32 Next() override { return ++next; }
+        uint64 Start() const override;
+    };
+    Counter generations;
 };
 
 #define sGuildRunStates GuildRunStates::instance()

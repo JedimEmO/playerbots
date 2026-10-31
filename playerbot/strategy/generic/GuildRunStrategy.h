@@ -39,4 +39,22 @@ namespace ai
         void InitNonCombatTriggers(std::list<TriggerNode*>& triggers) override;
         void InitCombatTriggers(std::list<TriggerNode*>& triggers) override;
     };
+
+    // A guild party's run in the mode hold, for each living member the engine plays inside, the leader among them: it
+    // stays at the place the run holds it at, where it stood when the hold began, and goes back to it after a fight; it
+    // follows nobody. In a fight it fights, heals and defends as its class does.
+    class RunHoldingStrategy : public Strategy
+    {
+    public:
+        RunHoldingStrategy(PlayerbotAI* ai) : Strategy(ai) {}
+        std::string getName() override { return "run holding"; }
+
+#ifdef GenerateBotHelp
+        virtual std::string GetHelpName() { return "run holding"; } //Must equal iternal name
+        virtual std::string GetHelpDescription() { return "This strategy holds a guild party member where its run holds it."; }
+        virtual std::vector<std::string> GetRelatedStrategies() { return { "run party", "run lead" }; }
+#endif
+    private:
+        void InitNonCombatTriggers(std::list<TriggerNode*>& triggers) override;
+    };
 }

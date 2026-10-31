@@ -314,6 +314,8 @@ namespace ai
             creators["run hold"] = [](PlayerbotAI* ai) { return new RunHoldTrigger(ai); };
             creators["run stand"] = [](PlayerbotAI* ai) { return new RunStandTrigger(ai); };
             creators["run leash"] = [](PlayerbotAI* ai) { return new RunLeashTrigger(ai); };
+            creators["run choose"] = [](PlayerbotAI* ai) { return new RunChooseTrigger(ai); };
+            creators["run hold place"] = [](PlayerbotAI* ai) { return new RunHoldPlaceTrigger(ai); };
             creators["run reached"] = [](PlayerbotAI* ai) { return new RunReachedTrigger(ai); };
             creators["run clear"] = [](PlayerbotAI* ai) { return new RunClearTrigger(ai); };
             creators["run wait over"] = [](PlayerbotAI* ai) { return new RunWaitOverTrigger(ai); };

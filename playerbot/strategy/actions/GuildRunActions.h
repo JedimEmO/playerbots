@@ -23,6 +23,14 @@ namespace ai
         bool isUseful() override;
     };
 
+    // After a hold, a hand-back or a change of members: the leader chooses its stop again from where it stands.
+    class RunChooseAction : public Action
+    {
+    public:
+        RunChooseAction(PlayerbotAI* ai) : Action(ai, "run choose") {}
+        bool Execute(Event& event) override;
+    };
+
     // The leader is at the pull spot: from here it waits for the party.
     class RunGatherAction : public Action
     {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Common.h"
+#include "playerbot/GuildRunRules.h"
 
 #include <array>
 #include <map>
@@ -42,14 +43,17 @@ public:
         bool strategiesChanged = false;   // the leader's non-combat strategies must be rebuilt
         bool inside = false;              // the run is on its bosses with the leader inside, for the run state
         bool stepDue = false;             // a talk, use, item use, kill or sleeping boss of the tables is the job's now
+        bool leaving = false;             // the job takes the party out on purpose: the repair trip, or out and the reset
     };
 
     // Empty when the job can run a dungeon by this name, else why not.
     static std::string Validate(const std::string& name);
 
-    // Every few seconds, from GuildBotMgr, for a leader on the dungeon job. Controlled when the run controller has
-    // the party (GuildRunStates): the job's own pull and rest steps then stand down.
-    Update Tick(Player* leader, const std::string& name, bool controlled = false);
+    // Every few seconds, from GuildBotMgr, for a leader on the dungeon job, told what the run controller has
+    // (GuildRunStates::Prepare): none, lead, hold or released. What the job may do under each is GuildRunRules' Job table:
+    // under lead and hold its own pulls, rest, regroup, via places and boss travel stand down, and a table step or a
+    // change of phase only asks for a release; under released it does the step or the trip, and hands the party back.
+    Update Tick(Player* leader, const std::string& name, runrules::Control control = runrules::Control::None);
     // The job ended or changed: forget the run.
     void Stop(uint32 leaderGuid);
 
@@ -249,7 +253,10 @@ private:
         time_t sleeperSince = 0;       // when it fell asleep
         bool sleeperWaiting = false;   // the leader waits by it now
         ObjectGuid killGuid;           // the creature the leader kills before the next boss, or empty
-        bool controlled = false;       // the run controller has the party, and the pull and rest steps stand down
+        ObjectGuid killPullGuid;       // the creature to kill first that the job's pull takes back to the party, or empty
+        bool controlled = false;       // the run controller leads or holds the party, and the pull and rest steps stand down
+        runrules::Control control = runrules::Control::None; // what the run controller has, this tick
+        bool stepWaiting = false;      // a table step waits for the run's release, its guard having returned
         std::set<int32> passed;        // bosses passed over as out of reach on this map
         int32 headwayBoss = 0;         // the boss the leader's headway is measured to
         float headwayBest = -1.0f;     // the nearest the leader has come to it, in yards, or negative before the first look
@@ -330,6 +337,9 @@ private:
     // The leader opens a locked door of the key table by it, with the key in its bags.
     static void OpenKeyDoors(Player* leader, Update& update);
     void TickBosses(Player* leader, Run& run, Update& update);
+    // A table step's guard, just before its first move or effect: under lead the step only asks for the run's release,
+    // and the tick returns with the step waiting; true then. Under released or with no run, false: the step goes on.
+    static bool StepWaits(Run& run, Update& update, const std::string& what);
     // The finish step: out, then the reset.
     void TickLeave(Player* leader, Run& run, Update& update);
     void TickRepair(Player* leader, Run& run, Update& update);

@@ -201,6 +201,8 @@ private:
     void LoginLogout();
     void ApplyOrders();
     void CheckJobs();
+    // Every run the controller keeps, on every tick (GuildRunStates::Reconcile), its events written.
+    void ReconcileRuns();
     void WriteState();
     void WriteState(const Character& c, Player* bot);
     void ApplyRole(Character& c, Player* bot);

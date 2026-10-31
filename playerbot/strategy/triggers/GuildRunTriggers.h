@@ -3,6 +3,15 @@
 
 namespace ai
 {
+    // A trigger of the run's: its event carries the generation and plan revision of the run state it saw, so that the
+    // action it fires does nothing once the state has moved on (GuildRunStates::Current).
+    class RunTrigger : public Trigger
+    {
+    public:
+        RunTrigger(PlayerbotAI* ai, std::string name) : Trigger(ai, name) {}
+        Event Check() override;
+    };
+
     // A guild character whose run strategies are not the ones its run state calls for, out of a fight: it enters the
     // run (`run lead` or `run party`) or leaves it. Strategies are rebuilt only out of a fight, since a rebuild
     // re-initialises the engines and has cut fights short.
@@ -21,90 +30,106 @@ namespace ai
     };
 
     // The leader on its way to the stop's pull spot.
-    class RunApproachTrigger : public Trigger
+    class RunApproachTrigger : public RunTrigger
     {
     public:
-        RunApproachTrigger(PlayerbotAI* ai) : Trigger(ai, "run approach") {}
+        RunApproachTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run approach") {}
+        bool IsActive() override;
+    };
+
+    // After a hold, a hand-back or a change of members, the leader chooses its stop again from where it stands.
+    class RunChooseTrigger : public RunTrigger
+    {
+    public:
+        RunChooseTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run choose") {}
+        bool IsActive() override;
+    };
+
+    // In the mode hold, a living member the engine plays inside, off the place the run holds it at.
+    class RunHoldPlaceTrigger : public RunTrigger
+    {
+    public:
+        RunHoldPlaceTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run hold place") {}
         bool IsActive() override;
     };
 
     // The leader has come to the pull spot.
-    class RunGatherTrigger : public Trigger
+    class RunGatherTrigger : public RunTrigger
     {
     public:
-        RunGatherTrigger(PlayerbotAI* ai) : Trigger(ai, "run gather") {}
+        RunGatherTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run gather") {}
         bool IsActive() override;
     };
 
     // The leader at the pull spot with the party in place, alive, rested and out of a fight, or waited long enough.
-    class RunPullReadyTrigger : public Trigger
+    class RunPullReadyTrigger : public RunTrigger
     {
     public:
-        RunPullReadyTrigger(PlayerbotAI* ai) : Trigger(ai, "run pull ready") {}
+        RunPullReadyTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run pull ready") {}
         bool IsActive() override;
     };
 
     // A pull that started no fight in a while.
-    class RunPullFailedTrigger : public Trigger
+    class RunPullFailedTrigger : public RunTrigger
     {
     public:
-        RunPullFailedTrigger(PlayerbotAI* ai) : Trigger(ai, "run pull failed") {}
+        RunPullFailedTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run pull failed") {}
         bool IsActive() override;
     };
 
     // No creature of the stop's pack alive.
-    class RunClearedTrigger : public Trigger
+    class RunClearedTrigger : public RunTrigger
     {
     public:
-        RunClearedTrigger(PlayerbotAI* ai) : Trigger(ai, "run cleared") {}
+        RunClearedTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run cleared") {}
         bool IsActive() override;
     };
 
     // The leader drawn off its pull spot while the pull comes to it.
-    class RunHoldTrigger : public Trigger
+    class RunHoldTrigger : public RunTrigger
     {
     public:
-        RunHoldTrigger(PlayerbotAI* ai) : Trigger(ai, "run hold") {}
+        RunHoldTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run hold") {}
         bool IsActive() override;
     };
 
     // A member away from its place, out of a fight.
-    class RunStandTrigger : public Trigger
+    class RunStandTrigger : public RunTrigger
     {
     public:
-        RunStandTrigger(PlayerbotAI* ai) : Trigger(ai, "run stand") {}
+        RunStandTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run stand") {}
         bool IsActive() override;
     };
 
     // A member too far from its place in a fight from a pull.
-    class RunLeashTrigger : public Trigger
+    class RunLeashTrigger : public RunTrigger
     {
     public:
-        RunLeashTrigger(PlayerbotAI* ai) : Trigger(ai, "run leash") {}
+        RunLeashTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run leash") {}
         bool IsActive() override;
     };
 
     // On its way, or gathered, the leader finds another pack's wanderer or patrol in reach of the stop's pull spot.
-    class RunReachedTrigger : public Trigger
+    class RunReachedTrigger : public RunTrigger
     {
     public:
-        RunReachedTrigger(PlayerbotAI* ai) : Trigger(ai, "run reached") {}
+        RunReachedTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run reached") {}
         bool IsActive() override;
     };
 
     // Waiting at the stop before, the leader finds the pull spot out of every other pack's reach again.
-    class RunClearTrigger : public Trigger
+    class RunClearTrigger : public RunTrigger
     {
     public:
-        RunClearTrigger(PlayerbotAI* ai) : Trigger(ai, "run clear") {}
+        RunClearTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run clear") {}
         bool IsActive() override;
     };
 
     // The leader has waited at the stop before as long as it may, and pulls with the creature still in reach.
-    class RunWaitOverTrigger : public Trigger
+    class RunWaitOverTrigger : public RunTrigger
     {
     public:
-        RunWaitOverTrigger(PlayerbotAI* ai) : Trigger(ai, "run wait over") {}
+        RunWaitOverTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run wait over") {}
         bool IsActive() override;
     };
 }

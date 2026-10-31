@@ -178,6 +178,7 @@ namespace ai
             creators["dungeon"] = [](PlayerbotAI* ai) { return new DungeonStrategy(ai); };
             creators["run lead"] = [](PlayerbotAI* ai) { return new RunLeadStrategy(ai); };
             creators["run party"] = [](PlayerbotAI* ai) { return new RunPartyStrategy(ai); };
+            creators["run holding"] = [](PlayerbotAI* ai) { return new RunHoldingStrategy(ai); };
             creators["onyxias lair"] = [](PlayerbotAI* ai) { return new OnyxiasLairDungeonStrategy(ai); };
             creators["molten core"] = [](PlayerbotAI* ai) { return new MoltenCoreDungeonStrategy(ai); };
             creators["blackwing lair"] = [](PlayerbotAI* ai) { return new BlackwingLairDungeonStrategy(ai); };

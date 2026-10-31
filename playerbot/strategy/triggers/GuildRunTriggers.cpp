@@ -38,12 +38,20 @@ namespace
         return bot->GetDistance(at.getX(), at.getY(), at.getZ());
     }
 
-    // The run strategy the run state calls for, or empty.
+    // The run strategy the run state calls for, or empty. In hold, a living member the engine plays inside holds.
     std::string Wanted(const GuildRunView& view)
     {
+        if (view.valid && view.mode == GuildRunMode::Hold && view.holds)
+            return "run holding";
         if (!view.valid || !view.controls)
             return "";
         return view.lead ? "run lead" : "run party";
+    }
+
+    // The leader leads: the run is the controller's, in the mode lead, and the leader is not to choose its stop again.
+    bool Leads(const GuildRunView& view)
+    {
+        return view.valid && view.controls && view.lead && !view.choose;
     }
 
     // Whether the bot loots before it walks: only in the first RUN_LOOT_WAIT seconds at a stop, and only with loot there.
@@ -62,8 +70,31 @@ namespace
             return "run lead";
         if (ai->HasStrategy("run party", BotState::BOT_STATE_NON_COMBAT))
             return "run party";
+        if (ai->HasStrategy("run holding", BotState::BOT_STATE_NON_COMBAT))
+            return "run holding";
         return "";
     }
+}
+
+Event RunTrigger::Check()
+{
+    if (!IsActive())
+        return Event();
+    return Event(getName(), runrules::StampText(AI_VALUE(GuildRunView, "run state").stamp));
+}
+
+bool RunChooseTrigger::IsActive()
+{
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    return view.valid && view.controls && view.lead && view.choose && InWorld(bot);
+}
+
+bool RunHoldPlaceTrigger::IsActive()
+{
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    if (!view.valid || view.mode != GuildRunMode::Hold || !view.holds || !InWorld(bot) || !bot->IsAlive())
+        return false;
+    return view.holdAt.getMapId() == bot->GetMapId() && DistanceTo(bot, view.holdAt) > RUN_AT_SPOT;
 }
 
 bool GuildRunEnterTrigger::IsActive()
@@ -84,7 +115,7 @@ bool GuildRunLeaveTrigger::IsActive()
 bool RunApproachTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.controls || !view.lead || view.index >= view.stops || !InWorld(bot) || view.pull == GuildRunPull::Pull)
+    if (!Leads(view) || view.index >= view.stops || !InWorld(bot) || view.pull == GuildRunPull::Pull)
         return false;
     // The last fight's loot first, for a while: looting ranks far below the walk, and would never come otherwise.
     if (LootFirst(ai, bot, view))
@@ -104,7 +135,7 @@ bool RunApproachTrigger::IsActive()
 bool RunGatherTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.controls || !view.lead || view.index >= view.stops || view.pull != GuildRunPull::Approach || !InWorld(bot))
+    if (!Leads(view) || view.index >= view.stops || view.pull != GuildRunPull::Approach || !InWorld(bot))
         return false;
     return DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) <= RUN_AT_SPOT
         && (view.waited || !GuildRunStates::Reached(bot->GetMap(), bot, view.stop));
@@ -113,8 +144,13 @@ bool RunGatherTrigger::IsActive()
 bool RunPullReadyTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.controls || !view.lead || view.index >= view.stops || view.pull != GuildRunPull::Gather
+    // Only in the mode lead (Leads): never while the run holds, is released or ended.
+    if (!Leads(view) || view.index >= view.stops || view.pull != GuildRunPull::Gather
         || !InWorld(bot) || bot->IsInCombat())
+        return false;
+    // Every expected member, the leader among them, online, in the world in the run's own instance, and alive: one
+    // offline, away or dead holds the pull back without a time limit. The rest of readiness is below.
+    if (!GuildRunStates::Present(bot, view))
         return false;
     const WorldPosition& spot = GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot);
     // Not with another pack's creature in reach of the pull spot, as a patrol that came by while the party gathered,
@@ -147,7 +183,7 @@ bool RunPullReadyTrigger::IsActive()
 bool RunPullFailedTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.controls || !view.lead || view.pull != GuildRunPull::Pull || bot->IsInCombat())
+    if (!Leads(view) || view.pull != GuildRunPull::Pull || bot->IsInCombat())
         return false;
     return time(nullptr) - view.pullAt >= RUN_PULL_WAIT;
 }
@@ -155,7 +191,7 @@ bool RunPullFailedTrigger::IsActive()
 bool RunClearedTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.lead || view.index >= view.stops || !InWorld(bot))
+    if (!Leads(view) || view.index >= view.stops || !InWorld(bot))
         return false;
     return GuildRunStates::FirstLiving(view.packs.get(), bot->GetMap(), view.index) != view.index;
 }
@@ -163,7 +199,7 @@ bool RunClearedTrigger::IsActive()
 bool RunHoldTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.controls || !view.lead || view.pull != GuildRunPull::Pull || !InWorld(bot)
+    if (!Leads(view) || view.pull != GuildRunPull::Pull || !InWorld(bot)
         || time(nullptr) - view.pullAt >= RUN_HOLD_SECONDS)
         return false;
     // Only a pull from range comes to the spot; a tank that had to walk in fights where the pack stands.
@@ -204,7 +240,7 @@ bool RunReachedTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
     // On the way, or gathered at the spot when a patrol or wanderer comes by: the wait, and its cap, apply to both.
-    if (!view.valid || !view.controls || !view.lead || view.index >= view.stops
+    if (!Leads(view) || view.index >= view.stops
         || (view.pull != GuildRunPull::Approach && view.pull != GuildRunPull::Gather)
         || view.waited || !view.stop.hasBefore || view.stop.outsideReach.empty() || !InWorld(bot))
         return false;
@@ -214,7 +250,7 @@ bool RunReachedTrigger::IsActive()
 bool RunClearTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.controls || !view.lead || view.pull != GuildRunPull::Wait || !InWorld(bot))
+    if (!Leads(view) || view.pull != GuildRunPull::Wait || !InWorld(bot))
         return false;
     return !GuildRunStates::Reached(bot->GetMap(), bot, view.stop);
 }
@@ -222,7 +258,7 @@ bool RunClearTrigger::IsActive()
 bool RunWaitOverTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.controls || !view.lead || view.pull != GuildRunPull::Wait)
+    if (!Leads(view) || view.pull != GuildRunPull::Wait)
         return false;
     return time(nullptr) - view.waitSince >= GuildRunStates::WAIT_SECONDS;
 }

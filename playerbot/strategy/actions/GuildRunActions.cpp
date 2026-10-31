@@ -18,6 +18,18 @@ namespace
         context->GetValue<GuildRunView>("run state")->Reset();
         context->GetValue<WorldPosition>("run spot")->Reset();
     }
+
+    // The stamp of the run trigger that fired the action (RunTrigger).
+    GuildRunStamp StampOf(Event& event)
+    {
+        return runrules::ParseStamp(event.getParam());
+    }
+
+    // In the world and not between maps: every run action looks at nothing else before this.
+    bool Settled(Player* bot)
+    {
+        return bot->IsInWorld() && !bot->IsBeingTeleported();
+    }
 }
 
 bool GuildRunStrategiesAction::Execute(Event& event)
@@ -28,7 +40,7 @@ bool GuildRunStrategiesAction::Execute(Event& event)
 
 bool MoveToRunSpotAction::isUseful()
 {
-    if (!bot->IsInWorld() || bot->IsBeingTeleported())
+    if (!Settled(bot))
         return false;
     WorldPosition spot = AI_VALUE(WorldPosition, "run spot");
     return spot && spot.getMapId() == bot->GetMapId();
@@ -36,28 +48,50 @@ bool MoveToRunSpotAction::isUseful()
 
 bool MoveToRunSpotAction::Execute(Event& event)
 {
-    if (!bot->IsInWorld() || bot->IsBeingTeleported())
+    if (!Settled(bot))
         return false;
-    WorldPosition spot = AI_VALUE(WorldPosition, "run spot");
+    // One fresh view of the run: the stamp is checked against it, and the destination comes from it, never from a value
+    // cached apart. Fired under a run state that has since moved on, or ended: nothing.
+    const GuildRunView view = sGuildRunStates.View(bot);
+    WorldPosition spot;
+    if (!view.valid || !runrules::ValidatedPlace(view.mode, view.stamp, StampOf(event), view.lead && view.mode == GuildRunMode::Lead,
+        view, [this](const GuildRunView& at) { return GuildRunStates::PlaceOf(at, bot); }, spot))
+    {
+        sGuildRunStates.Refused(bot);
+        return false;
+    }
     if (!spot || spot.getMapId() != bot->GetMapId())
         return false;
     // MoveTo builds a path on the navmesh to the spot, which the dungeon model put on the navmesh.
     return MoveTo(spot.getMapId(), spot.getX(), spot.getY(), spot.getZ());
 }
 
+bool RunChooseAction::Execute(Event& event)
+{
+    if (!Settled(bot))
+        return false;
+    sGuildRunStates.Choose(bot, StampOf(event));
+    Refresh(context);
+    return true;
+}
+
 bool RunGatherAction::Execute(Event& event)
 {
-    sGuildRunStates.Gather(bot);
+    if (!Settled(bot))
+        return false;
+    sGuildRunStates.Gather(bot, StampOf(event));
     Refresh(context);
     return true;
 }
 
 bool RunPullAction::Execute(Event& event)
 {
-    if (!bot->IsInWorld() || bot->IsBeingTeleported())
+    if (!Settled(bot))
         return false;
-    GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!view.valid || !view.lead || view.index >= view.stops)
+    // The run as it is now, not as the trigger saw it: a pull is the one move the run cannot take back.
+    const GuildRunStamp stamp = StampOf(event);
+    const GuildRunView view = sGuildRunStates.View(bot);
+    if (!view.valid || !view.lead || !view.controls || view.index >= view.stops || !sGuildRunStates.Current(bot, view, stamp, true))
         return false;
 
     // The creature the dungeon model chose the spot to pull, else the pack's living one nearest the spot.
@@ -83,7 +117,7 @@ bool RunPullAction::Execute(Event& event)
     }
     if (!target)
     {
-        sGuildRunStates.Advance(bot, false);
+        sGuildRunStates.Advance(bot, stamp, false);
         Refresh(context);
         return true;
     }
@@ -102,7 +136,7 @@ bool RunPullAction::Execute(Event& event)
     const bool fromBefore = view.stop.stillReach && view.stop.hasBefore && !view.ownSpot;
     if (fromBefore && (!fromRange || distance > range || !inSight))
     {
-        sGuildRunStates.UseOwnSpot(bot, stop + ": its pull spot is reached by " + GuildRunStates::Names(view.stop.reachedBy)
+        sGuildRunStates.UseOwnSpot(bot, stamp, stop + ": its pull spot is reached by " + GuildRunStates::Names(view.stop.reachedBy)
             + ", and " + std::string(target->GetName()) + " is " + std::to_string(uint32(distance)) + " yd from the stop before"
             + (inSight ? "" : ", out of sight") + (fromRange ? "" : ", with no pull from range") + "; pulling from its own spot");
         Refresh(context);
@@ -111,23 +145,27 @@ bool RunPullAction::Execute(Event& event)
     // Out of range and out of sight from the last spot it could pull from: passed over, and the run goes on.
     if (!fromBefore && distance > range && !inSight)
     {
-        sGuildRunStates.Skip(bot, std::string(target->GetName()) + " is " + std::to_string(uint32(distance))
+        sGuildRunStates.Skip(bot, stamp, std::string(target->GetName()) + " is " + std::to_string(uint32(distance))
             + " yd off and out of sight of its pull spot");
         Refresh(context);
         return true;
     }
 
+    // The party, checked again right before the pull: a member can die or leave after the trigger fired, with the stamp
+    // unchanged.
+    if (!GuildRunStates::Present(bot, view))
+        return false;
     bool started = ai->DoSpecificAction("pull my target", Event("attack anything", target->GetObjectGuid()), true);
     if (!started && !fromBefore)
         started = Attack(nullptr, target);
     if (!started)
     {
-        sGuildRunStates.PullFailed(bot);
+        sGuildRunStates.PullFailed(bot, stamp);
         Refresh(context);
         return false;
     }
 
-    sGuildRunStates.Pulled(bot, target->GetObjectGuid());
+    sGuildRunStates.Pulled(bot, stamp, target->GetObjectGuid());
     sGuildRuns.NotePull(bot, target);
     Refresh(context);
     return true;
@@ -135,26 +173,32 @@ bool RunPullAction::Execute(Event& event)
 
 bool RunPullFailedAction::Execute(Event& event)
 {
+    if (!Settled(bot))
+        return false;
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
     if (view.pullTries + 1 >= RUN_PULL_TRIES)
-        sGuildRunStates.Advance(bot, true);
+        sGuildRunStates.Advance(bot, StampOf(event), true);
     else
-        sGuildRunStates.PullFailed(bot);
+        sGuildRunStates.PullFailed(bot, StampOf(event));
     Refresh(context);
     return true;
 }
 
 bool RunNextAction::Execute(Event& event)
 {
-    sGuildRunStates.Advance(bot, false);
+    if (!Settled(bot))
+        return false;
+    sGuildRunStates.Advance(bot, StampOf(event), false);
     Refresh(context);
     return true;
 }
 
 bool RunWaitAction::Execute(Event& event)
 {
+    if (!Settled(bot))
+        return false;
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    sGuildRunStates.Wait(bot, "stop " + std::to_string(view.index + 1) + ", at the stop before until "
+    sGuildRunStates.Wait(bot, StampOf(event), "stop " + std::to_string(view.index + 1) + ", at the stop before until "
         + GuildRunStates::Names(view.stop.outsideReach) + " leaves its pull spot's reach");
     Refresh(context);
     return true;
@@ -162,15 +206,19 @@ bool RunWaitAction::Execute(Event& event)
 
 bool RunGoAction::Execute(Event& event)
 {
-    sGuildRunStates.Go(bot);
+    if (!Settled(bot))
+        return false;
+    sGuildRunStates.Go(bot, StampOf(event));
     Refresh(context);
     return true;
 }
 
 bool RunWaitedAction::Execute(Event& event)
 {
+    if (!Settled(bot))
+        return false;
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    sGuildRunStates.WaitedOut(bot, "stop " + std::to_string(view.index + 1) + ", waited "
+    sGuildRunStates.WaitedOut(bot, StampOf(event), "stop " + std::to_string(view.index + 1) + ", waited "
         + std::to_string(uint32(GuildRunStates::WAIT_SECONDS)) + " s at the stop before; pulling with "
         + GuildRunStates::Names(view.stop.outsideReach) + " still about");
     Refresh(context);

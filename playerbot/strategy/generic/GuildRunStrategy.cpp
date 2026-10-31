@@ -5,6 +5,11 @@ using namespace ai;
 
 void RunLeadStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
 {
+    // After a hold, a hand-back or a change of members, the stop is chosen again from where the leader stands, first.
+    triggers.push_back(new TriggerNode(
+        "run choose",
+        NextAction::array(0, new NextAction("run choose", ACTION_MOVE + 9), NULL)));
+
     // A cleared stop moves the run on before anything else, so the leader never walks to a dead pack's spot.
     triggers.push_back(new TriggerNode(
         "run cleared",
@@ -54,6 +59,13 @@ void RunPartyStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
 {
     triggers.push_back(new TriggerNode(
         "run stand",
+        NextAction::array(0, new NextAction("move to run spot", ACTION_MOVE + 2), NULL)));
+}
+
+void RunHoldingStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+{
+    triggers.push_back(new TriggerNode(
+        "run hold place",
         NextAction::array(0, new NextAction("move to run spot", ACTION_MOVE + 2), NULL)));
 }
 
