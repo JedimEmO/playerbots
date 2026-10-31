@@ -90,6 +90,8 @@ public:
     // is at or past the point's place along the route. -1 when none. A creature not loaded and not waiting to respawn
     // counts as living. World thread, or the instance's own map thread.
     static int32 FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at);
+    // The same from a stop's index on: the first stop at or after it whose pack still has a living creature, or -1.
+    static int32 FirstLiveStop(const Route& route, Map* map, size_t from);
 
 private:
     GuildPacks() = default;

@@ -1165,20 +1165,26 @@ int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, const G3D::Vector3
 {
     if (!map || route.points.empty())
         return -1;
-    // The point's place along the route: its nearest point of the way.
+    // The point's place along the route: its nearest point of the way. The first stop whose pack is at or past it.
     size_t nearest = 0;
     for (size_t i = 1; i < route.points.size(); ++i)
         if ((route.points[i] - at).squaredLength() < (route.points[nearest] - at).squaredLength())
             nearest = i;
     const float along = float(nearest) * ROUTE_STEP;
+    for (size_t k = 0; k < route.stops.size(); ++k)
+        if (route.stops[k].along + ROUTE_STEP >= along)
+            return FirstLiveStop(route, map, k);
+    return -1;
+}
+
+int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, size_t from)
+{
+    if (!map)
+        return -1;
     MapPersistentState* state = map->GetPersistentState();
     const time_t now = time(nullptr);
-    for (size_t k = 0; k < route.stops.size(); ++k)
-    {
-        const Stop& stop = route.stops[k];
-        if (stop.along + ROUTE_STEP < along)
-            continue;
-        for (uint32 spawn : stop.spawns)
+    for (size_t k = from; k < route.stops.size(); ++k)
+        for (uint32 spawn : route.stops[k].spawns)
         {
             if (state && state->GetCreatureRespawnTime(spawn) > now)
                 continue;
@@ -1193,7 +1199,6 @@ int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, const G3D::Vector3
                 if (!map->IsLoaded(data->posX, data->posY))
                     return int32(k);
         }
-    }
     return -1;
 }
 
