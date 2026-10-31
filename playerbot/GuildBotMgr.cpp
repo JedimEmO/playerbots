@@ -3,6 +3,7 @@
 #include "playerbot/GuildBench.h"
 #include "playerbot/GuildDungeon.h"
 #include "playerbot/GuildJobs.h"
+#include "playerbot/GuildPacks.h"
 #include "playerbot/GuildRuns.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
@@ -2272,6 +2273,8 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         return HandleSpots(rest);
     if (sub == "runs")
         return sGuildRuns.HandleRuns(rest);
+    if (sub == "packs")
+        return sGuildPacks.HandleCommand(rest);
     if (sub == "tank")
         return HandleTank(rest);
     if (sub == "bench")
@@ -2294,6 +2297,7 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         "guildbot metrics [hours]               how much of their time levelling characters earn experience, by hour",
         "guildbot spots [hours]                 grind spots by experience per hour there, with the walk to them",
         "guildbot runs [count]                  the latest dungeon runs: members, bosses, wipes and loot",
+        "guildbot packs <map> [instance] [x y z [level]]   a dungeon's packs, or what a pull from a spot brings",
     };
 }
 
