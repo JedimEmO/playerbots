@@ -8,9 +8,13 @@
 #include "Maps/Map.h"
 #include "Maps/MapManager.h"
 #include "Maps/MapPersistentStateMgr.h"
+#include "Maps/SpawnGroupDefines.h"
 #include "MotionGenerators/MoveMap.h"
 #include "MotionGenerators/PathFinder.h"
 #include "MotionGenerators/WaypointManager.h"
+#include "Pools/PoolManager.h"
+#include "playerbot/GuildDungeon.h"
+#include "playerbot/TravelNode.h"
 #include "Server/DBCStores.h"
 #include "Server/SQLStorages.h"
 #include "Spells/SpellMgr.h"
@@ -49,6 +53,18 @@ namespace
     constexpr float WALK_SPEED = 2.5f, RUN_SPEED = 7.0f;
     // A reply holds at most this many lines, so that it fits a SOAP answer.
     constexpr size_t MAX_LINES = 40;
+    // A route is walked in points this far apart.
+    constexpr float ROUTE_STEP = 2.0f;
+    // A pack is on the way when one of it would attack a party this much nearer than its aggro range to the route,
+    // as the dungeon job looks ahead for its next pull.
+    constexpr float ROUTE_AHEAD = 15.0f;
+    // A pull spot is this far from the nearest of its pack, back along the route, and the best is the middle.
+    constexpr float PULL_NEAR = 20.0f, PULL_FAR = 30.0f, PULL_BEST = 25.0f;
+    // At most this many spots are tried for one pack, and a route's predictions look at creatures this near a spot.
+    constexpr size_t PULL_TRIES = 8;
+    constexpr float ROUTE_REACH = 80.0f;
+    // A rest spot is clear when every living creature's aggro range and every patrol's path is this much farther off.
+    constexpr float REST_MARGIN = 5.0f;
 
     int64 CellKey(float x, float y)
     {
@@ -160,6 +176,8 @@ GuildPacks::MapModel& GuildPacks::Model(uint32 mapId)
 void GuildPacks::Build(MapModel& model)
 {
     const float familyRadius = sWorld.getConfig(CONFIG_FLOAT_CREATURE_FAMILY_ASSISTANCE_RADIUS);
+    std::map<uint32, std::vector<uint32>> pooled;
+    std::shared_ptr<SpawnGroupEntryContainer> spawnGroups = sObjectMgr.GetSpawnGroupContainer();
     auto collect = [&](CreatureDataPair const& pair) -> bool
     {
         CreatureData const& data = pair.second;
@@ -170,9 +188,10 @@ void GuildPacks::Build(MapModel& model)
             || (info->UnitFlags & (UNIT_FLAG_SPAWNING | UNIT_FLAG_IMMUNE_TO_PLAYER | UNIT_FLAG_UNINTERACTIBLE))
             || (info->ExtraFlags & CREATURE_EXTRA_FLAG_NO_AGGRO_ON_SIGHT))
             return false;
-        // Only what fights a party: a faction hostile to players.
+        // Only what can fight a party: not a faction friendly to players. A neutral one does not attack on sight, but in
+        // an instance it answers a call for help like any other (Unit::CanAssistInCombatAgainst).
         FactionTemplateEntry const* faction = sFactionTemplateStore.LookupEntry(info->Faction);
-        if (!faction || !faction->IsHostileToPlayers())
+        if (!faction || (faction->friendGroupMask & FACTION_GROUP_MASK_PLAYER))
             return false;
 
         Node node;
@@ -189,6 +208,19 @@ void GuildPacks::Build(MapModel& model)
         node.walk = info->SpeedWalk * WALK_SPEED;
         node.run = info->SpeedRun * RUN_SPEED;
         node.caster = info->UnitClass == CLASS_MAGE || info->UnitClass == CLASS_PALADIN;
+        node.aggroes = faction->IsHostileToPlayers();
+        // One of several spawns of a pool or spawn group that puts up fewer than it lists, such as a rare's places.
+        if (data.GuidPoolId)
+            pooled[data.GuidPoolId].push_back(uint32(model.nodes.size()));
+        if (data.EntryPoolId)
+            pooled[data.EntryPoolId].push_back(uint32(model.nodes.size()));
+        if (spawnGroups)
+        {
+            auto group = spawnGroups->spawnGroupByGuidMap.find({ pair.first, uint32(TYPEID_UNIT) });
+            if (group != spawnGroups->spawnGroupByGuidMap.end() && group->second->MaxCount
+                && group->second->MaxCount < group->second->DbGuids.size())
+                node.maybe = true;
+        }
         for (uint32 display : info->DisplayId)
             if (display)
             {
@@ -242,6 +274,13 @@ void GuildPacks::Build(MapModel& model)
         return false;
     };
     sObjectMgr.DoCreatureData(collect);
+    for (auto const& [pool, members] : pooled)
+    {
+        const uint32 limit = sPoolMgr.GetPoolTemplate(uint16(pool)).MaxLimit;
+        if (limit && limit < members.size())
+            for (uint32 i : members)
+                model.nodes[i].maybe = true;
+    }
     LinkAndGroup(model);
 }
 
@@ -289,17 +328,25 @@ void GuildPacks::LinkAndGroup(MapModel& model)
     for (uint32 i = 0; i < model.nodes.size(); ++i)
     {
         const Node& a = model.nodes[i];
+        if (a.maybe)
+            continue;
         // The search reaches past the largest bounding radius a creature here could have.
         const float reach = std::max(a.callRadius, a.scriptCall) + a.bounding + 8.0f;
         for (uint32 j : Near(model, a.at, reach))
-            if (j != i && (model.nodes[j].at - a.at).length() <= std::max(a.callRadius, a.scriptCall) + a.bounding + model.nodes[j].bounding)
+            if (j != i && !model.nodes[j].maybe && (model.nodes[j].at - a.at).length() <= std::max(a.callRadius, a.scriptCall) + a.bounding + model.nodes[j].bounding)
                 join(i, j);
-        if (a.master >= 0 && (a.fromMaster || a.toMaster))
+        if (a.master >= 0 && (a.fromMaster || a.toMaster) && !model.nodes[a.master].maybe)
             join(i, uint32(a.master));
     }
     std::map<uint32, uint32> packOf;
     for (uint32 i = 0; i < model.nodes.size(); ++i)
     {
+        if (model.nodes[i].maybe)
+        {
+            model.nodes[i].pack = std::numeric_limits<uint32>::max();
+            model.maybe[CreatureName(model.nodes[i].entry)]++;
+            continue;
+        }
         auto found = packOf.find(root(i));
         if (found == packOf.end())
         {
@@ -315,6 +362,7 @@ void GuildPacks::LinkAndGroup(MapModel& model)
         pack.linked = pack.linked || node.master >= 0;
         pack.summons = pack.summons || !node.summons.empty();
         pack.flees = pack.flees || node.flees;
+        pack.aggroes = pack.aggroes || node.aggroes;
     }
     for (Pack& pack : model.packs)
     {
@@ -345,7 +393,15 @@ std::vector<uint32> GuildPacks::Near(const MapModel& model, const G3D::Vector3& 
     return found;
 }
 
-GuildPacks::Prediction GuildPacks::Predict(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level) const
+float GuildPacks::Reach(const Node& node, uint32 level) const
+{
+    // Detection less the level difference, at least 5 yards, as Unit::GetAttackDistance has it, plus both bounding radii.
+    const float creatureLevel = float(node.minLevel + node.maxLevel) / 2.0f;
+    return std::max(5.0f, node.detection - (float(level) - creatureLevel)) + node.bounding + PLAYER_BOUNDING;
+}
+
+GuildPacks::Prediction GuildPacks::Predict(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level,
+    const PredictOptions& options) const
 {
     Prediction result;
     result.live = map != nullptr;
@@ -355,10 +411,13 @@ GuildPacks::Prediction GuildPacks::Predict(const MapModel& model, Map* map, cons
     std::map<uint32, G3D::Vector3> where;
     auto consider = [&](uint32 i)
     {
-        if (where.count(i))
+        if (where.count(i) || (options.dead && options.dead->count(i)))
             return;
         const Node& node = model.nodes[i];
         G3D::Vector3 at = node.at;
+        // A spawn that may not be up counts only where the instance has it.
+        if (node.maybe && !(map && map->GetCreature(node.spawn)))
+            return;
         if (map)
         {
             // Killed and not yet back: the instance keeps its respawn time, also once the corpse is gone.
@@ -376,25 +435,34 @@ GuildPacks::Prediction GuildPacks::Predict(const MapModel& model, Map* map, cons
         }
         where[i] = at;
     };
-    for (uint32 i : Near(model, spot, PREDICT_REACH))
+    for (uint32 i : Near(model, spot, options.reach))
         consider(i);
     for (uint32 i = 0; i < model.nodes.size(); ++i)
         if (!model.nodes[i].patrol.empty())
             for (auto const& point : model.nodes[i].patrol)
-                if ((point.first - spot).length() <= PREDICT_REACH)
+                if ((point.first - spot).length() <= options.reach)
                 {
                     consider(i);
                     break;
                 }
 
-    // The pulled creature: the nearest to the spot, as the dungeon job takes the next creature in its way.
-    float nearest = PULL_LOOK;
-    for (auto const& [i, at] : where)
-        if ((at - spot).length() < nearest)
-        {
-            nearest = (at - spot).length();
-            result.pulled = int32(i);
-        }
+    // The pulled creature: the one given, or the nearest to the spot that attacks, as the dungeon job takes the next
+    // creature in its way.
+    if (options.pulled >= 0)
+    {
+        if (where.count(uint32(options.pulled)))
+            result.pulled = options.pulled;
+    }
+    else
+    {
+        float nearest = PULL_LOOK;
+        for (auto const& [i, at] : where)
+            if (model.nodes[i].aggroes && (at - spot).length() < nearest)
+            {
+                nearest = (at - spot).length();
+                result.pulled = int32(i);
+            }
+    }
     if (result.pulled < 0)
         return result;
 
@@ -405,11 +473,7 @@ GuildPacks::Prediction GuildPacks::Predict(const MapModel& model, Map* map, cons
             result.unknownSight++;
         return sight != Sight::No;
     };
-    auto reach = [&](const Node& node)
-    {
-        const float creatureLevel = float(node.minLevel + node.maxLevel) / 2.0f;
-        return std::max(5.0f, node.detection - (float(level) - creatureLevel)) + node.bounding + PLAYER_BOUNDING;
-    };
+    auto reach = [&](const Node& node) { return Reach(node, level); };
 
     std::map<uint32, Joined> joined;
     std::vector<uint32> queue;
@@ -466,9 +530,9 @@ GuildPacks::Prediction GuildPacks::Predict(const MapModel& model, Map* map, cons
                     add(b, "runner", from.second + uint32(along / std::max(runner.run, 1.0f)));
             }
         }
-        // Aggro at the spot, from where each creature stands now.
+        // Aggro at the spot, from where each creature that attacks on sight stands now.
         for (auto const& [b, at] : where)
-            if (!joined.count(b) && (at - spot).length() <= reach(model.nodes[b]) && sees(at, spot))
+            if (!joined.count(b) && model.nodes[b].aggroes && (at - spot).length() <= reach(model.nodes[b]) && sees(at, spot))
                 add(b, "sight", 0);
         changed = !queue.empty();
     }
@@ -479,7 +543,7 @@ GuildPacks::Prediction GuildPacks::Predict(const MapModel& model, Map* map, cons
     // earliest second, from where they are now; and what follows them.
     for (auto const& [b, at] : where)
     {
-        if (joined.count(b))
+        if (joined.count(b) || !model.nodes[b].aggroes)
             continue;
         const Node& node = model.nodes[b];
         const float r = reach(node);
@@ -567,6 +631,19 @@ std::list<std::string> GuildPacks::ListPacks(const MapModel& model, Map* map) co
         if (pack.linked) line << "; linked";
         if (pack.summons) line << "; summons";
         if (pack.flees) line << "; flees";
+        if (!pack.aggroes) line << "; neutral";
+        out.push_back(line.str().substr(0, 240));
+    }
+    if (!model.maybe.empty())
+    {
+        std::ostringstream line;
+        line << "may not be up (pooled or a spawn group's choice), left out of the packs: ";
+        bool first = true;
+        for (auto const& [name, count] : model.maybe)
+        {
+            line << (first ? "" : ", ") << name << (count > 1 ? " x" + std::to_string(count) : "");
+            first = false;
+        }
         out.push_back(line.str().substr(0, 240));
     }
     return out;
@@ -575,7 +652,7 @@ std::list<std::string> GuildPacks::ListPacks(const MapModel& model, Map* map) co
 std::list<std::string> GuildPacks::ShowPrediction(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level) const
 {
     std::list<std::string> out;
-    const Prediction prediction = Predict(model, map, spot, level);
+    const Prediction prediction = Predict(model, map, spot, level, PredictOptions());
     if (prediction.pulled < 0)
     {
         out.push_back(Format("%s (%u): no creature within %.0f yards of (%.1f %.1f %.1f)", model.name.c_str(), model.mapId,
@@ -625,16 +702,328 @@ std::list<std::string> GuildPacks::ShowPrediction(const MapModel& model, Map* ma
     return out;
 }
 
+
+std::vector<std::string> GuildPacks::BuildRoute(const MapModel& model, const std::string& name, uint32 level,
+    const std::vector<std::pair<int32, G3D::Vector3>>& stops) const
+{
+    std::vector<std::string> lines;
+
+    // The way, leg by leg from the arrival through each boss, by the travel map's routes and the navmesh paths it joins,
+    // as the job's travel takes it; a leg the travel map has no way for is a straight line, and counted.
+    std::vector<G3D::Vector3> way;
+    uint32 straightLegs = 0;
+    for (size_t k = 1; k < stops.size(); ++k)
+    {
+        const G3D::Vector3 a = stops[k - 1].second, b = stops[k].second;
+        ai::TravelPath travel = ai::TravelNodeMap::getFullPath(ai::WorldPosition(model.mapId, a.x, a.y, a.z),
+            ai::WorldPosition(model.mapId, b.x, b.y, b.z), nullptr);
+        std::vector<G3D::Vector3> leg;
+        for (const ai::WorldPosition& point : travel.getPointPath())
+            if (point.getMapId() == model.mapId)
+                leg.emplace_back(point.getX(), point.getY(), point.getZ());
+        if (leg.size() < 2)
+        {
+            leg = { a, b };
+            ++straightLegs;
+        }
+        way.insert(way.end(), way.empty() ? leg.begin() : leg.begin() + 1, leg.end());
+    }
+    // In points ROUTE_STEP apart, so that a spot back along it is a point of it.
+    std::vector<G3D::Vector3> route;
+    if (!way.empty())
+        route.push_back(way.front());
+    for (size_t i = 1; i < way.size(); ++i)
+    {
+        const G3D::Vector3 a = route.back(), b = way[i];
+        const float length = (b - a).length();
+        for (float t = ROUTE_STEP; t < length; t += ROUTE_STEP)
+            route.push_back(a + (b - a) * (t / length));
+        route.push_back(b);
+    }
+    if (route.size() < 2)
+    {
+        lines.push_back("no route: the dungeon has no stops after its arrival");
+        return lines;
+    }
+
+    // The packs on the way, in the order the route meets them, by the point of the route nearest any of them.
+    struct OnWay { float along; uint32 pack; size_t index; };
+    std::vector<OnWay> onWay;
+    for (uint32 p = 0; p < model.packs.size(); ++p)
+    {
+        const Pack& pack = model.packs[p];
+        if (!pack.aggroes)
+            continue;
+        float bestAlong = -1.0f, bestDistance = std::numeric_limits<float>::max();
+        for (uint32 i : pack.members)
+        {
+            const Node& node = model.nodes[i];
+            if (!node.aggroes)
+                continue;
+            float along;
+            G3D::Vector3 nearest;
+            const float d = DistanceToPath(node.at, route, along, nearest);
+            if (d <= Reach(node, level) + ROUTE_AHEAD && d < bestDistance)
+            {
+                bestDistance = d;
+                bestAlong = along;
+            }
+        }
+        if (bestAlong >= 0.0f)
+            onWay.push_back({ bestAlong, p, std::min(route.size() - 1, size_t(bestAlong / ROUTE_STEP)) });
+    }
+    std::sort(onWay.begin(), onWay.end(), [](const OnWay& a, const OnWay& b) { return a.along < b.along; });
+
+    std::set<int32> bossEntries;
+    std::string bossNames;
+    for (auto const& [entry, at] : stops)
+        if (entry)
+        {
+            bossEntries.insert(entry);
+            bossNames += (bossNames.empty() ? "" : ", ") + CreatureName(uint32(entry));
+        }
+
+    // Each pack in turn, with those before it dead: the spot back along the route whose pull brings this pack and least
+    // else, with the latest late arrival, nearest the middle distance; then the clearest rest spot before the next.
+    std::vector<uint32> patrols;
+    for (uint32 i = 0; i < model.nodes.size(); ++i)
+        if (!model.nodes[i].patrol.empty() && model.nodes[i].aggroes && !model.nodes[i].maybe)
+            patrols.push_back(i);
+    std::set<uint32> dead;
+    std::vector<std::string> body;
+    uint32 clean = 0, printed = 0;
+    for (size_t n = 0; n < onWay.size(); ++n)
+    {
+        const Pack& pack = model.packs[onWay[n].pack];
+        if (std::all_of(pack.members.begin(), pack.members.end(), [&](uint32 i) { return dead.count(i) > 0; }))
+            continue;
+        std::set<uint32> own(pack.members.begin(), pack.members.end());
+        auto distanceToPack = [&](const G3D::Vector3& q, int32& nearestMember)
+        {
+            float best = std::numeric_limits<float>::max();
+            for (uint32 i : pack.members)
+                if (!dead.count(i) && model.nodes[i].aggroes && (model.nodes[i].at - q).length() < best)
+                {
+                    best = (model.nodes[i].at - q).length();
+                    nearestMember = int32(i);
+                }
+            return best;
+        };
+        std::vector<size_t> tries;
+        const size_t back = size_t((PULL_FAR + ROUTE_AHEAD * 2) / ROUTE_STEP);
+        size_t fallback = onWay[n].index;
+        float fallbackOff = std::numeric_limits<float>::max();
+        for (size_t step = 0; step <= back && step <= onWay[n].index && tries.size() < PULL_TRIES; ++step)
+        {
+            const size_t j = onWay[n].index - step;
+            int32 member = -1;
+            const float d = distanceToPack(route[j], member);
+            if (d >= PULL_NEAR && d <= PULL_FAR)
+                tries.push_back(j);
+            else if (d >= PULL_NEAR / 2.0f && std::fabs(d - PULL_BEST) < fallbackOff)
+            {
+                fallbackOff = std::fabs(d - PULL_BEST);
+                fallback = j;
+            }
+        }
+        if (tries.empty())
+            tries.push_back(fallback);
+
+        struct Choice { size_t index = 0; Prediction prediction; std::vector<uint32> extras; uint32 lateFirst = 0; float distance = 0.0f; };
+        Choice best;
+        bool have = false;
+        for (size_t j : tries)
+        {
+            Choice c;
+            c.index = j;
+            int32 member = -1;
+            c.distance = distanceToPack(route[j], member);
+            PredictOptions options;
+            options.reach = ROUTE_REACH;
+            options.pulled = member;
+            options.dead = &dead;
+            c.prediction = Predict(model, nullptr, route[j], level, options);
+            for (const Joined& joined : c.prediction.pull)
+                if (!own.count(joined.node))
+                    c.extras.push_back(joined.node);
+            c.lateFirst = c.prediction.late.empty() ? std::numeric_limits<uint32>::max() : c.prediction.late.front().second;
+            const bool better = !have || c.extras.size() < best.extras.size()
+                || (c.extras.size() == best.extras.size() && (c.lateFirst > best.lateFirst
+                    || (c.lateFirst == best.lateFirst && std::fabs(c.distance - PULL_BEST) < std::fabs(best.distance - PULL_BEST))));
+            if (better)
+            {
+                best = c;
+                have = true;
+            }
+        }
+
+        std::map<std::string, uint32> names;
+        uint32 elites = 0;
+        bool boss = false;
+        for (uint32 i : pack.members)
+            if (!dead.count(i))
+            {
+                names[CreatureName(model.nodes[i].entry)]++;
+                elites += model.nodes[i].rank > 0 ? 1 : 0;
+                boss = boss || bossEntries.count(int32(model.nodes[i].entry));
+            }
+        std::string packText;
+        for (auto const& [nm, count] : names)
+            packText += (packText.empty() ? "" : ", ") + nm + (count > 1 ? " x" + std::to_string(count) : "");
+        std::string verdict;
+        if (best.extras.empty() && best.lateFirst == std::numeric_limits<uint32>::max())
+        {
+            verdict = "clean";
+            ++clean;
+        }
+        else
+        {
+            if (!best.extras.empty())
+            {
+                std::map<std::string, uint32> extraNames;
+                for (uint32 i : best.extras)
+                    extraNames[CreatureName(model.nodes[i].entry)]++;
+                verdict = "also brings";
+                for (auto const& [nm, count] : extraNames)
+                    verdict += " " + nm + (count > 1 ? " x" + std::to_string(count) : "") + ",";
+                verdict.pop_back();
+            }
+            if (best.lateFirst != std::numeric_limits<uint32>::max())
+                verdict += (verdict.empty() ? "" : "; ") + Format("%s from %us",
+                    CreatureName(model.nodes[best.prediction.late.front().node].entry).c_str(), best.lateFirst);
+            if (best.extras.empty())
+                ++clean;   // a late arrival only: the pull itself is clean
+        }
+        const G3D::Vector3 spot = route[best.index];
+        ++printed;
+        body.push_back(Format("%u. pack %u%s, %u (%u elite): %s; pull at (%.1f %.1f %.1f) %.0f yd, %s", uint32(n + 1), onWay[n].pack,
+            boss ? " boss" : "", uint32(pack.members.size()), elites, packText.c_str(), spot.x, spot.y, spot.z, best.distance,
+            verdict.c_str()).substr(0, 240));
+
+        for (uint32 i : pack.members)
+            dead.insert(i);
+        for (const Joined& joined : best.prediction.pull)
+            dead.insert(joined.node);
+
+        // Rest: the clearest point of the route between this pack and the next pull's spots.
+        const size_t from = onWay[n].index, to = n + 1 < onWay.size() ? onWay[n + 1].index : route.size() - 1;
+        float bestMargin = -std::numeric_limits<float>::max();
+        size_t restAt = from;
+        for (size_t j = from; j <= to && j < route.size(); j += 4)
+        {
+            float margin = std::numeric_limits<float>::max();
+            for (uint32 i : Near(model, route[j], ROUTE_REACH))
+            {
+                const Node& node = model.nodes[i];
+                if (dead.count(i) || node.maybe || !node.aggroes)
+                    continue;
+                margin = std::min(margin, (node.at - route[j]).length() - Reach(node, level)
+                    - (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f));
+            }
+            for (uint32 i : patrols)
+                if (!dead.count(i))
+                    for (auto const& point : model.nodes[i].patrol)
+                        margin = std::min(margin, (point.first - route[j]).length() - Reach(model.nodes[i], level));
+            if (margin > bestMargin)
+            {
+                bestMargin = margin;
+                restAt = j;
+            }
+        }
+        const G3D::Vector3 rest = route[restAt];
+        if (bestMargin >= REST_MARGIN)
+            body.push_back(Format("   rest at (%.1f %.1f %.1f), %.0f yd clear", rest.x, rest.y, rest.z,
+                std::min(bestMargin, 99.0f)));
+        else
+            body.push_back(Format("   no clear rest before the next pull; best (%.1f %.1f %.1f), %.0f yd short",
+                rest.x, rest.y, rest.z, REST_MARGIN - bestMargin));
+    }
+
+    float length = 0.0f;
+    for (size_t i = 1; i < route.size(); ++i)
+        length += (route[i] - route[i - 1]).length();
+    lines.push_back(Format("%s (%u), level %u: %u bosses (%s), %.0f yd%s; %u packs on the way, %u with a clean pull",
+        name.c_str(), model.mapId, level, uint32(stops.size() - 1), bossNames.c_str(), length,
+        straightLegs ? Format(", %u legs straight for want of a route", straightLegs).c_str() : "", printed,
+        clean).substr(0, 300));
+    lines.insert(lines.end(), body.begin(), body.end());
+    return lines;
+}
+
+std::list<std::string> GuildPacks::HandleRoute(const std::vector<std::string>& words)
+{
+    // route <dungeon> [character] [page]: by dungeon name, not map, since one map can hold wings run apart, as
+    // Stratholme's and Dire Maul's do.
+    if (words.size() < 2)
+        return { "guildbot packs route <dungeon> [character] [page]   the way the job walks it, pull and rest spots" };
+    const std::string& dungeon = words[1];
+    uint32 page = 1;
+    std::string characterName;
+    for (size_t i = 2; i < words.size(); ++i)
+    {
+        if (std::all_of(words[i].begin(), words[i].end(), ::isdigit))
+            page = std::max(1u, uint32(atoi(words[i].c_str())));
+        else
+            characterName = words[i];
+    }
+    // A character decides the faction's steps and the party's level; any one online when none is named.
+    Player* leader = nullptr;
+    if (!characterName.empty())
+        leader = ObjectAccessor::FindPlayerByName(characterName.c_str());
+    else
+        for (auto const& [guid, player] : sObjectAccessor.GetPlayers())
+            if (player && player->IsInWorld())
+            {
+                leader = player;
+                break;
+            }
+    if (!leader)
+        return { characterName.empty() ? "a route needs a character online" : "no character " + characterName + " online" };
+
+    const std::string key = dungeon + "/" + std::to_string(leader->GetLevel()) + "/" + std::to_string(uint32(leader->GetTeam()));
+    auto cached = routes.find(key);
+    if (cached == routes.end())
+    {
+        uint32 mapId = 0;
+        std::vector<std::pair<int32, ai::WorldPosition>> stops;
+        std::string error;
+        if (!GuildDungeon::BossRoute(dungeon, leader, mapId, stops, error))
+            return { error };
+        std::vector<std::pair<int32, G3D::Vector3>> points;
+        for (auto const& [entry, place] : stops)
+            points.push_back({ entry, G3D::Vector3(place.getX(), place.getY(), place.getZ()) });
+        cached = routes.emplace(key, BuildRoute(Model(mapId), dungeon, leader->GetLevel(), points)).first;
+    }
+
+    const std::vector<std::string>& lines = cached->second;
+    const size_t perPage = MAX_LINES - 2;
+    const size_t pages = lines.size() <= 1 ? 1 : (lines.size() - 1 + perPage - 1) / perPage;
+    std::list<std::string> out;
+    out.push_back(lines.front());
+    for (size_t i = 1 + (page - 1) * perPage; i < lines.size() && i < 1 + page * perPage; ++i)
+        out.push_back(lines[i]);
+    if (page < pages)
+        out.push_back(Format("page %u of %u; next: guildbot packs route %s %s %u", page, uint32(pages), dungeon.c_str(),
+            leader->GetName(), page + 1));
+    return out;
+}
+
 std::list<std::string> GuildPacks::HandleCommand(const std::string& args)
 {
     std::istringstream in(args);
     std::vector<std::string> words;
     for (std::string word; in >> word;)
         words.push_back(word);
+    if (!words.empty() && words[0] == "route")
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        return HandleRoute(words);
+    }
     // <map>, <map> <instance>, <map> x y z, <map> <instance> x y z, <map> <instance> x y z <level>; instance 0 is spawns only.
     if (words.empty() || words.size() == 3 || words.size() > 6)
         return { "guildbot packs <map> [instance] [x y z [level]]   the map's packs, or what a pull from a spot brings",
-                 "  with x y z and no instance, from spawns only; instance 0 for spawns with a level" };
+                 "  with x y z and no instance, from spawns only; instance 0 for spawns with a level",
+                 "guildbot packs route <dungeon> [character] [page]   the way the job walks it, with pull and rest spots" };
 
     const uint32 mapId = uint32(atoi(words[0].c_str()));
     MapEntry const* entry = sMapStore.LookupEntry(mapId);

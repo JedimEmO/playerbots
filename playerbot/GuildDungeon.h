@@ -93,6 +93,11 @@ public:
     static uint32 StoneMap(uint32 areaId);
     // Where the dungeon's stone stands; false when it has none.
     static bool StonePlace(uint32 mapId, ai::WorldPosition& place);
+    // The way the job walks a dungeon, for the dungeon model: where the entrance puts a party, then each boss's spawn in
+    // the job's order, nearest the stop before, with the boss's entry (0 for the arrival). The leader decides the faction's
+    // steps. It reads the tables and the travel map and takes no lock of the runs. False, with why, when it does not resolve.
+    static bool BossRoute(const std::string& name, Player* leader, uint32& mapId,
+        std::vector<std::pair<int32, ai::WorldPosition>>& stops, std::string& error);
     // A guild character in a group, at the stone of the dungeon its leader is in: it goes in after the leader.
     static void FollowByStone(Player* member);
     // The stone, for the leader on its way to the dungeon; null when the dungeon has none.

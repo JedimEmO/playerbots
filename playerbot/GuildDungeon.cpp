@@ -785,6 +785,42 @@ void GuildDungeon::AddHandLinks()
     }
 }
 
+bool GuildDungeon::BossRoute(const std::string& name, Player* leader, uint32& mapId,
+    std::vector<std::pair<int32, WorldPosition>>& stops, std::string& error)
+{
+    Dungeon dungeon;
+    if (!leader || !Resolve(name, leader, dungeon, error))
+    {
+        if (!leader)
+            error = "a route needs a character for its faction and level";
+        return false;
+    }
+    mapId = dungeon.mapId;
+    const AreaTrigger* at = dungeon.entrance;
+    stops.clear();
+    stops.push_back({ 0, WorldPosition(dungeon.mapId, at->target_X, at->target_Y, at->target_Z, at->target_Orientation) });
+    for (size_t i = 0; i < dungeon.bosses.size(); ++i)
+    {
+        // The boss's spawn nearest the stop before, as a boss placed more than once is met there first.
+        const WorldPosition& before = stops.back().second;
+        WorldPosition best;
+        float bestDistance = -1.0f;
+        for (uint32 spawn : dungeon.spawns[i])
+            if (CreatureData const* data = sObjectMgr.GetCreatureData(spawn))
+            {
+                const WorldPosition place(data->mapid, data->posX, data->posY, data->posZ);
+                if (bestDistance < 0.0f || place.distance(before) < bestDistance)
+                {
+                    bestDistance = place.distance(before);
+                    best = place;
+                }
+            }
+        if (bestDistance >= 0.0f)
+            stops.push_back({ dungeon.bosses[i], best });
+    }
+    return true;
+}
+
 bool GuildDungeon::Resolve(const std::string& name, Player* leader, Dungeon& dungeon, std::string& error)
 {
     error = Validate(name);

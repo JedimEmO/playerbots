@@ -7,11 +7,13 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 class Map;
+class Player;
 
 // The dungeon model's packs and its pull predictor, from the core's own rules: what a pull of one creature brings.
 // It reads the world database's spawns as the core holds them, and the live instance when there is one; nothing in
@@ -22,6 +24,7 @@ class Map;
 // and the packs, the creatures one pull brings by call for help and links alone.
 // A prediction is for one instance and one spot: the pulled creature, what joins it and how, and apart from those,
 // the wanderers and patrols that could reach the fight later, with the earliest second.
+// A route is the way the dungeon job walks a dungeon, with a pull spot for each pack near it and rest spots between.
 //
 // It runs on the world thread outside map updates only, since it reads the instance's creatures, its line of sight and
 // its navmesh query. It has its own lock and calls nothing in GuildDungeon.
@@ -55,6 +58,8 @@ private:
         uint32 rank = 0;
         uint8 movement = 0;            // the core's motion type: 1 wanders, 2 walks a path
         bool caster = false;
+        bool aggroes = true;           // hostile to players, so it attacks on sight; a neutral one only answers calls
+        bool maybe = false;            // one of a pool's or spawn group's spawns, of which fewer are up than listed
         std::vector<std::pair<G3D::Vector3, uint32>> patrol; // its path's points and the wait at each, in ms
         // From its EventAI scripts: the entries it summons, whether on its death, whether it flees for help at low health,
         // and a scripted call-for-help radius.
@@ -77,6 +82,7 @@ private:
         float radius = 0.0f;
         uint32 elites = 0;
         bool patrol = false, linked = false, summons = false, flees = false;
+        bool aggroes = false;          // any of it attacks on sight
     };
 
     struct MapModel
@@ -87,6 +93,7 @@ private:
         std::unordered_map<uint32, uint32> bySpawn;          // spawn guid to node
         std::unordered_map<int64, std::vector<uint32>> cells; // 10 yard cells of spawn positions to nodes
         std::vector<Pack> packs;
+        std::map<std::string, uint32> maybe;                 // spawns that may not be up, by name, left out of the packs
     };
 
     // One creature in a prediction: its node, where it is now, how it joins and the second it is expected.
@@ -108,16 +115,31 @@ private:
         bool live = false;
     };
 
+    // What a prediction looks at: creatures within reach of the spot, a pulled creature when it is given, and creatures
+    // already dead, as the packs a route clears before.
+    struct PredictOptions
+    {
+        float reach = 150.0f;
+        int32 pulled = -1;
+        const std::set<uint32>* dead = nullptr;
+    };
+
     MapModel& Model(uint32 mapId);
     void Build(MapModel& model);
     void LinkAndGroup(MapModel& model);
     std::vector<uint32> Near(const MapModel& model, const G3D::Vector3& at, float radius) const;
-    Prediction Predict(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level) const;
+    Prediction Predict(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level,
+        const PredictOptions& options) const;
+    float Reach(const Node& node, uint32 level) const;
+    std::vector<std::string> BuildRoute(const MapModel& model, const std::string& name, uint32 level,
+        const std::vector<std::pair<int32, G3D::Vector3>>& stops) const;
+    std::list<std::string> HandleRoute(const std::vector<std::string>& words);
     std::list<std::string> ListPacks(const MapModel& model, Map* map) const;
     std::list<std::string> ShowPrediction(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level) const;
 
     std::mutex lock;
     std::map<uint32, std::unique_ptr<MapModel>> models;
+    std::map<std::string, std::vector<std::string>> routes; // printed routes, by dungeon, level and faction
 };
 
 #define sGuildPacks GuildPacks::instance()
