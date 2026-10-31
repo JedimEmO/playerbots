@@ -1,5 +1,6 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/GuildBench.h"
+#include "Accounts/AccountMgr.h"
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildDungeon.h"
 #include "playerbot/PlayerbotFactory.h"
@@ -54,6 +55,8 @@ std::list<std::string> GuildBench::Help()
         "  bench pet <name>                           a hunter's pet with its spells",
         "  bench keys <name> [dungeon]                the keys to the locked doors of the dungeon named, or else of its order's",
         "  bench setup <name> <level> [quality] [dungeon]  all of the above, in that order",
+        "  bench kill <name>                          kill it, for the lab to see a run recover; lab and bench accounts only",
+        "  bench mana <name> <percent>                set its mana to a share of its most; lab and bench accounts only",
         "All but level need the character online and played by the engine; level works offline as a level change only.",
     };
 }
@@ -114,6 +117,19 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
     // The factory needs the bot's AI, and a player on the character is the player's business.
     if (!bot->GetPlayerbotAI())
         return { "a player is playing " + name + "; the bench works only while the engine plays it" };
+
+    if (sub == "kill" || sub == "mana")
+    {
+        // Only for the lab's and the benches' own accounts: the lab causes a death or a low pool on purpose,
+        // to see a run recover from it, and a player's character is never its subject.
+        std::string account;
+        if (!sAccountMgr.GetName(sObjectMgr.GetPlayerAccountIdByGUID(guid), account)
+            || !(account.rfind("LAB", 0) == 0 || account.rfind("GBENCH", 0) == 0) || account == "LABGM")
+            return { name + " is not on a lab or bench account; kill and mana are for those only" };
+        if (sub == "kill")
+            return Kill(bot, name);
+        return Mana(bot, name, first);
+    }
 
     if (sub == "level")
         return Level(bot, name, uint32(atoi(first.c_str())));
@@ -347,4 +363,24 @@ std::list<std::string> GuildBench::Pet(Player* bot)
     factory.InitPetSpells();
     bot->SaveToDB();
     return { std::string(bot->GetName()) + (bot->GetPet() ? " has a pet: " + std::string(bot->GetPet()->GetName()) : " has no pet; no tameable creature fits its level") };
+}
+
+std::list<std::string> GuildBench::Kill(Player* bot, const std::string& name)
+{
+    if (!bot->IsAlive())
+        return { name + " is already dead" };
+    // As the core's .die does: damage enough to kill, so the death goes the usual way.
+    Unit::DealDamage(bot, bot, bot->GetHealth(), nullptr, DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
+    return { name + (bot->IsAlive() ? " survived" : " is dead") };
+}
+
+std::list<std::string> GuildBench::Mana(Player* bot, const std::string& name, const std::string& percent)
+{
+    const int share = atoi(percent.c_str());
+    if (percent.empty() || share < 0 || share > 100)
+        return { "usage: guildbot bench mana <name> <percent 0 to 100>" };
+    if (bot->GetPowerType() != POWER_MANA || !bot->GetMaxPower(POWER_MANA))
+        return { name + " has no mana" };
+    bot->SetPower(POWER_MANA, bot->GetMaxPower(POWER_MANA) * uint32(share) / 100);
+    return { name + " has " + std::to_string(share) + "% mana" };
 }

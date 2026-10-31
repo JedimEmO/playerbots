@@ -30,4 +30,7 @@ private:
     static std::list<std::string> Pet(Player* bot);
     // The keys for the dungeon named, or with none named, the one the character's order names.
     static std::list<std::string> Keys(Player* bot, const std::string& dungeonName = "");
+    // For the lab's recovery scenarios: a death, as the core's .die gives one, and a mana pool set low.
+    static std::list<std::string> Kill(Player* bot, const std::string& name);
+    static std::list<std::string> Mana(Player* bot, const std::string& name, const std::string& percent);
 };
