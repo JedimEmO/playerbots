@@ -72,6 +72,9 @@ namespace
     constexpr int32 ROUTE_LEVEL_NEAR = 5;
     // A stand point is taken where a navmesh path to it ends, when that is within this of it.
     constexpr float STAND_SLACK = 1.5f;
+    // How many packs deep a route goes to clear a pull spot another creature reaches: that creature's pack is planned
+    // first, and its own spot may need one more before it.
+    constexpr int32 ROUTE_CLEAR_DEPTH = 2;
 
     int64 CellKey(float x, float y)
     {
@@ -832,8 +835,10 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
     for (auto const& [entry, at] : r.bosses)
         bossEntries.insert(entry);
 
-    // Each pack in turn, with those before it dead: the spot back along the route whose pull brings this pack and least
-    // else, with the latest late arrival, nearest the middle distance.
+    // Each pack in turn, with those before it dead: the spot whose approach pulls nothing else, then whose pull brings
+    // least else, with the latest late arrival, nearest the middle distance. A spot is reached by a creature outside the
+    // pack when its aggro range covers the spot, wandering included; walking there pulls it. When every spot is reached,
+    // the nearest such creature's pack is planned first as a stop of its own, and this one again with it dead.
     std::vector<uint32> patrols;
     for (uint32 i = 0; i < model.nodes.size(); ++i)
         if (!model.nodes[i].patrol.empty() && model.nodes[i].aggroes && !model.nodes[i].maybe)
@@ -841,12 +846,46 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
     std::set<uint32> dead;
     std::vector<size_t> pullSpots;              // each stop's pull spot's point on the way
     std::vector<std::set<uint32>> deadAfter;    // what is dead once each stop's pull is done
-    for (size_t n = 0; n < onWay.size(); ++n)
+
+    auto reachedBy = [&](const G3D::Vector3& spot, const std::set<uint32>& own)
     {
-        const Pack& pack = model.packs[onWay[n].pack];
-        if (std::all_of(pack.members.begin(), pack.members.end(), [&](uint32 i) { return dead.count(i) > 0; }))
-            continue;
-        std::set<uint32> own(pack.members.begin(), pack.members.end());
+        std::vector<uint32> found;
+        for (uint32 i : Near(model, spot, ROUTE_REACH / 2.0f))
+        {
+            const Node& node = model.nodes[i];
+            if (own.count(i) || dead.count(i) || node.maybe || !node.aggroes)
+                continue;
+            if ((node.at - spot).length() <= Reach(node, level) + (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f))
+                found.push_back(i);
+        }
+        return found;
+    };
+    // The point of the way nearest a pack, by any of its living members that attack.
+    auto anchorOf = [&](const Pack& pack)
+    {
+        float bestAlong = 0.0f, bestDistance = std::numeric_limits<float>::max();
+        for (uint32 i : pack.members)
+        {
+            if (dead.count(i) || !model.nodes[i].aggroes)
+                continue;
+            float along;
+            G3D::Vector3 nearest;
+            const float d = DistanceToPath(model.nodes[i].at, route, along, nearest);
+            if (d < bestDistance)
+            {
+                bestDistance = d;
+                bestAlong = along;
+            }
+        }
+        return std::make_pair(bestAlong, std::min(route.size() - 1, size_t(bestAlong / ROUTE_STEP + 0.5f)));
+    };
+
+    std::function<bool(uint32, int32)> plan = [&](uint32 packId, int32 depth) -> bool
+    {
+        const Pack& pack = model.packs[packId];
+        if (std::all_of(pack.members.begin(), pack.members.end(), [&](uint32 i) { return dead.count(i) > 0 || !model.nodes[i].aggroes; }))
+            return false;
+        const std::set<uint32> own(pack.members.begin(), pack.members.end());
         auto distanceToPack = [&](const G3D::Vector3& q, int32& nearestMember)
         {
             float best = std::numeric_limits<float>::max();
@@ -858,94 +897,122 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 }
             return best;
         };
-        std::vector<size_t> tries;
-        const size_t back = size_t((PULL_FAR + ROUTE_AHEAD * 2) / ROUTE_STEP);
-        size_t fallback = onWay[n].index;
-        float fallbackOff = std::numeric_limits<float>::max();
-        for (size_t step = 0; step <= back && step <= onWay[n].index && tries.size() < PULL_TRIES; ++step)
-        {
-            const size_t j = onWay[n].index - step;
-            int32 member = -1;
-            const float d = distanceToPack(route[j], member);
-            if (d >= PULL_NEAR && d <= PULL_FAR)
-                tries.push_back(j);
-            else if (d >= PULL_NEAR / 2.0f && std::fabs(d - PULL_BEST) < fallbackOff)
-            {
-                fallbackOff = std::fabs(d - PULL_BEST);
-                fallback = j;
-            }
-        }
-        if (tries.empty())
-            tries.push_back(fallback);
 
         struct Choice { G3D::Vector3 spot; size_t index = 0; bool offWay = false; int32 member = -1; Prediction prediction;
-                        std::vector<uint32> extras; uint32 lateFirst = 0; float distance = 0.0f; };
+                        std::vector<uint32> extras, reached; uint32 lateFirst = 0; float distance = 0.0f; };
         Choice best;
         bool have = false;
-        auto weigh = [&](const G3D::Vector3& spot, size_t index, bool offWay, int32 member)
+        for (int32 round = 0; round <= ROUTE_CLEAR_DEPTH; ++round)
         {
-            Choice c;
-            c.spot = spot;
-            c.index = index;
-            c.offWay = offWay;
-            c.member = member;
-            c.distance = (model.nodes[member].at - spot).length();
-            PredictOptions options;
-            options.reach = ROUTE_REACH;
-            options.pulled = member;
-            options.dead = &dead;
-            c.prediction = Predict(model, nullptr, spot, level, options);
-            for (const Joined& joined : c.prediction.pull)
-                if (!own.count(joined.node))
-                    c.extras.push_back(joined.node);
-            c.lateFirst = c.prediction.late.empty() ? std::numeric_limits<uint32>::max() : c.prediction.late.front().second;
-            const bool better = !have || c.extras.size() < best.extras.size()
-                || (c.extras.size() == best.extras.size() && (c.lateFirst > best.lateFirst
-                    || (c.lateFirst == best.lateFirst && std::fabs(c.distance - PULL_BEST) < std::fabs(best.distance - PULL_BEST))));
-            if (better)
+            const auto [along, anchor] = anchorOf(pack);
+            have = false;
+            auto weigh = [&](const G3D::Vector3& spot, size_t index, bool offWay, int32 member)
             {
-                best = c;
-                have = true;
-            }
-        };
-        for (size_t j : tries)
-        {
-            int32 member = -1;
-            distanceToPack(route[j], member);
-            if (member >= 0)
-                weigh(route[j], j, false, member);
-        }
-        // Where the way passes no nearer than PULL_FAR, a spot off it does better: PULL_BEST from the nearest of the pack
-        // toward the way's nearest point, on the navmesh by a path from the way, and in sight of the creature.
-        if (have && best.distance > PULL_FAR + ROUTE_STEP)
-        {
-            int32 member = -1;
-            distanceToPack(route[onWay[n].index], member);
-            if (member >= 0)
-            {
-                const G3D::Vector3 from = model.nodes[member].at, toward = route[onWay[n].index];
-                const float length = (toward - from).length();
-                if (length > PULL_NEAR)
+                Choice c;
+                c.spot = spot;
+                c.index = index;
+                c.offWay = offWay;
+                c.member = member;
+                c.distance = (model.nodes[member].at - spot).length();
+                c.reached = reachedBy(spot, own);
+                PredictOptions options;
+                options.reach = ROUTE_REACH;
+                options.pulled = member;
+                options.dead = &dead;
+                c.prediction = Predict(model, nullptr, spot, level, options);
+                for (const Joined& joined : c.prediction.pull)
+                    if (!own.count(joined.node))
+                        c.extras.push_back(joined.node);
+                c.lateFirst = c.prediction.late.empty() ? std::numeric_limits<uint32>::max() : c.prediction.late.front().second;
+                const bool better = !have || c.reached.size() < best.reached.size()
+                    || (c.reached.size() == best.reached.size() && (c.extras.size() < best.extras.size()
+                        || (c.extras.size() == best.extras.size() && (c.lateFirst > best.lateFirst
+                            || (c.lateFirst == best.lateFirst && std::fabs(c.distance - PULL_BEST) < std::fabs(best.distance - PULL_BEST))))));
+                if (better)
                 {
-                    const G3D::Vector3 wanted = from + (toward - from) * (PULL_BEST / length);
+                    best = c;
+                    have = true;
+                }
+            };
+
+            // On the way: points PULL_NEAR to PULL_FAR back from the pack, or the one nearest PULL_BEST.
+            std::vector<size_t> tries;
+            const size_t back = size_t((PULL_FAR + ROUTE_AHEAD * 2) / ROUTE_STEP);
+            size_t fallback = anchor;
+            float fallbackOff = std::numeric_limits<float>::max();
+            for (size_t step = 0; step <= back && step <= anchor && tries.size() < PULL_TRIES; ++step)
+            {
+                const size_t j = anchor - step;
+                int32 member = -1;
+                const float d = distanceToPack(route[j], member);
+                if (d >= PULL_NEAR && d <= PULL_FAR)
+                    tries.push_back(j);
+                else if (d >= PULL_NEAR / 2.0f && std::fabs(d - PULL_BEST) < fallbackOff)
+                {
+                    fallbackOff = std::fabs(d - PULL_BEST);
+                    fallback = j;
+                }
+            }
+            if (tries.empty())
+                tries.push_back(fallback);
+            for (size_t j : tries)
+            {
+                int32 member = -1;
+                distanceToPack(route[j], member);
+                if (member >= 0)
+                    weigh(route[j], j, false, member);
+            }
+
+            // Off the way, when the way passes no nearer than PULL_FAR or every spot on it is reached: PULL_BEST from the
+            // nearest of the pack, toward the way and turned either side, on the navmesh by a path from the way, and in
+            // sight of the creature.
+            if (have && (best.distance > PULL_FAR + ROUTE_STEP || !best.reached.empty()))
+            {
+                int32 member = -1;
+                distanceToPack(route[anchor], member);
+                if (member >= 0)
+                {
+                    const G3D::Vector3 from = model.nodes[member].at, toward = route[anchor];
+                    G3D::Vector3 heading = toward - from;
+                    heading.z = 0.0f;
+                    if (heading.length() < 1.0f)
+                        heading = G3D::Vector3(1.0f, 0.0f, 0.0f);
+                    heading = heading / heading.length();
                     const ai::WorldPosition onWayPoint(model.mapId, toward.x, toward.y, toward.z);
-                    const ai::WorldPosition target(model.mapId, wanted.x, wanted.y, wanted.z);
-                    const std::vector<ai::WorldPosition> path = onWayPoint.getPathTo(target, nullptr);
-                    if (target.isPathTo(path, 3.0f))
+                    for (float degrees : { 0.0f, 35.0f, -35.0f, 70.0f, -70.0f })
                     {
+                        const float angle = degrees * float(M_PI) / 180.0f;
+                        const G3D::Vector3 direction(heading.x * std::cos(angle) - heading.y * std::sin(angle),
+                            heading.x * std::sin(angle) + heading.y * std::cos(angle), 0.0f);
+                        const G3D::Vector3 wanted = from + direction * PULL_BEST;
+                        const ai::WorldPosition target(model.mapId, wanted.x, wanted.y, toward.z);
+                        const std::vector<ai::WorldPosition> path = onWayPoint.getPathTo(target, nullptr);
+                        if (!target.isPathTo(path, 3.0f))
+                            continue;
                         const G3D::Vector3 spot(path.back().getX(), path.back().getY(), path.back().getZ());
                         if (VMAP::VMapFactory::createOrGetVMapManager()->isInLineOfSight(model.mapId, spot.x, spot.y, spot.z + EYE,
                             from.x, from.y, from.z + EYE, false))
-                            weigh(spot, onWay[n].index, true, member);
+                            weigh(spot, anchor, true, member);
                     }
                 }
             }
+            if (!have || best.reached.empty() || depth >= ROUTE_CLEAR_DEPTH || round == ROUTE_CLEAR_DEPTH)
+                break;
+            // Every spot is reached: the nearest creature that reaches the best one is pulled first, from its own pack's spot.
+            uint32 first = best.reached.front();
+            for (uint32 i : best.reached)
+                if ((model.nodes[i].at - best.spot).length() < (model.nodes[first].at - best.spot).length())
+                    first = i;
+            const uint32 otherPack = model.nodes[first].pack;
+            if (otherPack == packId || otherPack >= model.packs.size() || !plan(otherPack, depth + 1))
+                break;
+            r.stops.back().clearsWay = true;
         }
         if (!have)
-            continue;
+            return false;
 
         Stop stop;
-        stop.pack = onWay[n].pack;
+        stop.pack = packId;
         for (uint32 i : pack.members)
             if (!dead.count(i))
             {
@@ -953,7 +1020,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 stop.boss = stop.boss || bossEntries.count(int32(model.nodes[i].entry));
             }
         stop.pulled = model.nodes[best.member].spawn;
-        stop.along = onWay[n].along;
+        stop.along = anchorOf(pack).first;
         stop.pullSpot = best.spot;
         stop.pullAlong = float(best.index) * ROUTE_STEP;
         stop.offWay = best.offWay;
@@ -961,6 +1028,9 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         stop.clean = best.extras.empty();
         for (uint32 i : best.extras)
             stop.extras.push_back(model.nodes[i].spawn);
+        stop.spotClear = best.reached.empty();
+        for (uint32 i : best.reached)
+            stop.reachedBy.push_back(model.nodes[i].spawn);
         if (!best.prediction.late.empty())
         {
             stop.lateSpawn = model.nodes[best.prediction.late.front().node].spawn;
@@ -975,7 +1045,10 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         for (const Joined& joined : best.prediction.pull)
             dead.insert(joined.node);
         deadAfter.push_back(dead);
-    }
+        return true;
+    };
+    for (size_t n = 0; n < onWay.size(); ++n)
+        plan(onWay[n].pack, 0);
 
     // Rest spots, after each pull: the clear point of the way nearest the next pull's spot, from the ground just cleared
     // behind this pull up to that spot. Clear is REST_MARGIN outside every living creature's aggro range, a wanderer's
@@ -1066,8 +1139,19 @@ std::vector<std::string> GuildPacks::PrintRoute(const MapModel& model, const Rou
         for (auto const& [nm, count] : names)
             packText += (packText.empty() ? "" : ", ") + nm + (count > 1 ? " x" + std::to_string(count) : "");
         std::string verdict;
+        if (!stop.spotClear)
+        {
+            std::map<std::string, uint32> reachNames;
+            for (uint32 spawn : stop.reachedBy)
+                reachNames[CreatureName(entryOf(spawn))]++;
+            verdict = "spot reached by";
+            for (auto const& [nm, count] : reachNames)
+                verdict += " " + nm + (count > 1 ? " x" + std::to_string(count) : "") + ",";
+            verdict.pop_back();
+            verdict += "; ";
+        }
         if (stop.clean && !stop.lateSpawn)
-            verdict = "clean";
+            verdict += "clean";
         else
         {
             if (!stop.extras.empty())
@@ -1075,17 +1159,17 @@ std::vector<std::string> GuildPacks::PrintRoute(const MapModel& model, const Rou
                 std::map<std::string, uint32> extraNames;
                 for (uint32 spawn : stop.extras)
                     extraNames[CreatureName(entryOf(spawn))]++;
-                verdict = "also brings";
+                verdict += "also brings";
                 for (auto const& [nm, count] : extraNames)
                     verdict += " " + nm + (count > 1 ? " x" + std::to_string(count) : "") + ",";
                 verdict.pop_back();
             }
             if (stop.lateSpawn)
-                verdict += (verdict.empty() ? "" : "; ") + Format("%s from %us", CreatureName(entryOf(stop.lateSpawn)).c_str(),
+                verdict += (verdict.empty() || verdict.back() == ' ' ? "" : "; ") + Format("%s from %us", CreatureName(entryOf(stop.lateSpawn)).c_str(),
                     stop.lateSecond);
         }
-        lines.push_back(Format("%u. pack %u%s, %u (%u elite): %s; pull at (%.1f %.1f %.1f)%s %.0f yd, %s; %u stand", uint32(n + 1),
-            stop.pack, stop.boss ? " boss" : "", uint32(stop.spawns.size()), elites, packText.c_str(), stop.pullSpot.x, stop.pullSpot.y,
+        lines.push_back(Format("%u. pack %u%s%s, %u (%u elite): %s; pull at (%.1f %.1f %.1f)%s %.0f yd, %s; %u stand", uint32(n + 1),
+            stop.pack, stop.boss ? " boss" : "", stop.clearsWay ? " first, to clear the next spot" : "", uint32(stop.spawns.size()), elites, packText.c_str(), stop.pullSpot.x, stop.pullSpot.y,
             stop.pullSpot.z, stop.offWay ? " off the way" : "", stop.pullDistance, verdict.c_str(), uint32(stop.stand.size())).substr(0, 240));
         const G3D::Vector3 next = n + 1 < route.stops.size() ? route.stops[n + 1].pullSpot : route.points.back();
         if (stop.restClear)

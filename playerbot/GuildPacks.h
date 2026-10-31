@@ -55,6 +55,12 @@ public:
         float pullDistance = 0.0f;              // yards from the pull spot to the pulled creature
         bool clean = false;                     // the pull brings nothing beyond the pack
         std::vector<uint32> extras;             // what the pull brings beyond the pack
+        // Whether no creature outside the pack reaches the pull spot itself, by its aggro range or its wandering. One that
+        // does is pulled by walking there, so a stop with spotClear false should not be approached. The route plans such
+        // a creature's pack first where it can, so this is false only when that failed.
+        bool spotClear = true;
+        std::vector<uint32> reachedBy;          // the creatures outside the pack that reach the pull spot
+        bool clearsWay = false;                 // planned first, because its pack reached the next stop's pull spot
         uint32 lateSpawn = 0;                   // the earliest wanderer or patrol that could reach the fight, or 0
         uint32 lateSecond = 0;                  // the second it could
         // Where the party stands at the pull spot: four points on the navmesh 4 to 8 yards behind it, on the side away
