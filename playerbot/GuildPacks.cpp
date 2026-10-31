@@ -897,10 +897,16 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         {
             if (dead.count(i) || own.count(i))
                 continue;
+            const float reach = Reach(model.nodes[i], level) + REACH_MARGIN;
             float along;
             G3D::Vector3 nearest;
-            if (DistanceToPath(spot, patrolPaths[i], along, nearest) <= Reach(model.nodes[i], level) + REACH_MARGIN)
-                found.patrol.push_back(i);
+            if (DistanceToPath(spot, patrolPaths[i], along, nearest) > reach)
+                continue;
+            // One pacing a path that never leaves its reach of the spot, as the foundry's Goblin Engineers do, never moves
+            // off: it is as one standing still.
+            const bool paces = std::all_of(patrolPaths[i].begin(), patrolPaths[i].end(),
+                [&](const G3D::Vector3& point) { return (point - spot).length() <= reach; });
+            (paces ? found.strict : found.patrol).push_back(i);
         }
         return found;
     };
@@ -1162,14 +1168,21 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         stop.clean = best.extras.empty();
         for (uint32 i : best.extras)
             stop.extras.push_back(model.nodes[i].spawn);
+        // A strict reacher of another pack reaches as one standing still does, whatever its movement: a wanderer at its
+        // spawn, a patrol pacing within reach. Waiting for it would never end. The pack's own keep their movement.
+        auto strictKind = [&](uint32 i, bool ownPack)
+        {
+            if (!ownPack)
+                return ReachKind::Static;
+            return model.nodes[i].movement == RANDOM_MOTION_TYPE ? ReachKind::Wanderer
+                : model.nodes[i].movement == WAYPOINT_MOTION_TYPE ? ReachKind::Patrol : ReachKind::Static;
+        };
         stop.spotClear = best.reached.strict.empty();
         for (uint32 i : best.reached.strict)
         {
             stop.reachedBy.push_back(model.nodes[i].spawn);
             const bool ownPack = own.count(i) > 0;
-            const ReachKind kind = model.nodes[i].movement == RANDOM_MOTION_TYPE ? ReachKind::Wanderer
-                : model.nodes[i].movement == WAYPOINT_MOTION_TYPE ? ReachKind::Patrol : ReachKind::Static;
-            stop.reachers.push_back({ model.nodes[i].spawn, kind, ownPack });
+            stop.reachers.push_back({ model.nodes[i].spawn, strictKind(i, ownPack), ownPack });
         }
         for (uint32 i : best.reached.wander)
             stop.reachers.push_back({ model.nodes[i].spawn, ReachKind::Wanderer, false });
@@ -1184,10 +1197,8 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         for (uint32 i : leg.strict)
         {
             stop.legReachedBy.push_back(model.nodes[i].spawn);
-            const ReachKind kind = model.nodes[i].movement == RANDOM_MOTION_TYPE ? ReachKind::Wanderer
-                : model.nodes[i].movement == WAYPOINT_MOTION_TYPE ? ReachKind::Patrol : ReachKind::Static;
             if (listed.insert(model.nodes[i].spawn).second)
-                stop.reachers.push_back({ model.nodes[i].spawn, kind, own.count(i) > 0, true });
+                stop.reachers.push_back({ model.nodes[i].spawn, strictKind(i, own.count(i) > 0), own.count(i) > 0, true });
         }
         for (uint32 i : leg.wander)
             if (listed.insert(model.nodes[i].spawn).second)

@@ -74,7 +74,8 @@ public:
         std::vector<uint32> reachedBy;          // the creatures that make spotClear false
         // Every creature that reaches the spot or the way to it (onLeg), with how: one standing still (aggro reach and 3
         // yards), a wanderer (its spawn that near is as one standing still; else from its spawn plus half its range, no
-        // margin), a patrol of another pack (from any point of its path), and the pack's own.
+        // margin), a patrol of another pack (from any point of its path; one whose whole path stays within that reach
+        // never leaves, and is as one standing still), and the pack's own.
         std::vector<Reacher> reachers;
         // Whether nothing standing still reaches the way from the stop before's pull spot to this one, and none of the
         // pack's own reaches it short of the spot: within aggro reach in 3D and 3 yards, a wanderer from its spawn. The
