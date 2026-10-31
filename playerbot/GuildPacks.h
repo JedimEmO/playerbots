@@ -83,6 +83,9 @@ public:
         bool legClear = true;
         std::vector<uint32> legReachedBy;       // the creatures that make legClear false
         bool clearsWay = false;                 // planned first, because its pack reached the next stop's pull spot
+        // For a stop whose spot or way another pack still reaches: each such pack, by one of its creatures, and why it
+        // was not planned first, as "Goblin Engineer (pack 103): its way reached by Gilnid".
+        std::vector<std::string> notCleared;
         uint32 lateSpawn = 0;                   // the earliest wanderer or patrol that could reach the fight, or 0
         uint32 lateSecond = 0;                  // the second it could
         // Where the party stands at the pull spot: four points on the navmesh 4 to 8 yards behind it, on the side away

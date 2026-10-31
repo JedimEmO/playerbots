@@ -1005,6 +1005,23 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
     // The packs whose plan is under way, so that clearing never comes back round to one of them: planning A can clear B
     // first, and B's own spot may be reached by A.
     std::set<uint32> planning;
+    // Why the last plan that came to no stop did not, for the plan that wanted it.
+    std::string planFailed;
+    // The creatures of other packs in a list, by name, a few of them.
+    auto namesOf = [&](const std::vector<uint32>& nodes, const std::set<uint32>& own)
+    {
+        std::vector<std::string> names;
+        for (uint32 i : nodes)
+        {
+            const std::string name = CreatureName(model.nodes[i].entry);
+            if (!own.count(i) && std::find(names.begin(), names.end(), name) == names.end())
+                names.push_back(name);
+        }
+        std::string text;
+        for (size_t k = 0; k < names.size() && k < 3; ++k)
+            text += (k ? ", " : "") + names[k];
+        return names.size() > 3 ? text + " and more" : text;
+    };
     std::function<bool(uint32, int32, size_t)> plan = [&](uint32 packId, int32 depth, size_t hint) -> bool
     {
         const Pack& pack = model.packs[packId];
@@ -1014,7 +1031,10 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 [&](uint32 i) { return dead.count(i) > 0 || !model.nodes[i].aggroes; });
         };
         if (gone() || planning.count(packId))
+        {
+            planFailed = planning.count(packId) ? "its plan is under way" : "dead already";
             return false;
+        }
         planning.insert(packId);
         struct Done { std::set<uint32>& planning; uint32 packId; ~Done() { planning.erase(packId); } } done{ planning, packId };
         const std::set<uint32> own(pack.members.begin(), pack.members.end());
@@ -1035,6 +1055,8 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         Choice best;
         bool have = false;
         std::set<uint32> tried;   // the packs this plan has planned first, whether that came to a stop or not
+        std::map<uint32, std::string> triedWhy;   // why those that came to no stop did not
+        bool outOfTries = false;
         for (int32 round = 0; round <= ROUTE_CLEAR_TRIES; ++round)
         {
             const auto [along, anchor] = anchorOf(pack, hint);
@@ -1133,7 +1155,8 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             }
             if (have)
                 best.leg = legOf(best.index, best.spot, best.offWay, own);
-            if (!have || depth >= ROUTE_CLEAR_DEPTH || round == ROUTE_CLEAR_TRIES)
+            outOfTries = round == ROUTE_CLEAR_TRIES;
+            if (!have || depth >= ROUTE_CLEAR_DEPTH || outOfTries)
                 break;
             // Every spot is reached, or the way to the best one is: a creature of another pack standing still there is
             // pulled first, from its own pack's spot. On the way, the first the walk meets, and its pack is planned from
@@ -1164,11 +1187,19 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             const size_t stopsBefore = r.stops.size();
             if (plan(otherPack, depth + 1, firstAt) && r.stops.size() > stopsBefore && r.stops.back().pack == otherPack)
                 r.stops.back().clearsWay = true;
+            else
+                triedWhy[otherPack] = planFailed;
             if (gone())
+            {
+                planFailed = "killed by the pulls before it";
                 return false;
+            }
         }
         if (!have)
+        {
+            planFailed = "no pull spot";
             return false;
+        }
         // A pack planned first to clear another's way is no help if its own spot, or the way to it, is still reached by
         // another pack standing still: the walk there would pull that one. It is no stop, and the pack that wanted it
         // goes on to its next choice. A pack the route meets in turn is planned however it ends, its spot and way marked.
@@ -1177,7 +1208,11 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             return std::any_of(strict.begin(), strict.end(), [&](uint32 i) { return !own.count(i); });
         };
         if (depth > 0 && (othersIn(best.reached.strict) || othersIn(best.leg.strict)))
+        {
+            planFailed = othersIn(best.leg.strict) ? "its way reached by " + namesOf(best.leg.strict, own)
+                : "its spot reached by " + namesOf(best.reached.strict, own);
             return false;
+        }
 
         Stop stop;
         stop.pack = packId;
@@ -1189,7 +1224,25 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             }
         // Never an empty stop: a pack whose creatures died in the pulls planned before it is no stop.
         if (stop.spawns.empty())
+        {
+            planFailed = "killed by the pulls before it";
             return false;
+        }
+        // Each other pack still in the way or at the spot, the way's first, and why it was not planned first.
+        std::set<uint32> noted;
+        for (const std::vector<uint32>* strict : { &best.leg.strict, &best.reached.strict })
+            for (uint32 i : *strict)
+            {
+                const uint32 other = model.nodes[i].pack;
+                if (own.count(i) || !noted.insert(other).second)
+                    continue;
+                auto why = triedWhy.find(other);
+                const std::string reason = planning.count(other) ? std::string("its plan is under way")
+                    : why != triedWhy.end() ? why->second
+                    : outOfTries ? Format("past the %d packs a stop may clear", ROUTE_CLEAR_TRIES)
+                    : depth >= ROUTE_CLEAR_DEPTH ? Format("past %d packs deep", ROUTE_CLEAR_DEPTH) : std::string("not tried");
+                stop.notCleared.push_back(Format("%s (pack %u): %s", CreatureName(model.nodes[i].entry).c_str(), other, reason.c_str()));
+            }
         stop.pulled = model.nodes[best.member].spawn;
         stop.along = anchorOf(pack, hint).first;
         stop.pullSpot = best.spot;
@@ -1405,6 +1458,13 @@ std::vector<std::string> GuildPacks::PrintRoute(const MapModel& model, const Rou
         lines.push_back(Format("%u. pack %u%s%s, %u (%u elite): %s; pull at (%.1f %.1f %.1f)%s %.0f yd, %s%s; %u stand", uint32(n + 1),
             stop.pack, stop.boss ? " boss" : "", stop.clearsWay ? " first, to clear the next spot" : "", uint32(stop.spawns.size()), elites, packText.c_str(), stop.pullSpot.x, stop.pullSpot.y,
             stop.pullSpot.z, stop.offWay ? " off the way" : "", stop.pullDistance, verdict.c_str(), wait.c_str(), uint32(stop.stand.size())).substr(0, 260));
+        if (!stop.notCleared.empty())
+        {
+            std::string notCleared;
+            for (const std::string& note : stop.notCleared)
+                notCleared += (notCleared.empty() ? "" : "; ") + note;
+            lines.push_back(("   not cleared first: " + notCleared).substr(0, 300));
+        }
         const G3D::Vector3 next = n + 1 < route.stops.size() ? route.stops[n + 1].pullSpot : route.points.back();
         if (stop.restClear)
             lines.push_back(Format("   rest at (%.1f %.1f %.1f), %.0f yd from the next pull", stop.restSpot.x, stop.restSpot.y,
