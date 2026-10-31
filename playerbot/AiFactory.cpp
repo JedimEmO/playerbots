@@ -620,6 +620,18 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
             combatEngine->addStrategy("wait for attack");
             combatEngine->addStrategy("threat");
         }
+
+        // A guild healer in a party saves its mana, as AzerothCore's healers do by default: at 60% mana or less it passes
+        // over heals that would overheal, and costly heals on a member not in danger. In the lab's Razorfen Downs scenario
+        // most healers were nearly out of mana by their death or the fight's end.
+        // It also spends no mana on damage while its party is near: `offdps`, which only priests have, adds Smite,
+        // Holy Fire, Shadow Word: Pain and Holy Nova. One cut off from its party keeps it, above, to fight on its own.
+        if (sGuildBotMgr.IsGuildBot(player) && player->GetGroup() && PlayerbotAI::IsHeal(player))
+        {
+            combatEngine->addStrategy("save mana");
+            if (!sGuildBotMgr.IsAlone(player))
+                combatEngine->removeStrategy("offdps");
+        }
     }
     else
     {
@@ -965,6 +977,10 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
     {
         // Guild characters: their job decides, with none of the free bots' random extras.
         sGuildBotMgr.AddNonCombatStrategies(player, nonCombatEngine);
+
+        // A guild healer in a party saves mana topping members up between fights too, as in combat.
+        if (player->GetGroup() && PlayerbotAI::IsHeal(player))
+            nonCombatEngine->addStrategy("save mana");
     }
     else if ((facade->IsRealPlayer() || sRandomPlayerbotMgr.IsFreeBot(player)) && !player->InBattleGround())
     {   

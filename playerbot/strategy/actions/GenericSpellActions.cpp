@@ -308,6 +308,72 @@ bool CastAoeHealSpellAction::isUseful()
     return CastSpellAction::isUseful();
 }
 
+HealingManaEfficiency CastHealingSpellAction::GetManaEfficiency() const
+{
+    // AzerothCore tags each heal action in its class files (PriestActions.h, PaladinActions.h, DruidActions.h,
+    // ShamanActions.h); these are its tags for the classic spells. A spell not named here is MEDIUM, as there.
+    static const std::map<std::string, HealingManaEfficiency> efficiencies = {
+        { "renew", HealingManaEfficiency::VERY_HIGH },
+        { "rejuvenation", HealingManaEfficiency::VERY_HIGH },
+        { "power word: shield", HealingManaEfficiency::VERY_HIGH },
+        { "regrowth", HealingManaEfficiency::HIGH },
+        { "flash of light", HealingManaEfficiency::HIGH },
+        { "chain heal", HealingManaEfficiency::HIGH },
+        { "flash heal", HealingManaEfficiency::LOW },
+        { "lesser healing wave", HealingManaEfficiency::LOW },
+        { "holy shock", HealingManaEfficiency::LOW },
+    };
+
+    auto i = efficiencies.find(GetSpellName());
+    return i == efficiencies.end() ? HealingManaEfficiency::MEDIUM : i->second;
+}
+
+uint32 CastHealingSpellAction::EstimateHeal(Unit* target)
+{
+    // AzerothCore gives each heal a fixed share of the target's health, 15% for Renew and 50% for Greater Heal. A rank's
+    // heal is a different share at every level in classic, so here it is read from the spell at the rank the bot casts.
+    if (!target)
+        return 0;
+
+    const SpellEntry* spell = sServerFacade.LookupSpellInfo(AI_VALUE2(uint32, "spell id", GetSpellName()));
+    if (!spell)
+        return 0;
+
+    // Holy Light and Flash of Light heal through a dummy effect: the core casts its value on as the heal (SpellEffects.cpp).
+    const bool paladinHeal = spell->SpellFamilyName == SPELLFAMILY_PALADIN && (spell->SpellIconID == 70 || spell->SpellIconID == 242);
+    const int32 healingPower = bot->SpellBaseHealingBonusDone(GetSpellSchoolMask(spell));
+
+    uint32 total = 0;
+    for (int i = 0; i < MAX_EFFECT_INDEX; ++i)
+    {
+        const bool direct = spell->Effect[i] == SPELL_EFFECT_HEAL || (paladinHeal && spell->Effect[i] == SPELL_EFFECT_DUMMY);
+        const bool periodic = spell->Effect[i] == SPELL_EFFECT_APPLY_AURA && spell->EffectApplyAuraName[i] == SPELL_AURA_PERIODIC_HEAL;
+        if (!direct && !periodic)
+            continue;
+
+        // The largest roll with the bot's talents, with finalUse false so that no buff loses a charge to an estimate.
+        // The core's SpellHealingBonusDone applies spell mods as a cast does and can spend one, so the healing power
+        // is added here by the effect's coefficient instead.
+        int32 amount = bot->CalculateSpellEffectValue(target, spell, SpellEffectIndex(i), nullptr, true, false);
+        amount += int32(healingPower * spell->effectBonusCoefficient[i]);
+        if (amount <= 0)
+            continue;
+
+        // A heal over time counts every tick, each with its own share of healing power, as the core applies it.
+        if (periodic)
+        {
+            const int32 duration = GetSpellDuration(spell);
+            const int32 amplitude = int32(spell->EffectAmplitude[i]);
+            if (duration > 0 && amplitude > 0)
+                amount *= std::max(1, duration / amplitude);
+        }
+
+        total += uint32(amount);
+    }
+
+    return total;
+}
+
 bool HealHotPartyMemberAction::isUseful()
 {
     return HealPartyMemberAction::isUseful() && !ai->HasAura(GetSpellName(), GetTarget());

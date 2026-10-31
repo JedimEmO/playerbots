@@ -90,3 +90,56 @@ void ConserveManaStrategy::InitCombatMultipliers(std::list<Multiplier*> &multipl
 {
     multipliers.push_back(new ConserveManaMultiplier(ai));
 }
+
+// The mana at which a healer starts saving, AzerothCore's Playerbots.SaveManaThreshold.
+static constexpr float SAVE_MANA_THRESHOLD = 60.0f;
+
+float HealerAutoSaveManaMultiplier::GetValue(Action* action)
+{
+    CastHealingSpellAction* heal = dynamic_cast<CastHealingSpellAction*>(action);
+    if (!heal)
+        return 1.0f;
+
+    if (!bot->GetMaxPower(POWER_MANA) || bot->GetPowerPercent(POWER_MANA) > SAVE_MANA_THRESHOLD)
+        return 1.0f;
+
+    Unit* target = action->GetTarget();
+    if (!target || !target->IsAlive())
+        return 1.0f;
+
+    // A member under low health is in danger and gets whatever heal comes. AzerothCore still passes over the least
+    // efficient heals for one that is not a tank; here nobody in danger waits on a heal.
+    const float health = target->GetHealthPercent();
+    if (health < sPlayerbotAIConfig.lowHealth)
+        return 1.0f;
+
+    // A shield, or a heal the core scripts, has no estimate and is left alone.
+    const uint32 estimate = heal->EstimateHeal(target);
+    if (!estimate)
+        return 1.0f;
+
+    // Overhealing. AzerothCore divides a tank's estimate by 1.5, as its estimates are shares of an average member's
+    // health and a tank has more. These are in health points, so the factor stays only as leeway for the member whose
+    // health drops fastest: a tank's heal may be half as large again as its missing health.
+    const bool tank = target->IsPlayer() && PlayerbotAI::IsTank(static_cast<Player*>(target));
+    const float missing = float(target->GetMaxHealth() - target->GetHealth());
+    if ((tank ? estimate / 1.5f : float(estimate)) > missing)
+        return 0.0f;
+
+    // A costly heal. Above medium health only the efficient heals go out, below it all but the least efficient.
+    const HealingManaEfficiency efficiency = heal->GetManaEfficiency();
+    if (health >= sPlayerbotAIConfig.mediumHealth ? efficiency <= HealingManaEfficiency::MEDIUM : efficiency <= HealingManaEfficiency::LOW)
+        return 0.0f;
+
+    return 1.0f;
+}
+
+void HealerAutoSaveManaStrategy::InitCombatMultipliers(std::list<Multiplier*> &multipliers)
+{
+    multipliers.push_back(new HealerAutoSaveManaMultiplier(ai));
+}
+
+void HealerAutoSaveManaStrategy::InitNonCombatMultipliers(std::list<Multiplier*> &multipliers)
+{
+    multipliers.push_back(new HealerAutoSaveManaMultiplier(ai));
+}

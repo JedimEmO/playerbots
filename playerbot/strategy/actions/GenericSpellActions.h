@@ -197,11 +197,26 @@ namespace ai
 
     //---------------------------------------------------------------------------------------------------------------------
 
+    // How much healing a spell gives for its mana, in AzerothCore's classes (PlayerbotAIConfig.h there).
+    enum class HealingManaEfficiency : uint8
+    {
+        VERY_LOW = 1,
+        LOW = 2,
+        MEDIUM = 4,
+        HIGH = 8,
+        VERY_HIGH = 16,
+        SUPERIOR = 32
+    };
+
     class CastHealingSpellAction : public CastAuraSpellAction
     {
     public:
         CastHealingSpellAction(PlayerbotAI* ai, std::string spell, uint8 estAmount = 15.0f) : CastAuraSpellAction(ai, spell, true), estAmount(estAmount) {}
         
+        // For `save mana`: the spell's efficiency, and the health it would restore on the target, 0 when it cannot tell.
+        HealingManaEfficiency GetManaEfficiency() const;
+        uint32 EstimateHeal(Unit* target);
+
     protected:
         virtual ActionThreatType getThreatType() override { return ActionThreatType::ACTION_THREAT_AOE; }
         virtual std::string GetTargetName() override { return "self target"; }
