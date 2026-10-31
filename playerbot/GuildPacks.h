@@ -139,6 +139,7 @@ private:
         float walk = 2.5f, run = 7.0f; // yards a second
         uint32 minLevel = 1, maxLevel = 1;
         uint32 rank = 0;
+        uint32 elites = 0;             // itself when elite, and each elite entry it summons, as the Goblin Engineer's golem
         uint8 movement = 0;            // the core's motion type: 1 wanders, 2 walks a path
         bool caster = false;
         bool aggroes = true;           // hostile to players, so it attacks on sight; a neutral one only answers calls

@@ -276,7 +276,7 @@ void GuildPacks::Build(MapModel& model)
                             node.flees = true;
                         else if (action.type == ACTION_T_CALL_FOR_HELP)
                             node.scriptCall = std::max(node.scriptCall, float(action.call_for_help.radius));
-                        if (summoned)
+                        if (summoned && std::find(node.summons.begin(), node.summons.end(), summoned) == node.summons.end())
                         {
                             node.summons.push_back(summoned);
                             if (event.event_type == EVENT_T_DEATH)
@@ -284,6 +284,11 @@ void GuildPacks::Build(MapModel& model)
                         }
                     }
         }
+
+        node.elites = node.rank > 0 ? 1 : 0;
+        for (uint32 summoned : node.summons)
+            if (CreatureInfo const* summonedInfo = ObjectMgr::GetCreatureTemplate(summoned))
+                node.elites += summonedInfo->Rank > 0 ? 1 : 0;
 
         model.bySpawn[node.spawn] = uint32(model.nodes.size());
         model.cells[CellKey(node.at.x, node.at.y)].push_back(uint32(model.nodes.size()));
@@ -374,7 +379,7 @@ void GuildPacks::LinkAndGroup(MapModel& model)
         Pack& pack = model.packs[found->second];
         pack.members.push_back(i);
         const Node& node = model.nodes[i];
-        pack.elites += node.rank > 0 ? 1 : 0;
+        pack.elites += node.elites;
         pack.patrol = pack.patrol || node.movement == WAYPOINT_MOTION_TYPE;
         pack.linked = pack.linked || node.master >= 0;
         pack.summons = pack.summons || !node.summons.empty();
@@ -679,7 +684,7 @@ std::list<std::string> GuildPacks::ShowPrediction(const MapModel& model, Map* ma
     const Node& pulled = model.nodes[prediction.pulled];
     uint32 elites = 0;
     for (const Joined& j : prediction.pull)
-        elites += model.nodes[j.node].rank > 0 ? 1 : 0;
+        elites += model.nodes[j.node].elites;
     out.push_back(Format("%s (%u), %s, level %u at (%.1f %.1f %.1f): pulls %s %u, brings %u (%u elite); %u wanderers or patrols "
         "could come later; %u sight checks unknown%s", model.name.c_str(), model.mapId,
         map ? Format("instance %u", map->GetInstanceId()).c_str() : "spawns only", level, spot.x, spot.y, spot.z,
@@ -1313,7 +1318,7 @@ std::vector<std::string> GuildPacks::PrintRoute(const MapModel& model, const Rou
             if (found == model.bySpawn.end())
                 continue;
             names[CreatureName(model.nodes[found->second].entry)]++;
-            elites += model.nodes[found->second].rank > 0 ? 1 : 0;
+            elites += model.nodes[found->second].elites;
         }
         std::string packText;
         for (auto const& [nm, count] : names)

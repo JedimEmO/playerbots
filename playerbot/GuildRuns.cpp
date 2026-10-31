@@ -753,15 +753,19 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
         Creature* creature = static_cast<Creature*>(unit);
         FightCreature& c = fight.creatures[creature->GetObjectGuid()];
         c.entry = creature->GetEntry();
-        c.spawn = creature->GetDbGuid();
+        // A summon is a temporary summon, or a guardian pet a creature casts, as the Goblin Engineer's golem.
+        // Its db guid is its own low guid, not a world database row.
+        c.summoned = creature->IsTemporarySummon() || creature->IsPet();
+        c.spawn = c.summoned ? 0 : creature->GetDbGuid();
         c.joined = WorldTimer::getMSTimeDiff(fight.startMs, nowMs) / IN_MILLISECONDS;
         c.x = creature->GetPositionX();
         c.y = creature->GetPositionY();
         c.z = creature->GetPositionZ();
-        c.summoned = creature->IsTemporarySummon();
         // A creature's guid carries its entry; a player's gives 0.
-        if (c.summoned)
+        if (creature->IsTemporarySummon())
             c.summoner = creature->GetSpawnerGuid().GetEntry();
+        else if (creature->IsPet())
+            c.summoner = creature->GetOwnerGuid().GetEntry();
         c.pulled = !fight.pulledGuid.IsEmpty() && creature->GetObjectGuid() == fight.pulledGuid;
         c.how = c.pulled ? "pulled" : link == 3 ? "both" : link == 1 ? "attacked" : "was_attacked";
     }
