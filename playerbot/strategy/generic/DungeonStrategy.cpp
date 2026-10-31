@@ -69,4 +69,13 @@ void DungeonStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "leave mechanar",
         NextAction::array(0, new NextAction("disable mechanar strategy", 100.0f), NULL)));
+
+    // A guild party's run inside its dungeon: the bot's strategies are rebuilt for it, or back from it, out of a fight.
+    triggers.push_back(new TriggerNode(
+        "guild run enter",
+        NextAction::array(0, new NextAction("guild run strategies", 100.0f), NULL)));
+
+    triggers.push_back(new TriggerNode(
+        "guild run leave",
+        NextAction::array(0, new NextAction("guild run strategies", 100.0f), NULL)));
 }

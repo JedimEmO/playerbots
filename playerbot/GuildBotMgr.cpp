@@ -5,6 +5,7 @@
 #include "playerbot/GuildJobs.h"
 #include "playerbot/GuildPacks.h"
 #include "playerbot/GuildRuns.h"
+#include "playerbot/GuildRunState.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/Engine.h"
@@ -1073,6 +1074,15 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     engine->removeStrategy("follow jump");
     engine->addStrategy("roll");
 
+    // Inside a run's dungeon with a living pack ahead, the run controller has the party: its strategy, and none of
+    // travel, grind, rpg, free or follow, which pick moves of their own (GuildRunStates).
+    const GuildRunView run = sGuildRunStates.View(player);
+    if (run.valid && run.controls)
+    {
+        engine->addStrategy(run.lead ? "run lead" : "run party");
+        return;
+    }
+
     // In a group, following someone: the party comes first, and the job waits until the group is over.
     PlayerbotAI* ai = player->GetPlayerbotAI();
     Player* master = ai ? ai->GetMaster() : nullptr;
@@ -1687,6 +1697,7 @@ void GuildBotMgr::ApplyOrders()
         c.reason.clear();
         c.runsDone = 0;
         sGuildDungeon.Stop(guid);
+        sGuildRunStates.End(guid);
         c.progressAt = 0;
         c.stalled = false;
         uint32 farmItem = uint32(atoi(ArgValue(c, "item").c_str()));
@@ -1836,11 +1847,26 @@ void GuildBotMgr::CheckJobs()
             }
             std::string waiting = InviteCompanion(c, bot);
 
-            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"));
+            // The run controller and the job share the party inside: the job's pull and rest steps stand down while
+            // the controller has it. The run state is kept here, outside the job's lock, since the two never nest:
+            // made or brought up to date before the job's tick, so that its pull step stands down from the first tick
+            // inside, and told after it whether the party is in and a step of the tables is due.
+            std::vector<std::pair<std::string, std::string>> runEvents;
+            const bool controlled = sGuildRunStates.Prepare(bot, ArgValue(c, "name"), runEvents);
+            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"), controlled);
             if (!waiting.empty() && update.status == "working" && update.reason.rfind("waiting", 0) == 0)
                 update.reason = waiting;
+            for (auto& [kind, detail] : runEvents)
+                Event(guid, kind, detail);
             for (auto& [kind, detail] : update.events)
                 Event(guid, kind, detail);
+            if (update.status == "working")
+            {
+                for (auto& [kind, detail] : sGuildRunStates.Settle(bot, update.inside, update.stepDue))
+                    Event(guid, kind, detail);
+            }
+            else
+                sGuildRunStates.End(guid);
             c.reason = update.reason;
             if (update.status == "failed")
             {

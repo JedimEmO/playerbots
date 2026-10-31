@@ -58,6 +58,7 @@
 #include "generic/KarazhanDungeonStrategies.h"
 #include "generic/NaxxramasDungeonStrategies.h"
 #include "generic/MechanarDungeonStrategies.h"
+#include "generic/GuildRunStrategy.h"
 
 namespace ai
 {
@@ -175,6 +176,8 @@ namespace ai
 
             // Dungeon Strategies
             creators["dungeon"] = [](PlayerbotAI* ai) { return new DungeonStrategy(ai); };
+            creators["run lead"] = [](PlayerbotAI* ai) { return new RunLeadStrategy(ai); };
+            creators["run party"] = [](PlayerbotAI* ai) { return new RunPartyStrategy(ai); };
             creators["onyxias lair"] = [](PlayerbotAI* ai) { return new OnyxiasLairDungeonStrategy(ai); };
             creators["molten core"] = [](PlayerbotAI* ai) { return new MoltenCoreDungeonStrategy(ai); };
             creators["blackwing lair"] = [](PlayerbotAI* ai) { return new BlackwingLairDungeonStrategy(ai); };

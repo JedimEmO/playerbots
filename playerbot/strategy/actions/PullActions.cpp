@@ -5,6 +5,7 @@
 #include "PullActions.h"
 #include "playerbot/strategy/values/PositionValue.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildRunState.h"
 
 using namespace ai;
 
@@ -54,9 +55,14 @@ bool PullRequestAction::Execute(Event& event)
     PositionEntry pullPosition = posMap["pull"];
 
     pullPosition.Set(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId());
+    // A guild run's leader brings the pull back to the run's pull spot, where its party stands (GuildRunStates).
+    const GuildRunView run = AI_VALUE(GuildRunView, "run state");
+    const WorldPosition& runSpot = GuildRunStates::FightSpot(run.stop, run.pull, run.ownSpot);
+    if (run.valid && run.lead && run.controls && run.index < run.stops && runSpot && runSpot.getMapId() == bot->GetMapId())
+        pullPosition.Set(runSpot.getX(), runSpot.getY(), runSpot.getZ(), bot->GetMapId());
     // A guild tank inside a dungeon brings the pull back to its healer, behind it, so the fight is where the healer
     // stands and not in the room the pack came from, where a second pack could join.
-    if (sGuildBotMgr.IsGuildBot(bot) && bot->GetMap()->IsDungeon())
+    else if (sGuildBotMgr.IsGuildBot(bot) && bot->GetMap()->IsDungeon())
         if (Group* group = bot->GetGroup())
             for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
             {

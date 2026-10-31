@@ -80,6 +80,7 @@
 #include "KarazhanDungeonActions.h"
 #include "NaxxramasDungeonActions.h"
 #include "MechanarDungeonActions.h"
+#include "GuildRunActions.h"
 
 #ifdef GenerateBotTests
 #include "../tests/TestAction.h"
@@ -370,6 +371,15 @@ namespace ai
             creators["enable onyxias lair strategy"] = [](PlayerbotAI* ai) { return new OnyxiasLairEnableDungeonStrategyAction(ai); };
             creators["disable onyxias lair strategy"] = [](PlayerbotAI* ai) { return new OnyxiasLairDisableDungeonStrategyAction(ai); };
             creators["enable molten core strategy"] = [](PlayerbotAI* ai) { return new MoltenCoreEnableDungeonStrategyAction(ai); };
+            creators["guild run strategies"] = [](PlayerbotAI* ai) { return new GuildRunStrategiesAction(ai); };
+            creators["move to run spot"] = [](PlayerbotAI* ai) { return new MoveToRunSpotAction(ai); };
+            creators["run gather"] = [](PlayerbotAI* ai) { return new RunGatherAction(ai); };
+            creators["run pull"] = [](PlayerbotAI* ai) { return new RunPullAction(ai); };
+            creators["run pull failed"] = [](PlayerbotAI* ai) { return new RunPullFailedAction(ai); };
+            creators["run next"] = [](PlayerbotAI* ai) { return new RunNextAction(ai); };
+            creators["run wait"] = [](PlayerbotAI* ai) { return new RunWaitAction(ai); };
+            creators["run go"] = [](PlayerbotAI* ai) { return new RunGoAction(ai); };
+            creators["run waited"] = [](PlayerbotAI* ai) { return new RunWaitedAction(ai); };
             creators["disable molten core strategy"] = [](PlayerbotAI* ai) { return new MoltenCoreDisableDungeonStrategyAction(ai); };
             creators["enable blackwing lair strategy"] = [](PlayerbotAI* ai) { return new BlackwingLairEnableDungeonStrategyAction(ai); };
             creators["disable blackwing lair strategy"] = [](PlayerbotAI* ai) { return new BlackwingLairDisableDungeonStrategyAction(ai); };

@@ -20,6 +20,7 @@
 #include "KarazhanDungeonTriggers.h"
 #include "NaxxramasDungeonTriggers.h"
 #include "MechanarDungeonTriggers.h"
+#include "GuildRunTriggers.h"
 #include "GlyphTriggers.h"
 #include "WorldBuffTravelTriggers.h"
 
@@ -303,6 +304,19 @@ namespace ai
             creators["enter onyxias lair"] = [](PlayerbotAI* ai) { return new OnyxiasLairEnterDungeonTrigger(ai); };
             creators["leave onyxias lair"] = [](PlayerbotAI* ai) { return new OnyxiasLairLeaveDungeonTrigger(ai); };
             creators["enter molten core"] = [](PlayerbotAI* ai) { return new MoltenCoreEnterDungeonTrigger(ai); };
+            creators["guild run enter"] = [](PlayerbotAI* ai) { return new GuildRunEnterTrigger(ai); };
+            creators["guild run leave"] = [](PlayerbotAI* ai) { return new GuildRunLeaveTrigger(ai); };
+            creators["run approach"] = [](PlayerbotAI* ai) { return new RunApproachTrigger(ai); };
+            creators["run gather"] = [](PlayerbotAI* ai) { return new RunGatherTrigger(ai); };
+            creators["run pull ready"] = [](PlayerbotAI* ai) { return new RunPullReadyTrigger(ai); };
+            creators["run pull failed"] = [](PlayerbotAI* ai) { return new RunPullFailedTrigger(ai); };
+            creators["run cleared"] = [](PlayerbotAI* ai) { return new RunClearedTrigger(ai); };
+            creators["run hold"] = [](PlayerbotAI* ai) { return new RunHoldTrigger(ai); };
+            creators["run stand"] = [](PlayerbotAI* ai) { return new RunStandTrigger(ai); };
+            creators["run leash"] = [](PlayerbotAI* ai) { return new RunLeashTrigger(ai); };
+            creators["run reached"] = [](PlayerbotAI* ai) { return new RunReachedTrigger(ai); };
+            creators["run clear"] = [](PlayerbotAI* ai) { return new RunClearTrigger(ai); };
+            creators["run wait over"] = [](PlayerbotAI* ai) { return new RunWaitOverTrigger(ai); };
             creators["leave molten core"] = [](PlayerbotAI* ai) { return new MoltenCoreLeaveDungeonTrigger(ai); };
             creators["enter karazhan"] = [](PlayerbotAI* ai) { return new KarazhanEnterDungeonTrigger(ai); };
             creators["leave karazhan"] = [](PlayerbotAI* ai) { return new KarazhanLeaveDungeonTrigger(ai); };

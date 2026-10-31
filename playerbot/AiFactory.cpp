@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/AiFactory.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildRunState.h"
 #include "strategy/AiObjectContext.h"
 #include "strategy/ReactionEngine.h"
 
@@ -631,6 +632,15 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
             combatEngine->addStrategy("save mana");
             if (!sGuildBotMgr.IsAlone(player))
                 combatEngine->removeStrategy("offdps");
+        }
+
+        // Inside a run's dungeon with a living pack ahead, the run controller has the party: the leader holds a pull at
+        // its spot, and a member keeps near its place in the fight (GuildRunStates).
+        if (sGuildBotMgr.IsGuildBot(player))
+        {
+            const GuildRunView run = sGuildRunStates.View(player);
+            if (run.valid && run.controls)
+                combatEngine->addStrategy(run.lead ? "run lead" : "run party");
         }
     }
     else

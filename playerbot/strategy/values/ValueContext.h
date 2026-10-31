@@ -110,6 +110,7 @@
 #include "CreatureIdValue.h"
 #include "GroupTankValues.h"
 #include "EstimatedLifetimeValue.h"
+#include "GuildRunValues.h"
 
 namespace ai
 {
@@ -168,6 +169,8 @@ namespace ai
             creators["old target"] = [](PlayerbotAI* ai) { return new CurrentTargetValue(ai); };
             creators["grind target"] = [](PlayerbotAI* ai) { return new GrindTargetValue(ai); };
             creators["rti target"] = [](PlayerbotAI* ai) { return new RtiTargetValue(ai); };
+            creators["run state"] = [](PlayerbotAI* ai) { return new RunStateValue(ai); };
+            creators["run spot"] = [](PlayerbotAI* ai) { return new RunSpotValue(ai); };
             creators["rti cc target"] = [](PlayerbotAI* ai) { return new RtiCcTargetValue(ai); };
             creators["duel target"] = [](PlayerbotAI* ai) { return new DuelTargetValue(ai); };
             creators["party member to dispel"] = [](PlayerbotAI* ai) { return new PartyMemberToDispel(ai); };

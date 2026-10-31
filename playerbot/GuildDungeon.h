@@ -40,13 +40,16 @@ public:
         std::string reason;
         std::vector<std::pair<std::string, std::string>> events;  // kind, detail
         bool strategiesChanged = false;   // the leader's non-combat strategies must be rebuilt
+        bool inside = false;              // the run is on its bosses with the leader inside, for the run state
+        bool stepDue = false;             // a talk, use, item use, kill or sleeping boss of the tables is the job's now
     };
 
     // Empty when the job can run a dungeon by this name, else why not.
     static std::string Validate(const std::string& name);
 
-    // Every few seconds, from GuildBotMgr, for a leader on the dungeon job.
-    Update Tick(Player* leader, const std::string& name);
+    // Every few seconds, from GuildBotMgr, for a leader on the dungeon job. Controlled when the run controller has
+    // the party (GuildRunStates): the job's own pull and rest steps then stand down.
+    Update Tick(Player* leader, const std::string& name, bool controlled = false);
     // The job ended or changed: forget the run.
     void Stop(uint32 leaderGuid);
 
@@ -246,6 +249,7 @@ private:
         time_t sleeperSince = 0;       // when it fell asleep
         bool sleeperWaiting = false;   // the leader waits by it now
         ObjectGuid killGuid;           // the creature the leader kills before the next boss, or empty
+        bool controlled = false;       // the run controller has the party, and the pull and rest steps stand down
         std::set<int32> passed;        // bosses passed over as out of reach on this map
         int32 headwayBoss = 0;         // the boss the leader's headway is measured to
         float headwayBest = -1.0f;     // the nearest the leader has come to it, in yards, or negative before the first look
