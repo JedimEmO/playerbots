@@ -131,7 +131,7 @@ private:
     Prediction Predict(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level,
         const PredictOptions& options) const;
     float Reach(const Node& node, uint32 level) const;
-    std::vector<std::string> BuildRoute(const MapModel& model, const std::string& name, uint32 level,
+    std::vector<std::string> BuildRoute(const MapModel& model, const std::string& name, uint32 level, const std::string& levelFrom,
         const std::vector<std::pair<int32, G3D::Vector3>>& stops) const;
     std::list<std::string> HandleRoute(const std::vector<std::string>& words);
     std::list<std::string> ListPacks(const MapModel& model, Map* map) const;
@@ -140,6 +140,8 @@ private:
     std::mutex lock;
     std::map<uint32, std::unique_ptr<MapModel>> models;
     std::map<std::string, std::vector<std::string>> routes; // printed routes, by dungeon, level and faction
+    // Each dungeon's map and stops, by dungeon and faction, as GuildDungeon::BossRoute gives them.
+    std::map<std::string, std::pair<uint32, std::vector<std::pair<int32, G3D::Vector3>>>> routeStops;
 };
 
 #define sGuildPacks GuildPacks::instance()
