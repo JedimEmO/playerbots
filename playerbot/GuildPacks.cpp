@@ -899,11 +899,21 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         return std::make_pair(bestAlong, std::min(route.size() - 1, size_t(bestAlong / ROUTE_STEP + 0.5f)));
     };
 
+    // The packs whose plan is under way, so that clearing never comes back round to one of them: planning A can clear B
+    // first, and B's own spot may be reached by A.
+    std::set<uint32> planning;
     std::function<bool(uint32, int32)> plan = [&](uint32 packId, int32 depth) -> bool
     {
         const Pack& pack = model.packs[packId];
-        if (std::all_of(pack.members.begin(), pack.members.end(), [&](uint32 i) { return dead.count(i) > 0 || !model.nodes[i].aggroes; }))
+        auto gone = [&]()
+        {
+            return std::all_of(pack.members.begin(), pack.members.end(),
+                [&](uint32 i) { return dead.count(i) > 0 || !model.nodes[i].aggroes; });
+        };
+        if (gone() || planning.count(packId))
             return false;
+        planning.insert(packId);
+        struct Done { std::set<uint32>& planning; uint32 packId; ~Done() { planning.erase(packId); } } done{ planning, packId };
         const std::set<uint32> own(pack.members.begin(), pack.members.end());
         auto distanceToPack = [&](const G3D::Vector3& q, int32& nearestMember)
         {
@@ -921,6 +931,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                         std::vector<uint32> extras, reached; uint32 lateFirst = 0; float distance = 0.0f; };
         Choice best;
         bool have = false;
+        bool clearing = true;   // false once clearing another pack first has failed: the next round only chooses
         for (int32 round = 0; round <= ROUTE_CLEAR_DEPTH; ++round)
         {
             const auto [along, anchor] = anchorOf(pack);
@@ -1015,7 +1026,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                     }
                 }
             }
-            if (!have || best.reached.empty() || depth >= ROUTE_CLEAR_DEPTH || round == ROUTE_CLEAR_DEPTH)
+            if (!have || !clearing || best.reached.empty() || depth >= ROUTE_CLEAR_DEPTH || round == ROUTE_CLEAR_DEPTH)
                 break;
             // Every spot is reached: the nearest creature of another pack that reaches the best one is pulled first, from its
             // own pack's spot. The pack's own reach only rules a spot out; it is no stop of its own.
@@ -1026,9 +1037,16 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             if (first < 0)
                 break;
             const uint32 otherPack = model.nodes[first].pack;
-            if (otherPack == packId || otherPack >= model.packs.size() || !plan(otherPack, depth + 1))
+            if (otherPack == packId || otherPack >= model.packs.size() || planning.count(otherPack))
                 break;
-            r.stops.back().clearsWay = true;
+            // Whatever the other plan did, the choice is chosen again: it may have killed this pack's creatures, or some of them.
+            const size_t stopsBefore = r.stops.size();
+            if (plan(otherPack, depth + 1) && r.stops.size() > stopsBefore && r.stops.back().pack == otherPack)
+                r.stops.back().clearsWay = true;
+            else
+                clearing = false;
+            if (gone())
+                return false;
         }
         if (!have)
             return false;
@@ -1041,6 +1059,9 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 stop.spawns.push_back(model.nodes[i].spawn);
                 stop.boss = stop.boss || bossEntries.count(int32(model.nodes[i].entry));
             }
+        // Never an empty stop: a pack whose creatures died in the pulls planned before it is no stop.
+        if (stop.spawns.empty())
+            return false;
         stop.pulled = model.nodes[best.member].spawn;
         stop.along = anchorOf(pack).first;
         stop.pullSpot = best.spot;
