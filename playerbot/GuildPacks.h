@@ -40,6 +40,57 @@ public:
     // `guildbot packs <map> [instance] [x y z [level]]`, for the console, SOAP and a GM's chat.
     std::list<std::string> HandleCommand(const std::string& args);
 
+    // One stop of a route: a pack the way meets, where the tank pulls it from, where the party stands, and where it rests.
+    // Spawns are the creature table's guids; Map::GetCreature(spawn) finds one in an instance.
+    struct Stop
+    {
+        uint32 pack = 0;                        // the pack's id in the map model, as `guildbot packs <map>` lists it
+        std::vector<uint32> spawns;             // its creatures, those not already counted dead at an earlier stop
+        uint32 pulled = 0;                      // the creature the tank pulls: the nearest of the pack to the pull spot
+        bool boss = false;                      // one of the dungeon's bosses is in the pack
+        float along = 0.0f;                     // yards along the route of the pack's nearest point to it
+        G3D::Vector3 pullSpot;                  // where the tank pulls from, and where the fight is held
+        float pullAlong = 0.0f;                 // yards along the route of the pull spot, or of the way's point it is off
+        bool offWay = false;                    // the pull spot is off the way, by a navmesh path from it
+        float pullDistance = 0.0f;              // yards from the pull spot to the pulled creature
+        bool clean = false;                     // the pull brings nothing beyond the pack
+        std::vector<uint32> extras;             // what the pull brings beyond the pack
+        uint32 lateSpawn = 0;                   // the earliest wanderer or patrol that could reach the fight, or 0
+        uint32 lateSecond = 0;                  // the second it could
+        // Where the party stands at the pull spot: four points on the navmesh 4 to 8 yards behind it, on the side away
+        // from the pack, in sight of it. Nearest first: two for melee, then the ranged one's, then the healer's, farthest back.
+        std::vector<G3D::Vector3> stand;
+        G3D::Vector3 restSpot;                  // where the party rests after the pull, before the next stop's spot
+        float restClearance = 0.0f;             // yards outside every living creature's reach there; negative when it is inside one
+        bool restClear = false;                 // the clearance is at least the rest margin, 5 yards
+    };
+
+    // The way the dungeon job walks a dungeon, as `guildbot packs route` prints it.
+    struct Route
+    {
+        std::string dungeon;                    // the name the job takes, such as stratholme_live
+        uint32 mapId = 0;
+        uint32 team = 0;                        // the core's Team the route was made for, from the leader
+        uint32 level = 0;                       // the party level its reach was worked out at
+        std::string levelFrom;                  // where that level came from: "level=", a character's name, or the bosses' median
+        G3D::Vector3 arrival;                   // where the entrance puts a party
+        std::vector<std::pair<int32, G3D::Vector3>> bosses; // each boss's entry and spawn, in the job's order
+        std::vector<G3D::Vector3> points;       // the way, a point every 2 yards along it: point i is i * 2 yards along
+        float length = 0.0f;                    // yards
+        uint32 straightLegs = 0;                // legs with no travel map route, walked as straight lines
+        std::vector<Stop> stops;                // in the order the way meets them
+    };
+
+    // The route of a dungeon for the leader's faction, at a party level, or at the bosses' median for level 0.
+    // Made the first time it is asked for and kept; the same object is handed out after. World thread only, outside map
+    // updates. Null, with why in error, when the dungeon does not resolve.
+    std::shared_ptr<const Route> GetRoute(const std::string& dungeon, Player* leader, uint32 level, std::string& error);
+
+    // Where a party is on a route: the first stop whose pack still has a living creature in the instance, and whose pack
+    // is at or past the point's place along the route. -1 when none. A creature not loaded and not waiting to respawn
+    // counts as living. World thread, or the instance's own map thread.
+    static int32 FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at);
+
 private:
     GuildPacks() = default;
 
@@ -131,15 +182,19 @@ private:
     Prediction Predict(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level,
         const PredictOptions& options) const;
     float Reach(const Node& node, uint32 level) const;
-    std::vector<std::string> BuildRoute(const MapModel& model, const std::string& name, uint32 level, const std::string& levelFrom,
+    std::shared_ptr<Route> BuildRoute(const MapModel& model, const std::string& name, uint32 level, const std::string& levelFrom,
         const std::vector<std::pair<int32, G3D::Vector3>>& stops) const;
+    std::vector<G3D::Vector3> StandPoints(const MapModel& model, const G3D::Vector3& spot, const G3D::Vector3& pack) const;
+    std::vector<std::string> PrintRoute(const MapModel& model, const Route& route) const;
+    std::shared_ptr<const Route> FindRoute(const std::string& dungeon, Player* leader, uint32 level, Player* named,
+        std::string& error);
     std::list<std::string> HandleRoute(const std::vector<std::string>& words);
     std::list<std::string> ListPacks(const MapModel& model, Map* map) const;
     std::list<std::string> ShowPrediction(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level) const;
 
     std::mutex lock;
     std::map<uint32, std::unique_ptr<MapModel>> models;
-    std::map<std::string, std::vector<std::string>> routes; // printed routes, by dungeon, level and faction
+    std::map<std::string, std::shared_ptr<const Route>> routes; // by dungeon, faction and level
     // Each dungeon's map and stops, by dungeon and faction, as GuildDungeon::BossRoute gives them.
     std::map<std::string, std::pair<uint32, std::vector<std::pair<int32, G3D::Vector3>>>> routeStops;
 };
