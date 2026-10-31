@@ -75,6 +75,8 @@ namespace
     // How many packs deep a route goes to clear a pull spot another creature reaches: that creature's pack is planned
     // first, and its own spot may need one more before it.
     constexpr int32 ROUTE_CLEAR_DEPTH = 2;
+    // A pull spot or stand point is clear of a creature this far outside its aggro reach.
+    constexpr float REACH_MARGIN = 3.0f;
 
     int64 CellKey(float x, float y)
     {
@@ -713,7 +715,8 @@ std::list<std::string> GuildPacks::ShowPrediction(const MapModel& model, Map* ma
 }
 
 
-std::vector<G3D::Vector3> GuildPacks::StandPoints(const MapModel& model, const G3D::Vector3& spot, const G3D::Vector3& pack) const
+std::vector<G3D::Vector3> GuildPacks::StandPoints(const MapModel& model, const G3D::Vector3& spot, const G3D::Vector3& pack,
+    const std::function<bool(const G3D::Vector3&)>& clear) const
 {
     // Behind the pull spot, away from the pack: two melee places either side near it, then the ranged one's and the healer's
     // farther back. Each is taken where a navmesh path from the spot ends, if it ends near it and the spot is in sight.
@@ -738,7 +741,7 @@ std::vector<G3D::Vector3> GuildPacks::StandPoints(const MapModel& model, const G
             if (!target.isPathTo(path, STAND_SLACK))
                 continue;
             const G3D::Vector3 at(path.back().getX(), path.back().getY(), path.back().getZ());
-            if (!VMAP::VMapFactory::createOrGetVMapManager()->isInLineOfSight(model.mapId, at.x, at.y, at.z + EYE,
+            if (!clear(at) || !VMAP::VMapFactory::createOrGetVMapManager()->isInLineOfSight(model.mapId, at.x, at.y, at.z + EYE,
                 spot.x, spot.y, spot.z + EYE, false))
                 continue;
             points.push_back(at);
@@ -847,15 +850,31 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
     std::vector<size_t> pullSpots;              // each stop's pull spot's point on the way
     std::vector<std::set<uint32>> deadAfter;    // what is dead once each stop's pull is done
 
-    auto reachedBy = [&](const G3D::Vector3& spot, const std::set<uint32>& own)
+    // The living creatures that reach a spot, the pack's own included: within their aggro reach in 3D and REACH_MARGIN,
+    // a wanderer from anywhere in its range, and a patrol from anywhere on its path.
+    auto reachedBy = [&](const G3D::Vector3& spot)
     {
         std::vector<uint32> found;
         for (uint32 i : Near(model, spot, ROUTE_REACH / 2.0f))
         {
             const Node& node = model.nodes[i];
-            if (own.count(i) || dead.count(i) || node.maybe || !node.aggroes)
+            if (dead.count(i) || node.maybe || !node.aggroes || node.movement == WAYPOINT_MOTION_TYPE)
                 continue;
-            if ((node.at - spot).length() <= Reach(node, level) + (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f))
+            if ((node.at - spot).length() <= Reach(node, level) + REACH_MARGIN
+                + (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f))
+                found.push_back(i);
+        }
+        for (uint32 i : patrols)
+        {
+            if (dead.count(i))
+                continue;
+            std::vector<G3D::Vector3> path;
+            for (auto const& point : model.nodes[i].patrol)
+                path.push_back(point.first);
+            path.push_back(path.front());
+            float along;
+            G3D::Vector3 nearest;
+            if (DistanceToPath(spot, path, along, nearest) <= Reach(model.nodes[i], level) + REACH_MARGIN)
                 found.push_back(i);
         }
         return found;
@@ -914,7 +933,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 c.offWay = offWay;
                 c.member = member;
                 c.distance = (model.nodes[member].at - spot).length();
-                c.reached = reachedBy(spot, own);
+                c.reached = reachedBy(spot);
                 PredictOptions options;
                 options.reach = ROUTE_REACH;
                 options.pulled = member;
@@ -998,11 +1017,14 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             }
             if (!have || best.reached.empty() || depth >= ROUTE_CLEAR_DEPTH || round == ROUTE_CLEAR_DEPTH)
                 break;
-            // Every spot is reached: the nearest creature that reaches the best one is pulled first, from its own pack's spot.
-            uint32 first = best.reached.front();
+            // Every spot is reached: the nearest creature of another pack that reaches the best one is pulled first, from its
+            // own pack's spot. The pack's own reach only rules a spot out; it is no stop of its own.
+            int32 first = -1;
             for (uint32 i : best.reached)
-                if ((model.nodes[i].at - best.spot).length() < (model.nodes[first].at - best.spot).length())
-                    first = i;
+                if (!own.count(i) && (first < 0 || (model.nodes[i].at - best.spot).length() < (model.nodes[first].at - best.spot).length()))
+                    first = int32(i);
+            if (first < 0)
+                break;
             const uint32 otherPack = model.nodes[first].pack;
             if (otherPack == packId || otherPack >= model.packs.size() || !plan(otherPack, depth + 1))
                 break;
@@ -1036,7 +1058,8 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             stop.lateSpawn = model.nodes[best.prediction.late.front().node].spawn;
             stop.lateSecond = best.lateFirst;
         }
-        stop.stand = StandPoints(model, best.spot, model.nodes[best.member].at);
+        stop.stand = StandPoints(model, best.spot, model.nodes[best.member].at,
+            [&](const G3D::Vector3& at) { return reachedBy(at).empty(); });
         r.stops.push_back(std::move(stop));
         pullSpots.push_back(best.index);
 

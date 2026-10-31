@@ -3,6 +3,7 @@
 #include "Common.h"
 #include "G3D/Vector3.h"
 
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
@@ -55,16 +56,18 @@ public:
         float pullDistance = 0.0f;              // yards from the pull spot to the pulled creature
         bool clean = false;                     // the pull brings nothing beyond the pack
         std::vector<uint32> extras;             // what the pull brings beyond the pack
-        // Whether no creature outside the pack reaches the pull spot itself, by its aggro range or its wandering. One that
-        // does is pulled by walking there, so a stop with spotClear false should not be approached. The route plans such
-        // a creature's pack first where it can, so this is false only when that failed.
+        // Whether no living creature reaches the pull spot itself: the pack's own and every other, by its aggro range in 3D
+        // with a margin of 3 yards, its wandering, or a patrol's path. One that does is pulled by walking there, so a stop
+        // with spotClear false should not be approached. The route plans another pack's creature first where it can, and
+        // looks farther for one of the pack's own, so this is false only when that failed.
         bool spotClear = true;
-        std::vector<uint32> reachedBy;          // the creatures outside the pack that reach the pull spot
+        std::vector<uint32> reachedBy;          // the creatures that reach the pull spot, the pack's own included
         bool clearsWay = false;                 // planned first, because its pack reached the next stop's pull spot
         uint32 lateSpawn = 0;                   // the earliest wanderer or patrol that could reach the fight, or 0
         uint32 lateSecond = 0;                  // the second it could
         // Where the party stands at the pull spot: four points on the navmesh 4 to 8 yards behind it, on the side away
-        // from the pack, in sight of it. Nearest first: two for melee, then the ranged one's, then the healer's, farthest back.
+        // from the pack, in sight of it, each outside every living creature's reach as the pull spot is.
+        // Nearest first: two for melee, then the ranged one's, then the healer's, farthest back.
         std::vector<G3D::Vector3> stand;
         G3D::Vector3 restSpot;                  // where the party rests after the pull, before the next stop's spot
         float restClearance = 0.0f;             // yards outside every living creature's reach there; negative when it is inside one
@@ -192,7 +195,8 @@ private:
     float Reach(const Node& node, uint32 level) const;
     std::shared_ptr<Route> BuildRoute(const MapModel& model, const std::string& name, uint32 level, const std::string& levelFrom,
         const std::vector<std::pair<int32, G3D::Vector3>>& stops) const;
-    std::vector<G3D::Vector3> StandPoints(const MapModel& model, const G3D::Vector3& spot, const G3D::Vector3& pack) const;
+    std::vector<G3D::Vector3> StandPoints(const MapModel& model, const G3D::Vector3& spot, const G3D::Vector3& pack,
+        const std::function<bool(const G3D::Vector3&)>& clear) const;
     std::vector<std::string> PrintRoute(const MapModel& model, const Route& route) const;
     std::shared_ptr<const Route> FindRoute(const std::string& dungeon, Player* leader, uint32 level, Player* named,
         std::string& error);
