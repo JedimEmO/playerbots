@@ -72,9 +72,11 @@ namespace
     constexpr int32 ROUTE_LEVEL_NEAR = 5;
     // A stand point is taken where a navmesh path to it ends, when that is within this of it.
     constexpr float STAND_SLACK = 1.5f;
-    // How many packs deep a route goes to clear a pull spot another creature reaches: that creature's pack is planned
-    // first, and its own spot may need one more before it.
+    // How many packs deep a route goes to clear a pull spot, or the way to it, that another creature reaches: that
+    // creature's pack is planned first, and its own spot may need one more before it.
     constexpr int32 ROUTE_CLEAR_DEPTH = 2;
+    // How many packs one pack's plan tries to clear first, one at a time: a way across a crowded floor meets several.
+    constexpr int32 ROUTE_CLEAR_TRIES = 10;
     // A pull spot or stand point is clear of a creature this far outside its aggro reach.
     constexpr float REACH_MARGIN = 3.0f;
     // A pack's and a spot's place along the way is looked for this far either side of where the stop is needed.
@@ -864,7 +866,11 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
     // REACH_MARGIN, another pack's wanderer whose spawn is that near, and any of the pack's own, a wanderer of it from
     // anywhere in its range; walking there pulls them. Another pack's wanderer from the rest of its spawn plus half its
     // range, no margin, and another pack's patrol from any point of its path: those move, and are waited for.
-    struct Reached { std::vector<uint32> strict, wander, patrol; };
+    struct Reached
+    {
+        std::vector<uint32> strict, wander, patrol;
+        std::vector<size_t> strictAt;   // for a way, the point of the route where the walk first meets each strict one
+    };
     std::map<uint32, std::vector<G3D::Vector3>> patrolPaths;   // each patrol's path as a closed loop
     for (uint32 i : patrols)
     {
@@ -918,30 +924,38 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
     // The way from the stop before's pull spot to a pull spot: the points of the route between them, either way round,
     // and to an off-way spot the straight line from its point of the route. What reaches any of it, by the same kinds,
     // except the pack's own, whose reach of the last stretch the spot's own test covers; one of the pack's own that
-    // reaches the way earlier is strict, since walking past it pulls it.
+    // reaches the way earlier is strict, since walking past it pulls it. The strict ones come in the order the walk
+    // meets them, each with its point of the route.
     auto legOf = [&](size_t to, const G3D::Vector3& spot, bool offWay, const std::set<uint32>& own)
     {
         Reached found;
         if (pullSpots.empty())
             return found;
         const size_t from = pullSpots.back();
-        std::vector<G3D::Vector3> points;
-        for (size_t j = std::min(from, to); j <= std::max(from, to) && j < route.size(); ++j)
-            points.push_back(route[j]);
+        std::vector<std::pair<G3D::Vector3, size_t>> points;
+        for (size_t step = 0, count = std::max(from, to) - std::min(from, to); step <= count; ++step)
+        {
+            const size_t j = from <= to ? from + step : from - step;
+            if (j < route.size())
+                points.emplace_back(route[j], j);
+        }
         if (offWay)
         {
             const G3D::Vector3 a = route[to];
             const float length = (spot - a).length();
             for (float t = ROUTE_STEP; t < length; t += ROUTE_STEP)
-                points.push_back(a + (spot - a) * (t / length));
+                points.emplace_back(a + (spot - a) * (t / length), to);
         }
         std::set<uint32> strict, wander, patrol;
-        for (const G3D::Vector3& at : points)
+        for (auto const& [at, j] : points)
         {
             const Reached here = reachOf(at, std::set<uint32>());
             for (uint32 i : here.strict)
-                if (!own.count(i) || (at - spot).length() > PULL_FAR)
-                    strict.insert(i);
+                if ((!own.count(i) || (at - spot).length() > PULL_FAR) && strict.insert(i).second)
+                {
+                    found.strict.push_back(i);
+                    found.strictAt.push_back(j);
+                }
             for (uint32 i : here.wander)
                 if (!own.count(i))
                     wander.insert(i);
@@ -949,7 +963,6 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 if (!own.count(i))
                     patrol.insert(i);
         }
-        found.strict.assign(strict.begin(), strict.end());
         for (uint32 i : wander)
             if (!strict.count(i))
                 found.wander.push_back(i);
@@ -1021,8 +1034,8 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                         std::vector<uint32> extras; Reached reached, leg; uint32 lateFirst = 0; float distance = 0.0f; };
         Choice best;
         bool have = false;
-        bool clearing = true;   // false once clearing another pack first has failed: the next round only chooses
-        for (int32 round = 0; round <= ROUTE_CLEAR_DEPTH; ++round)
+        std::set<uint32> tried;   // the packs this plan has planned first, whether that came to a stop or not
+        for (int32 round = 0; round <= ROUTE_CLEAR_TRIES; ++round)
         {
             const auto [along, anchor] = anchorOf(pack, hint);
             have = false;
@@ -1120,36 +1133,50 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             }
             if (have)
                 best.leg = legOf(best.index, best.spot, best.offWay, own);
-            if (!have || !clearing || (best.reached.strict.empty() && best.leg.strict.empty()) || depth >= ROUTE_CLEAR_DEPTH
-                || round == ROUTE_CLEAR_DEPTH)
+            if (!have || depth >= ROUTE_CLEAR_DEPTH || round == ROUTE_CLEAR_TRIES)
                 break;
-            // Every spot is reached, or the way to the best one is: the nearest creature of another pack standing still
-            // within reach of the spot, else of the way, is pulled first, from its own pack's spot. The pack's own reach
-            // only rules a spot out; it is no stop of its own.
-            int32 first = -1;
-            for (const std::vector<uint32>* strict : { &best.reached.strict, &best.leg.strict })
+            // Every spot is reached, or the way to the best one is: a creature of another pack standing still there is
+            // pulled first, from its own pack's spot. On the way, the first the walk meets, and its pack is planned from
+            // there; else the nearest that reaches the spot. A pack already tried, or whose plan is under way, is passed
+            // over for the next. The pack's own reach only rules a spot out; it is no stop of its own.
+            auto clearable = [&](uint32 i)
             {
-                for (uint32 i : *strict)
-                    if (!own.count(i) && (first < 0 || (model.nodes[i].at - best.spot).length() < (model.nodes[first].at - best.spot).length()))
+                const uint32 other = model.nodes[i].pack;
+                return !own.count(i) && other != packId && other < model.packs.size() && !planning.count(other) && !tried.count(other);
+            };
+            int32 first = -1;
+            size_t firstAt = best.index;
+            for (size_t k = 0; k < best.leg.strict.size() && first < 0; ++k)
+                if (clearable(best.leg.strict[k]))
+                {
+                    first = int32(best.leg.strict[k]);
+                    firstAt = best.leg.strictAt[k];
+                }
+            if (first < 0)
+                for (uint32 i : best.reached.strict)
+                    if (clearable(i) && (first < 0 || (model.nodes[i].at - best.spot).length() < (model.nodes[first].at - best.spot).length()))
                         first = int32(i);
-                if (first >= 0)
-                    break;
-            }
             if (first < 0)
                 break;
             const uint32 otherPack = model.nodes[first].pack;
-            if (otherPack == packId || otherPack >= model.packs.size() || planning.count(otherPack))
-                break;
+            tried.insert(otherPack);
             // Whatever the other plan did, the choice is chosen again: it may have killed this pack's creatures, or some of them.
             const size_t stopsBefore = r.stops.size();
-            if (plan(otherPack, depth + 1, best.index) && r.stops.size() > stopsBefore && r.stops.back().pack == otherPack)
+            if (plan(otherPack, depth + 1, firstAt) && r.stops.size() > stopsBefore && r.stops.back().pack == otherPack)
                 r.stops.back().clearsWay = true;
-            else
-                clearing = false;
             if (gone())
                 return false;
         }
         if (!have)
+            return false;
+        // A pack planned first to clear another's way is no help if its own spot, or the way to it, is still reached by
+        // another pack standing still: the walk there would pull that one. It is no stop, and the pack that wanted it
+        // goes on to its next choice. A pack the route meets in turn is planned however it ends, its spot and way marked.
+        auto othersIn = [&](const std::vector<uint32>& strict)
+        {
+            return std::any_of(strict.begin(), strict.end(), [&](uint32 i) { return !own.count(i); });
+        };
+        if (depth > 0 && (othersIn(best.reached.strict) || othersIn(best.leg.strict)))
             return false;
 
         Stop stop;
