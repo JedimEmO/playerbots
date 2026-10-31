@@ -855,23 +855,36 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
     std::vector<size_t> pullSpots;              // each stop's pull spot's point on the way
     std::vector<std::set<uint32>> deadAfter;    // what is dead once each stop's pull is done
 
-    // The living creatures that reach a spot, the pack's own included: within their aggro reach in 3D and REACH_MARGIN,
-    // a wanderer from anywhere in its range, and a patrol from anywhere on its path.
-    auto reachedBy = [&](const G3D::Vector3& spot)
+    // The living creatures that reach a spot, by kind. Strict: one standing still within its aggro reach in 3D and
+    // REACH_MARGIN, and any of the pack's own, a wanderer of it from anywhere in its range; walking there pulls them.
+    // Another pack's wanderer from its spawn plus half its range, no margin, and another pack's patrol from any point of
+    // its path: those move, and are waited for, not planned around.
+    struct Reached { std::vector<uint32> strict, wander, patrol; };
+    auto reachOf = [&](const G3D::Vector3& spot, const std::set<uint32>& own)
     {
-        std::vector<uint32> found;
+        Reached found;
         for (uint32 i : Near(model, spot, ROUTE_REACH / 2.0f))
         {
             const Node& node = model.nodes[i];
-            if (dead.count(i) || node.maybe || !node.aggroes || node.movement == WAYPOINT_MOTION_TYPE)
+            if (dead.count(i) || node.maybe || !node.aggroes)
                 continue;
-            if ((node.at - spot).length() <= Reach(node, level) + REACH_MARGIN
-                + (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f))
-                found.push_back(i);
+            const float d = (node.at - spot).length(), reach = Reach(node, level);
+            if (own.count(i))
+            {
+                if (d <= reach + REACH_MARGIN + (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f))
+                    found.strict.push_back(i);
+            }
+            else if (node.movement == RANDOM_MOTION_TYPE)
+            {
+                if (d <= reach + node.spawnDist / 2.0f)
+                    found.wander.push_back(i);
+            }
+            else if (node.movement != WAYPOINT_MOTION_TYPE && d <= reach + REACH_MARGIN)
+                found.strict.push_back(i);
         }
         for (uint32 i : patrols)
         {
-            if (dead.count(i))
+            if (dead.count(i) || own.count(i))
                 continue;
             std::vector<G3D::Vector3> path;
             for (auto const& point : model.nodes[i].patrol)
@@ -880,7 +893,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             float along;
             G3D::Vector3 nearest;
             if (DistanceToPath(spot, path, along, nearest) <= Reach(model.nodes[i], level) + REACH_MARGIN)
-                found.push_back(i);
+                found.patrol.push_back(i);
         }
         return found;
     };
@@ -944,7 +957,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         };
 
         struct Choice { G3D::Vector3 spot; size_t index = 0; bool offWay = false; int32 member = -1; Prediction prediction;
-                        std::vector<uint32> extras, reached; uint32 lateFirst = 0; float distance = 0.0f; };
+                        std::vector<uint32> extras; Reached reached; uint32 lateFirst = 0; float distance = 0.0f; };
         Choice best;
         bool have = false;
         bool clearing = true;   // false once clearing another pack first has failed: the next round only chooses
@@ -960,7 +973,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 c.offWay = offWay;
                 c.member = member;
                 c.distance = (model.nodes[member].at - spot).length();
-                c.reached = reachedBy(spot);
+                c.reached = reachOf(spot, own);
                 PredictOptions options;
                 options.reach = ROUTE_REACH;
                 options.pulled = member;
@@ -970,8 +983,10 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                     if (!own.count(joined.node))
                         c.extras.push_back(joined.node);
                 c.lateFirst = c.prediction.late.empty() ? std::numeric_limits<uint32>::max() : c.prediction.late.front().second;
-                const bool better = !have || c.reached.size() < best.reached.size()
-                    || (c.reached.size() == best.reached.size() && (c.extras.size() < best.extras.size()
+                // Fewest that would be pulled by walking there, then fewest wanderers to wait for, then the rest as before.
+                const auto rank = [](const Choice& x) { return std::make_pair(x.reached.strict.size(), x.reached.wander.size()); };
+                const bool better = !have || rank(c) < rank(best)
+                    || (rank(c) == rank(best) && (c.extras.size() < best.extras.size()
                         || (c.extras.size() == best.extras.size() && (c.lateFirst > best.lateFirst
                             || (c.lateFirst == best.lateFirst && std::fabs(c.distance - PULL_BEST) < std::fabs(best.distance - PULL_BEST))))));
                 if (better)
@@ -1012,7 +1027,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             // Off the way, when the way passes no nearer than PULL_FAR or every spot on it is reached: PULL_BEST from the
             // nearest of the pack, toward the way and turned either side, on the navmesh by a path from the way, and in
             // sight of the creature.
-            if (have && (best.distance > PULL_FAR + ROUTE_STEP || !best.reached.empty()))
+            if (have && (best.distance > PULL_FAR + ROUTE_STEP || !best.reached.strict.empty() || !best.reached.wander.empty()))
             {
                 int32 member = -1;
                 distanceToPack(route[anchor], member);
@@ -1042,12 +1057,12 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                     }
                 }
             }
-            if (!have || !clearing || best.reached.empty() || depth >= ROUTE_CLEAR_DEPTH || round == ROUTE_CLEAR_DEPTH)
+            if (!have || !clearing || best.reached.strict.empty() || depth >= ROUTE_CLEAR_DEPTH || round == ROUTE_CLEAR_DEPTH)
                 break;
-            // Every spot is reached: the nearest creature of another pack that reaches the best one is pulled first, from its
-            // own pack's spot. The pack's own reach only rules a spot out; it is no stop of its own.
+            // Every spot is reached: the nearest creature of another pack standing still within reach of the best one is
+            // pulled first, from its own pack's spot. The pack's own reach only rules a spot out; it is no stop of its own.
             int32 first = -1;
-            for (uint32 i : best.reached)
+            for (uint32 i : best.reached.strict)
                 if (!own.count(i) && (first < 0 || (model.nodes[i].at - best.spot).length() < (model.nodes[first].at - best.spot).length()))
                     first = int32(i);
             if (first < 0)
@@ -1088,16 +1103,30 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         stop.clean = best.extras.empty();
         for (uint32 i : best.extras)
             stop.extras.push_back(model.nodes[i].spawn);
-        stop.spotClear = best.reached.empty();
-        for (uint32 i : best.reached)
+        stop.spotClear = best.reached.strict.empty();
+        for (uint32 i : best.reached.strict)
+        {
             stop.reachedBy.push_back(model.nodes[i].spawn);
+            const bool ownPack = own.count(i) > 0;
+            const ReachKind kind = model.nodes[i].movement == RANDOM_MOTION_TYPE ? ReachKind::Wanderer
+                : model.nodes[i].movement == WAYPOINT_MOTION_TYPE ? ReachKind::Patrol : ReachKind::Static;
+            stop.reachers.push_back({ model.nodes[i].spawn, kind, ownPack });
+        }
+        for (uint32 i : best.reached.wander)
+            stop.reachers.push_back({ model.nodes[i].spawn, ReachKind::Wanderer, false });
+        for (uint32 i : best.reached.patrol)
+            stop.reachers.push_back({ model.nodes[i].spawn, ReachKind::Patrol, false });
         if (!best.prediction.late.empty())
         {
             stop.lateSpawn = model.nodes[best.prediction.late.front().node].spawn;
             stop.lateSecond = best.lateFirst;
         }
         stop.stand = StandPoints(model, best.spot, model.nodes[best.member].at,
-            [&](const G3D::Vector3& at) { return reachedBy(at).empty(); });
+            [&](const G3D::Vector3& at)
+            {
+                const Reached reached = reachOf(at, own);
+                return reached.strict.empty() && reached.wander.empty();
+            });
         r.stops.push_back(std::move(stop));
         pullSpots.push_back(best.index);
 
@@ -1229,9 +1258,20 @@ std::vector<std::string> GuildPacks::PrintRoute(const MapModel& model, const Rou
                 verdict += (verdict.empty() || verdict.back() == ' ' ? "" : "; ") + Format("%s from %us", CreatureName(entryOf(stop.lateSpawn)).c_str(),
                     stop.lateSecond);
         }
-        lines.push_back(Format("%u. pack %u%s%s, %u (%u elite): %s; pull at (%.1f %.1f %.1f)%s %.0f yd, %s; %u stand", uint32(n + 1),
+        // The wanderers and patrols of other packs to wait for at the spot, by count.
+        uint32 wanderers = 0, patrolling = 0;
+        for (const Reacher& reacher : stop.reachers)
+            if (!reacher.ownPack)
+            {
+                wanderers += reacher.kind == ReachKind::Wanderer ? 1 : 0;
+                patrolling += reacher.kind == ReachKind::Patrol ? 1 : 0;
+            }
+        std::string wait;
+        if (wanderers || patrolling)
+            wait = Format("; wait for %u wanderer%s, %u patrol%s", wanderers, wanderers == 1 ? "" : "s", patrolling, patrolling == 1 ? "" : "s");
+        lines.push_back(Format("%u. pack %u%s%s, %u (%u elite): %s; pull at (%.1f %.1f %.1f)%s %.0f yd, %s%s; %u stand", uint32(n + 1),
             stop.pack, stop.boss ? " boss" : "", stop.clearsWay ? " first, to clear the next spot" : "", uint32(stop.spawns.size()), elites, packText.c_str(), stop.pullSpot.x, stop.pullSpot.y,
-            stop.pullSpot.z, stop.offWay ? " off the way" : "", stop.pullDistance, verdict.c_str(), uint32(stop.stand.size())).substr(0, 240));
+            stop.pullSpot.z, stop.offWay ? " off the way" : "", stop.pullDistance, verdict.c_str(), wait.c_str(), uint32(stop.stand.size())).substr(0, 260));
         const G3D::Vector3 next = n + 1 < route.stops.size() ? route.stops[n + 1].pullSpot : route.points.back();
         if (stop.restClear)
             lines.push_back(Format("   rest at (%.1f %.1f %.1f), %.0f yd from the next pull", stop.restSpot.x, stop.restSpot.y,
