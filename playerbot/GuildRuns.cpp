@@ -13,6 +13,7 @@
 #include "playerbot/strategy/values/LastMovementValue.h"
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 
 namespace
@@ -790,7 +791,8 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
                 c.nearMember = member->GetGUIDLow();
             }
         }
-        c.nearDistance = std::max(nearest, 0.0f);
+        // DIST_CALC_NONE gives the distance squared.
+        c.nearDistance = nearest > 0.0f ? std::sqrt(nearest) : 0.0f;
     }
 
     // Every creature of the fight while it is in the world, the ones that left it too: where it is, and whether it
