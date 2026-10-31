@@ -91,6 +91,10 @@ private:
         uint32 summoner = 0;           // the entry of the creature that summoned it, when the core keeps it
         bool pulled = false;           // the dungeon job's pulled creature
         std::string how;               // pulled, attacked (on a member), was_attacked (a member on it), or both
+        uint32 nearMember = 0;         // the living member inside nearest it at its first sight, and how far, in 3D
+        float nearDistance = 0.0f;
+        int32 fled = -1;               // seconds after the fight's start it was first seen fleeing, -1 for never
+        float lastX = 0.0f, lastY = 0.0f, lastZ = 0.0f; // where it was at the last sample it was in the world
     };
 
     // The fight a run's party is in, from the first member in combat inside until all alive have been out of it

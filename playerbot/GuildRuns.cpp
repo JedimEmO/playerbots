@@ -209,6 +209,16 @@ void GuildRuns::EnsureTables()
         " how VARCHAR(16) NOT NULL DEFAULT '',"               // pulled, attacked, was_attacked, both
         " PRIMARY KEY (instance, opened, seq, guid)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // Whether a member walked into a creature or it came to the party: the nearest member at its first sight; and
+    // whether it left the fight: when it fled, and where it was last.
+    CharacterDatabase.DirectExecute(
+        "ALTER TABLE guildbot_fight_creature"
+        " ADD COLUMN IF NOT EXISTS near_member INT UNSIGNED NOT NULL DEFAULT 0,"     // 0 with no member alive inside
+        " ADD COLUMN IF NOT EXISTS near_distance FLOAT NOT NULL DEFAULT 0,"
+        " ADD COLUMN IF NOT EXISTS fled INT UNSIGNED NULL DEFAULT NULL,"             // seconds after the start, NULL for never
+        " ADD COLUMN IF NOT EXISTS last_x FLOAT NOT NULL DEFAULT 0,"
+        " ADD COLUMN IF NOT EXISTS last_y FLOAT NOT NULL DEFAULT 0,"
+        " ADD COLUMN IF NOT EXISTS last_z FLOAT NOT NULL DEFAULT 0");
     CharacterDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS guildbot_fight_member ("
         " instance INT UNSIGNED NOT NULL,"
@@ -768,7 +778,35 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
             c.summoner = creature->GetOwnerGuid().GetEntry();
         c.pulled = !fight.pulledGuid.IsEmpty() && creature->GetObjectGuid() == fight.pulledGuid;
         c.how = c.pulled ? "pulled" : link == 3 ? "both" : link == 1 ? "attacked" : "was_attacked";
+        float nearest = -1.0f;
+        for (Player* member : party)
+        {
+            if (!member->IsAlive() || !inside(member))
+                continue;
+            const float distance = creature->GetDistance(member, true, DIST_CALC_NONE);
+            if (nearest < 0.0f || distance < nearest)
+            {
+                nearest = distance;
+                c.nearMember = member->GetGUIDLow();
+            }
+        }
+        c.nearDistance = std::max(nearest, 0.0f);
     }
+
+    // Every creature of the fight while it is in the world, the ones that left it too: where it is, and whether it
+    // flees, in panic at low health, feared, or running to an ally.
+    if (Map* map = sMapMgr.FindMap(run.mapId, run.instanceId))
+        for (auto& [guid, c] : fight.creatures)
+        {
+            Creature* creature = map->GetAnyTypeCreature(guid);
+            if (!creature || !creature->IsInWorld())
+                continue;
+            c.lastX = creature->GetPositionX();
+            c.lastY = creature->GetPositionY();
+            c.lastZ = creature->GetPositionZ();
+            if (c.fled < 0 && creature->IsAlive() && creature->hasUnitState(UNIT_STAT_FLEEING | UNIT_STAT_RETREATING))
+                c.fled = int32(WorldTimer::getMSTimeDiff(fight.startMs, nowMs) / IN_MILLISECONDS);
+        }
 
     // Over once nobody alive inside has been in combat for FIGHT_QUIET_MS, or nobody is alive inside.
     if (!alive)
@@ -898,16 +936,19 @@ void GuildRuns::EndFight(Run& run, time_t now)
         if (!count)
             return;
         CharacterDatabase.Execute(("REPLACE INTO guildbot_fight_creature (instance, opened, seq, guid, spawn, entry, joined, x, y, z, "
-            "summoned, summoner, pulled, how) VALUES " + rows.str()).c_str());
+            "summoned, summoner, pulled, how, near_member, near_distance, fled, last_x, last_y, last_z) VALUES " + rows.str()).c_str());
         rows.str("");
         count = 0;
     };
     for (auto& [guid, c] : fight.creatures)
     {
-        char row[256];
-        snprintf(row, sizeof(row), "%s(%u, FROM_UNIXTIME(%u), %u, %u, %u, %u, %u, %.2f, %.2f, %.2f, %u, %u, %u, '%s')",
+        char row[384];
+        const std::string fled = c.fled < 0 ? std::string("NULL") : std::to_string(c.fled);
+        snprintf(row, sizeof(row), "%s(%u, FROM_UNIXTIME(%u), %u, %u, %u, %u, %u, %.2f, %.2f, %.2f, %u, %u, %u, '%s', %u, %.2f, %s, "
+            "%.2f, %.2f, %.2f)",
             count ? ", " : "", run.instanceId, uint32(run.opened), fight.seq, guid.GetCounter(), c.spawn, c.entry, c.joined,
-            c.x, c.y, c.z, c.summoned ? 1 : 0, c.summoner, c.pulled ? 1 : 0, c.how.c_str());
+            c.x, c.y, c.z, c.summoned ? 1 : 0, c.summoner, c.pulled ? 1 : 0, c.how.c_str(), c.nearMember, c.nearDistance,
+            fled.c_str(), c.lastX, c.lastY, c.lastZ);
         rows << row;
         if (++count == 50)
             flush();
