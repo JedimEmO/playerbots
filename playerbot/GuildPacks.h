@@ -49,9 +49,9 @@ public:
         std::vector<uint32> spawns;             // its creatures, those not already counted dead at an earlier stop
         uint32 pulled = 0;                      // the creature the tank pulls: the nearest of the pack to the pull spot
         bool boss = false;                      // one of the dungeon's bosses is in the pack
-        float along = 0.0f;                     // yards along the route of the pack's nearest point to it
+        float along = 0.0f;                     // yards along the route of the pack's nearest point, near where the stop is needed
         G3D::Vector3 pullSpot;                  // where the tank pulls from, and where the fight is held
-        float pullAlong = 0.0f;                 // yards along the route of the pull spot, or of the way's point it is off
+        float pullAlong = 0.0f;                 // yards along the route of the pull spot, or of the way's point nearest it when off it
         bool offWay = false;                    // the pull spot is off the way, by a navmesh path from it
         float pullDistance = 0.0f;              // yards from the pull spot to the pulled creature
         bool clean = false;                     // the pull brings nothing beyond the pack
@@ -95,9 +95,10 @@ public:
     // updates. Null, with why in error, when the dungeon does not resolve.
     std::shared_ptr<const Route> GetRoute(const std::string& dungeon, Player* leader, uint32 level, std::string& error);
 
-    // Where a party is on a route: the living stop whose pull spot is nearest the point, or a clearing stop just before it
-    // whose spot is near the point too. -1 when none lives. A creature not loaded and not waiting to respawn counts as
-    // living. World thread, or the instance's own map thread.
+    // Where a party is on a route: the living stop whose pull spot is at or ahead of the point's place along the route,
+    // nearest along it, judged by pullAlong; then the living clearing stops just before it whose spots are ahead too,
+    // which are pulled first. A clearing stop whose spot is behind the point is passed over. -1 when none lives.
+    // A creature not loaded and not waiting to respawn counts as living. World thread, or the instance's own map thread.
     static int32 FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at);
     // The same from a stop's index on: the first stop at or after it whose pack still has a living creature, or -1.
     static int32 FirstLiveStop(const Route& route, Map* map, size_t from);

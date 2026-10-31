@@ -77,9 +77,11 @@ namespace
     constexpr int32 ROUTE_CLEAR_DEPTH = 2;
     // A pull spot or stand point is clear of a creature this far outside its aggro reach.
     constexpr float REACH_MARGIN = 3.0f;
-    // A party set down on a route starts at a clearing stop before its nearest stop when the clearing stop's spot is this
-    // near it.
-    constexpr float START_NEAR = 40.0f;
+    // A pack's and a spot's place along the way is looked for this far either side of where the stop is needed.
+    constexpr float ANCHOR_WINDOW = 120.0f;
+    // A party set down on a route counts a pull spot this far behind it along the way as still ahead: it can stand a
+    // little past the point of the way its spot is placed by.
+    constexpr float START_SLACK = 10.0f;
 
     int64 CellKey(float x, float y)
     {
@@ -882,30 +884,41 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         }
         return found;
     };
-    // The point of the way nearest a pack, by any of its living members that attack.
-    auto anchorOf = [&](const Pack& pack)
+    // The point of the way nearest a point, among those within ANCHOR_WINDOW of the point of the way where it is needed:
+    // the way can pass one place twice, as the Deadmines' passes its mine, and the pass that matters is the near one.
+    auto nearestPoint = [&](const G3D::Vector3& at, size_t hint)
     {
-        float bestAlong = 0.0f, bestDistance = std::numeric_limits<float>::max();
+        const size_t window = size_t(ANCHOR_WINDOW / ROUTE_STEP);
+        const size_t from = hint > window ? hint - window : 0, to = std::min(route.size() - 1, hint + window);
+        size_t best = from;
+        for (size_t j = from; j <= to; ++j)
+            if ((route[j] - at).squaredLength() < (route[best] - at).squaredLength())
+                best = j;
+        return best;
+    };
+    // The point of the way nearest a pack, by any of its living members that attack, near the point where it is needed.
+    auto anchorOf = [&](const Pack& pack, size_t hint)
+    {
+        size_t best = hint;
+        float bestDistance = std::numeric_limits<float>::max();
         for (uint32 i : pack.members)
         {
             if (dead.count(i) || !model.nodes[i].aggroes)
                 continue;
-            float along;
-            G3D::Vector3 nearest;
-            const float d = DistanceToPath(model.nodes[i].at, route, along, nearest);
-            if (d < bestDistance)
+            const size_t j = nearestPoint(model.nodes[i].at, hint);
+            if ((route[j] - model.nodes[i].at).length() < bestDistance)
             {
-                bestDistance = d;
-                bestAlong = along;
+                bestDistance = (route[j] - model.nodes[i].at).length();
+                best = j;
             }
         }
-        return std::make_pair(bestAlong, std::min(route.size() - 1, size_t(bestAlong / ROUTE_STEP + 0.5f)));
+        return std::make_pair(float(best) * ROUTE_STEP, best);
     };
 
     // The packs whose plan is under way, so that clearing never comes back round to one of them: planning A can clear B
     // first, and B's own spot may be reached by A.
     std::set<uint32> planning;
-    std::function<bool(uint32, int32)> plan = [&](uint32 packId, int32 depth) -> bool
+    std::function<bool(uint32, int32, size_t)> plan = [&](uint32 packId, int32 depth, size_t hint) -> bool
     {
         const Pack& pack = model.packs[packId];
         auto gone = [&]()
@@ -937,7 +950,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         bool clearing = true;   // false once clearing another pack first has failed: the next round only chooses
         for (int32 round = 0; round <= ROUTE_CLEAR_DEPTH; ++round)
         {
-            const auto [along, anchor] = anchorOf(pack);
+            const auto [along, anchor] = anchorOf(pack, hint);
             have = false;
             auto weigh = [&](const G3D::Vector3& spot, size_t index, bool offWay, int32 member)
             {
@@ -1044,7 +1057,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 break;
             // Whatever the other plan did, the choice is chosen again: it may have killed this pack's creatures, or some of them.
             const size_t stopsBefore = r.stops.size();
-            if (plan(otherPack, depth + 1) && r.stops.size() > stopsBefore && r.stops.back().pack == otherPack)
+            if (plan(otherPack, depth + 1, best.index) && r.stops.size() > stopsBefore && r.stops.back().pack == otherPack)
                 r.stops.back().clearsWay = true;
             else
                 clearing = false;
@@ -1066,9 +1079,10 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         if (stop.spawns.empty())
             return false;
         stop.pulled = model.nodes[best.member].spawn;
-        stop.along = anchorOf(pack).first;
+        stop.along = anchorOf(pack, hint).first;
         stop.pullSpot = best.spot;
-        stop.pullAlong = float(best.index) * ROUTE_STEP;
+        // An off-way spot is placed by the point of the way nearest it, near where it is needed.
+        stop.pullAlong = float(best.offWay ? nearestPoint(best.spot, best.index) : best.index) * ROUTE_STEP;
         stop.offWay = best.offWay;
         stop.pullDistance = best.distance;
         stop.clean = best.extras.empty();
@@ -1095,7 +1109,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         return true;
     };
     for (size_t n = 0; n < onWay.size(); ++n)
-        plan(onWay[n].pack, 0);
+        plan(onWay[n].pack, 0, onWay[n].index);
 
     // Rest spots, after each pull: the clear point of the way nearest the next pull's spot, from the ground just cleared
     // behind this pull up to that spot. Clear is REST_MARGIN outside every living creature's aggro range, a wanderer's
@@ -1318,25 +1332,31 @@ namespace
 
 int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at)
 {
-    if (!map)
+    if (!map || route.points.empty())
         return -1;
-    // The living stop whose pull spot is nearest the party, then back over the clearing stops just before it whose spots
-    // are near the party too: they open its spot. Not by the pack's place along the way, which a pack the way passes
-    // twice, as in the Deadmines' mine, puts ahead of a party it lies far behind.
+    // The party's place along the way: its nearest point of it.
+    size_t nearest = 0;
+    for (size_t i = 1; i < route.points.size(); ++i)
+        if ((route.points[i] - at).squaredLength() < (route.points[nearest] - at).squaredLength())
+            nearest = i;
+    const float along = float(nearest) * ROUTE_STEP;
+    // The living stop whose pull spot is at or ahead of that place, nearest along the way, judged by the spot's place,
+    // not the pack's. Then the clearing stops just before it in the list, living and ahead too: they open its spot and
+    // are pulled first. A clearing stop whose spot lies behind the party is passed over.
     MapPersistentState* state = map->GetPersistentState();
     const time_t now = time(nullptr);
     int32 best = -1;
-    float bestDistance = std::numeric_limits<float>::max();
     for (size_t k = 0; k < route.stops.size(); ++k)
     {
-        const float d = (route.stops[k].pullSpot - at).length();
-        if (d < bestDistance && StopLives(route.stops[k], map, state, now))
-        {
-            bestDistance = d;
+        const Stop& stop = route.stops[k];
+        if (stop.clearsWay || stop.pullAlong + START_SLACK < along)
+            continue;
+        if ((best < 0 || stop.pullAlong < route.stops[best].pullAlong) && StopLives(stop, map, state, now))
             best = int32(k);
-        }
     }
-    while (best > 0 && route.stops[best - 1].clearsWay && (route.stops[best - 1].pullSpot - at).length() <= START_NEAR
+    if (best < 0)
+        return -1;
+    while (best > 0 && route.stops[best - 1].clearsWay && route.stops[best - 1].pullAlong + START_SLACK >= along
         && StopLives(route.stops[best - 1], map, state, now))
         --best;
     return best;
