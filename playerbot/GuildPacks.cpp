@@ -77,6 +77,9 @@ namespace
     constexpr int32 ROUTE_CLEAR_DEPTH = 2;
     // A pull spot or stand point is clear of a creature this far outside its aggro reach.
     constexpr float REACH_MARGIN = 3.0f;
+    // A party set down on a route starts at a clearing stop before its nearest stop when the clearing stop's spot is this
+    // near it.
+    constexpr float START_NEAR = 40.0f;
 
     int64 CellKey(float x, float y)
     {
@@ -1289,20 +1292,54 @@ std::shared_ptr<const GuildPacks::Route> GuildPacks::GetRoute(const std::string&
     return FindRoute(dungeon, leader, level, nullptr, error);
 }
 
+namespace
+{
+    // Whether a stop's pack still has a living creature in the instance: no respawn time, and found alive, or not found
+    // in a grid that is not loaded, as it would be once the party comes near.
+    bool StopLives(const GuildPacks::Stop& stop, Map* map, MapPersistentState* state, time_t now)
+    {
+        for (uint32 spawn : stop.spawns)
+        {
+            if (state && state->GetCreatureRespawnTime(spawn) > now)
+                continue;
+            if (Creature* creature = map->GetCreature(spawn))
+            {
+                if (creature->IsAlive())
+                    return true;
+                continue;
+            }
+            if (CreatureData const* data = sObjectMgr.GetCreatureData(spawn))
+                if (!map->IsLoaded(data->posX, data->posY))
+                    return true;
+        }
+        return false;
+    }
+}
+
 int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at)
 {
-    if (!map || route.points.empty())
+    if (!map)
         return -1;
-    // The point's place along the route: its nearest point of the way. The first stop whose pack is at or past it.
-    size_t nearest = 0;
-    for (size_t i = 1; i < route.points.size(); ++i)
-        if ((route.points[i] - at).squaredLength() < (route.points[nearest] - at).squaredLength())
-            nearest = i;
-    const float along = float(nearest) * ROUTE_STEP;
+    // The living stop whose pull spot is nearest the party, then back over the clearing stops just before it whose spots
+    // are near the party too: they open its spot. Not by the pack's place along the way, which a pack the way passes
+    // twice, as in the Deadmines' mine, puts ahead of a party it lies far behind.
+    MapPersistentState* state = map->GetPersistentState();
+    const time_t now = time(nullptr);
+    int32 best = -1;
+    float bestDistance = std::numeric_limits<float>::max();
     for (size_t k = 0; k < route.stops.size(); ++k)
-        if (route.stops[k].along + ROUTE_STEP >= along)
-            return FirstLiveStop(route, map, k);
-    return -1;
+    {
+        const float d = (route.stops[k].pullSpot - at).length();
+        if (d < bestDistance && StopLives(route.stops[k], map, state, now))
+        {
+            bestDistance = d;
+            best = int32(k);
+        }
+    }
+    while (best > 0 && route.stops[best - 1].clearsWay && (route.stops[best - 1].pullSpot - at).length() <= START_NEAR
+        && StopLives(route.stops[best - 1], map, state, now))
+        --best;
+    return best;
 }
 
 int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, size_t from)
@@ -1312,21 +1349,8 @@ int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, size_t from)
     MapPersistentState* state = map->GetPersistentState();
     const time_t now = time(nullptr);
     for (size_t k = from; k < route.stops.size(); ++k)
-        for (uint32 spawn : route.stops[k].spawns)
-        {
-            if (state && state->GetCreatureRespawnTime(spawn) > now)
-                continue;
-            if (Creature* creature = map->GetCreature(spawn))
-            {
-                if (creature->IsAlive())
-                    return int32(k);
-                continue;
-            }
-            // Not in the instance: living when its grid is not loaded, as it would be once the party comes near.
-            if (CreatureData const* data = sObjectMgr.GetCreatureData(spawn))
-                if (!map->IsLoaded(data->posX, data->posY))
-                    return int32(k);
-        }
+        if (StopLives(route.stops[k], map, state, now))
+            return int32(k);
     return -1;
 }
 

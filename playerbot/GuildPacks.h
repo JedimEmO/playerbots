@@ -95,9 +95,9 @@ public:
     // updates. Null, with why in error, when the dungeon does not resolve.
     std::shared_ptr<const Route> GetRoute(const std::string& dungeon, Player* leader, uint32 level, std::string& error);
 
-    // Where a party is on a route: the first stop whose pack still has a living creature in the instance, and whose pack
-    // is at or past the point's place along the route. -1 when none. A creature not loaded and not waiting to respawn
-    // counts as living. World thread, or the instance's own map thread.
+    // Where a party is on a route: the living stop whose pull spot is nearest the point, or a clearing stop just before it
+    // whose spot is near the point too. -1 when none lives. A creature not loaded and not waiting to respawn counts as
+    // living. World thread, or the instance's own map thread.
     static int32 FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at);
     // The same from a stop's index on: the first stop at or after it whose pack still has a living creature, or -1.
     static int32 FirstLiveStop(const Route& route, Map* map, size_t from);
