@@ -48,6 +48,7 @@ public:
         uint32 spawn = 0;                       // its row in the world database's creature table
         ReachKind kind = ReachKind::Static;
         bool ownPack = false;                   // one of the stop's own pack
+        bool onLeg = false;                     // it reaches the way from the stop before to the pull spot, not the spot
     };
 
     // One stop of a route: a pack the way meets, where the tank pulls it from, where the party stands, and where it rests.
@@ -66,15 +67,20 @@ public:
         bool clean = false;                     // the pull brings nothing beyond the pack
         std::vector<uint32> extras;             // what the pull brings beyond the pack
         // Whether no creature standing still, and none of the pack's own, reaches the pull spot itself: within its aggro reach
-        // in 3D and 3 yards more, a wanderer of the pack's own from anywhere in its range. Walking there pulls such a
+        // in 3D and 3 yards more, another pack's wanderer from its spawn, a wanderer of the pack's own from anywhere in its range. Walking there pulls such a
         // creature, so a stop with spotClear false should not be approached. Other packs' wanderers and patrols do not
         // count here; they are in reachers, to be waited for by where they are when the party comes.
         bool spotClear = true;
         std::vector<uint32> reachedBy;          // the creatures that make spotClear false
-        // Every creature that reaches the spot, with how: one standing still (aggro reach and 3 yards), a wanderer of
-        // another pack (from its spawn plus half its range, no margin), a patrol of another pack (from any point of its
-        // path), and the pack's own.
+        // Every creature that reaches the spot or the way to it (onLeg), with how: one standing still (aggro reach and 3
+        // yards), a wanderer (its spawn that near is as one standing still; else from its spawn plus half its range, no
+        // margin), a patrol of another pack (from any point of its path), and the pack's own.
         std::vector<Reacher> reachers;
+        // Whether nothing standing still reaches the way from the stop before's pull spot to this one, and none of the
+        // pack's own reaches it short of the spot: within aggro reach in 3D and 3 yards, a wanderer from its spawn. The
+        // route plans such a creature's pack first where it can. The way's wanderers and patrols are in reachers, onLeg.
+        bool legClear = true;
+        std::vector<uint32> legReachedBy;       // the creatures that make legClear false
         bool clearsWay = false;                 // planned first, because its pack reached the next stop's pull spot
         uint32 lateSpawn = 0;                   // the earliest wanderer or patrol that could reach the fight, or 0
         uint32 lateSecond = 0;                  // the second it could
