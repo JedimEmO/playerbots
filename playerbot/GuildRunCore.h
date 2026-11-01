@@ -74,6 +74,11 @@ namespace runcore
         virtual bool CreatureNear(const std::vector<runrules::Vec>& part) = 0;
         // Whether the member's motion holds a run move walking its way.
         virtual bool Walking(uint32_t guid) = 0;
+        // The point of the route's way at the instance's entrance, where a supply trip's walk out ends; false with none.
+        virtual bool ExitPoint(Held& at) = 0;
+        // A member as readiness sees it (runrules::Ready), for a recovery's obligations: its distance is to the leader.
+        // False when it cannot be seen, as one offline; its facts are FactsOf's either way.
+        virtual bool ReadyOf(uint32_t guid, uint32_t leader, runrules::Ready& ready) = 0;
     };
 
     // A member apart from its party: dead, outside, offline or a player's (missing), back but not yet with the party, new in
@@ -130,7 +135,21 @@ namespace runcore
         Held leaderWay;
         std::map<uint32_t, time_t> lastDead; // when each member was last seen dead
         time_t apartSince = 0;               // since when a member is apart with nothing else holding the run
-        bool failed = false;                 // ended because the party could not regroup
+        bool failed = false;                 // ended because the party could not regroup, or blocked at one stop too often
+        // Blocks (docs/run-contract.md, "A block"): the last one taken, the count at each stop by its pack, and the
+        // recovery under way: its obligations, kept across a hold, and the reasons it was for.
+        uint32_t lastBlock = 0;
+        std::map<uint32_t, uint32_t> blockCounts;
+        bool recovering = false;
+        std::vector<runrules::Obligation> obligations;
+        std::string recoveryReasons;
+        // A supply trip's walk out, over the checked way to the entrance: wanted for a block naming supplies, then walking
+        // (every member apart, its target the exit point), then done, when the job takes the party out.
+        bool exitWanted = false;
+        bool exiting = false;
+        bool exitDone = false;
+        time_t exitAsked = 0;
+        Held exitPoint;
         std::vector<uint32_t> cancels;       // members whose run move the tick removes once the state's lock is let go
         uint32_t walkIds = 0;
         bool endSeen = false;
@@ -158,8 +177,18 @@ namespace runcore
         // An event of the run's, its generation and revision first, so that a cut detail keeps them.
         void Note(const std::string& kind, const std::string& fields);
 
+        // The leader's block, taken once, by its id, and only in lead under the generation it was written in: counted at its
+        // stop, then a recovery (released, Control Recover) or, at the third, the run's end, failed, with no recovery.
+        void TakeBlock(RunWorld& world, Generations& generations, uint32_t id, uint32_t blockGeneration, uint32_t stopKey,
+            const std::vector<runrules::Kept>& reasons, const std::string& text, time_t now);
+        // The leader saw this stop cleared: its count of blocks goes.
+        void StopCleared(uint32_t stopKey) { runrules::StopCleared(blockCounts, stopKey); }
+
         runrules::Stamp Stamp() const { return { generation, plan }; }
-        runrules::Control Control() const { return runrules::ControlOf(mode); }
+        runrules::Control Control() const
+        {
+            return mode == runrules::Mode::Released && recovering ? runrules::Control::Recover : runrules::ControlOf(mode);
+        }
         // Whether the party may start a fight now, as of the last reconcile (runrules::PullPermit).
         bool Permit() const;
 
@@ -173,6 +202,11 @@ namespace runcore
         // Nobody apart and no walk: on End, and when the job takes the party out.
         void ClearApart();
         void StopWalk(uint32_t guid, Apart& away);
+        // In released for a recovery: the obligations against the members as they are now, and back to lead, with a new
+        // generation, once every one is met or one unmet is past its deadline.
+        void CheckRecovery(RunWorld& world, Generations& generations, time_t now);
+        // The supply trip's way out: checked from the leader to the exit point, then walked by every member, or none.
+        void PlanExit(RunWorld& world, time_t now);
     };
 
     // A member as a pass over the run moves sees it.

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -15,8 +16,9 @@ namespace runrules
     // its tables or the repair trip (released), or nobody, kept one tick so that every member sees it end (ended).
     enum class Mode : uint8_t { Lead, Hold, Released, Ended };
 
-    // What the dungeon job is told of the run on its tick: no run state (none), or the run's mode.
-    enum class Control : uint8_t { None, Lead, Hold, Released };
+    // What the dungeon job is told of the run on its tick: no run state (none), or the run's mode; released for a recovery
+    // after a block is Recover, under which the job pulls nothing and runs only its recoveries.
+    enum class Control : uint8_t { None, Lead, Hold, Released, Recover };
 
     // The generation and plan revision a run action was fired under. A generation is never 0.
     struct Stamp
@@ -157,6 +159,7 @@ namespace runrules
         MoveOn,        // rest, regroup after a death, the via place, travel to the next boss
         Step,          // a table step's moves and effects: talk, use, kill, sleeper, escort
         FirstBossTick, // the first tick back in the boss phase, before TickBosses
+        Recover,       // a recovery after a block: the supply trip's start, or the leader standing while the party mends
     };
     // Act: do it. Request: set the phase or the step's fields, and return before any move or effect. Return: return before
     // it, keeping the phase.
@@ -166,6 +169,9 @@ namespace runrules
     {
         if (control == Control::None || act == JobAct::WayBackIn)
             return JobMay::Act;
+        // A recovery: only the recovery itself, and the supply trip's way out and back once it has started.
+        if (control == Control::Recover)
+            return act == JobAct::Recover || act == JobAct::LeaveRepair ? JobMay::Act : JobMay::Return;
         switch (act)
         {
             case JobAct::PhaseOut:
@@ -234,6 +240,7 @@ namespace runrules
         Entering,     // inside, the party not all in yet: the leader waits for it
         HandBack,     // back on the bosses after a release: it reports the party in and returns before TickBosses
         Bosses,       // TickBosses
+        Recover,      // TickRecover: a recovery after a block, inside with the party
     };
 
     struct DispatchFacts
@@ -263,6 +270,8 @@ namespace runrules
         // Under hold nothing of the boss phase runs, the leader dead or alive.
         if (facts.control == Control::Hold)
             return Dispatch::Holds;
+        if (facts.control == Control::Recover)
+            return Dispatch::Recover;
         if (facts.phase != Phase::Bosses && Job(facts.control, JobAct::FirstBossTick, facts.leaderAlive) != JobMay::Act)
             return Dispatch::HandBack;
         return Dispatch::Bosses;
@@ -634,11 +643,12 @@ namespace runrules
         bool leaving = false;
         bool apart = false;
         bool failed = false;
+        bool recovering = false;   // released for a recovery after a block: nothing is pulled until it is over
     };
 
     inline bool PullPermit(const PermitFacts& facts)
     {
-        if (facts.apart || facts.failed)
+        if (facts.apart || facts.failed || facts.recovering)
             return false;
         return facts.mode == Mode::Lead || (facts.mode == Mode::Released && !facts.leaving);
     }
@@ -665,6 +675,279 @@ namespace runrules
 
     // A walk's planning: done, not possible from here (with why), or waiting for the next tick's path searches.
     enum class PlanResult : uint8_t { Planned, Blocked, Pending };
+
+    // Readiness (docs/run-contract.md, "Readiness"): why an expected member, the leader among them, keeps the pull back.
+    // Dead and away come from Present's facts and A2b's rejoining set; the rest from the member as the leader sees it.
+    enum class Keep : uint8_t { Dead, Away, Fight, Far, Health, Mana, Supplies };
+
+    inline const char* KeepName(Keep keep)
+    {
+        switch (keep)
+        {
+            case Keep::Dead: return "dead";
+            case Keep::Away: return "away";
+            case Keep::Fight: return "fight";
+            case Keep::Far: return "far";
+            case Keep::Health: return "health";
+            case Keep::Mana: return "mana";
+            default: return "supplies";
+        }
+    }
+
+    // A member as readiness sees it. Health and mana are percents; mana counts only for one that uses mana.
+    // A member that can make the drink or food itself, as a mage conjures water and bread, carries it: hasDrink and hasFood
+    // say so, and waiting mends it, since its own AI makes some out of a fight.
+    struct Ready
+    {
+        uint32_t guid = 0;
+        Facts facts;               // as Present reads them
+        bool rejoining = false;    // in the run's rejoining set: on its way back, not yet with the party
+        bool inFight = false;
+        float distance = 0.0f;     // from the fight spot
+        uint32_t health = 100;
+        bool usesMana = false;
+        uint32_t mana = 100;
+        bool hasFood = true;       // carries food suited to its level
+        bool hasDrink = true;      // carries drink suited to its level; asked only of one that uses mana
+    };
+
+    // The thresholds, which never change while a party waits.
+    constexpr float READY_NEAR = 12.0f;
+    constexpr uint32_t READY_HEALTH = 80;
+    constexpr uint32_t READY_MANA = 60;
+
+    struct Kept
+    {
+        uint32_t guid = 0;
+        Keep why = Keep::Dead;
+    };
+
+    // Each member that keeps the pull back, with each of its reasons, in the members' order. One not there is only dead or
+    // away. One short of health with no food, or of mana with no drink, is supplies in place of that shortfall, since
+    // waiting does not mend it.
+    inline std::vector<Kept> Readiness(const std::vector<Ready>& members)
+    {
+        std::vector<Kept> kept;
+        for (const Ready& member : members)
+        {
+            const Facts& f = member.facts;
+            const bool present = f.online && f.inWorld && !f.teleporting && f.inInstance && f.alive;
+            if (!present || member.rejoining)
+            {
+                kept.push_back({ member.guid, f.online && !f.alive ? Keep::Dead : Keep::Away });
+                continue;
+            }
+            if (member.inFight)
+                kept.push_back({ member.guid, Keep::Fight });
+            if (member.distance > READY_NEAR)
+                kept.push_back({ member.guid, Keep::Far });
+            const bool noFood = member.health < READY_HEALTH && !member.hasFood;
+            const bool noDrink = member.usesMana && member.mana < READY_MANA && !member.hasDrink;
+            if (member.health < READY_HEALTH && !noFood)
+                kept.push_back({ member.guid, Keep::Health });
+            if (member.usesMana && member.mana < READY_MANA && !noDrink)
+                kept.push_back({ member.guid, Keep::Mana });
+            if (noFood || noDrink)
+                kept.push_back({ member.guid, Keep::Supplies });
+        }
+        return kept;
+    }
+
+    // A member short of what waiting cannot mend blocks the pull at once, before the budget runs out.
+    inline bool BlocksAtOnce(const std::vector<Kept>& kept)
+    {
+        return std::any_of(kept.begin(), kept.end(), [](const Kept& k) { return k.why == Keep::Supplies; });
+    }
+
+    // The waiting budget: one per stop and generation, from the first time the leader gathers at the stop's spot under
+    // that generation. A change of reasons, a pull that brought nothing, or a wait at the stop before keeps it.
+    constexpr int64_t READY_BUDGET = 300;
+
+    struct Budget
+    {
+        size_t stop = SIZE_MAX;
+        uint32_t generation = 0;
+        int64_t since = 0;         // 0 before the leader first gathers
+    };
+
+    inline void TrackBudget(Budget& budget, size_t stop, uint32_t generation, bool gathered, int64_t now)
+    {
+        if (budget.stop != stop || budget.generation != generation)
+            budget = { stop, generation, 0 };
+        if (gathered && !budget.since)
+            budget.since = now;
+    }
+
+    inline bool BudgetOut(const Budget& budget, int64_t now)
+    {
+        return budget.since && now - budget.since >= READY_BUDGET;
+    }
+
+    // Whether a block is due: the budget out, or a reason waiting cannot mend; and only with reasons, rechecked now, so
+    // that a party ready at the deadline never gets an empty block. The block at once waits for the leader gathered at its
+    // spot (`gathered`), so the rest of its reasons are not those of a party still walking there or back from a fight.
+    inline bool BlockDue(const Budget& budget, int64_t now, const std::vector<Kept>& kept, bool gathered)
+    {
+        return !kept.empty() && (BudgetOut(budget, now) || (gathered && BlocksAtOnce(kept)));
+    }
+
+    // Whether the run may pull now, checked by every pull, at the trigger and at execution: never while the pull phase is
+    // blocked or the job recovers, and only with nobody keeping the pull back. Fighting what comes stays allowed.
+    inline bool PullAllowed(bool blocked, bool recovering, const std::vector<Kept>& kept)
+    {
+        return !blocked && !recovering && kept.empty();
+    }
+
+    // A block the leader wrote, with its own id; the tick takes each one once, however often it reconciles.
+    inline bool TakeBlock(uint32_t& lastTaken, uint32_t blockId)
+    {
+        if (!blockId || blockId == lastTaken)
+            return false;
+        lastTaken = blockId;
+        return true;
+    }
+
+    // The job's recovery after a block: an obligation for each member and reason the block named, each with its own
+    // deadline from the block. Health, mana, a far member and a fight get 3 minutes, a member dead or away 5, and a supply
+    // trip 15 in all, out, buying and back. New reasons add no obligation and move no deadline.
+    constexpr int64_t RECOVERY_SECONDS = 180;
+    constexpr int64_t RECOVERY_DEAD_SECONDS = 300;
+    constexpr int64_t RECOVERY_SUPPLY_SECONDS = 900;
+
+    struct Obligation
+    {
+        uint32_t guid = 0;
+        Keep why = Keep::Dead;
+        int64_t deadline = 0;
+    };
+
+    inline std::vector<Obligation> Obligations(const std::vector<Kept>& block, int64_t now)
+    {
+        std::vector<Obligation> obligations;
+        for (const Kept& k : block)
+        {
+            const int64_t seconds = k.why == Keep::Supplies ? RECOVERY_SUPPLY_SECONDS
+                : k.why == Keep::Dead || k.why == Keep::Away ? RECOVERY_DEAD_SECONDS : RECOVERY_SECONDS;
+            obligations.push_back({ k.guid, k.why, now + seconds });
+        }
+        return obligations;
+    }
+
+    // Whether an obligation is met by the member as it is now. A member not there, or still rejoining, meets none but
+    // its own return, so a member gone off the map keeps its health or supplies unresolved. Supplies are met only with
+    // the member back with the party and carrying what it lacked.
+    inline bool Met(const Obligation& obligation, const Ready& member)
+    {
+        const Facts& f = member.facts;
+        const bool back = f.online && f.inWorld && !f.teleporting && f.inInstance && f.alive && !member.rejoining;
+        if (!back)
+            return false;
+        switch (obligation.why)
+        {
+            case Keep::Dead: case Keep::Away: return true;
+            case Keep::Fight: return !member.inFight;
+            case Keep::Far: return member.distance <= READY_NEAR;
+            case Keep::Health: return member.health >= READY_HEALTH;
+            case Keep::Mana: return !member.usesMana || member.mana >= READY_MANA;
+            default:
+                return (member.health >= READY_HEALTH || member.hasFood)
+                    && (!member.usesMana || member.mana >= READY_MANA || member.hasDrink);
+        }
+    }
+
+    // A supply trip with no safe way out: no trip, and each supplies obligation turns into a wait for the member's own
+    // health and mana to come back, met when readiness clears them, from now with the usual deadline. No block is counted
+    // for it by itself. How long the way out may stay unplanned, the tick's path searches spent, before it counts as none.
+    constexpr int64_t EXIT_PLAN_SECONDS = 15;
+
+    inline void NoSafeWay(std::vector<Obligation>& obligations, int64_t now)
+    {
+        std::vector<Obligation> out;
+        for (const Obligation& obligation : obligations)
+        {
+            if (obligation.why != Keep::Supplies)
+            {
+                out.push_back(obligation);
+                continue;
+            }
+            out.push_back({ obligation.guid, Keep::Health, now + RECOVERY_SECONDS });
+            out.push_back({ obligation.guid, Keep::Mana, now + RECOVERY_SECONDS });
+        }
+        obligations = out;
+    }
+
+    // Where a recovery is: going on, done with every obligation met, or over once an unmet one passes its deadline.
+    // A member the tick cannot see is passed as not there.
+    enum class Recovery : uint8_t { Going, Done, Over };
+
+    inline Recovery RecoveryStep(const std::vector<Obligation>& obligations, const std::vector<Ready>& members, int64_t now)
+    {
+        bool all = true;
+        for (const Obligation& obligation : obligations)
+        {
+            auto it = std::find_if(members.begin(), members.end(), [&](const Ready& r) { return r.guid == obligation.guid; });
+            if (it != members.end() && Met(obligation, *it))
+                continue;
+            if (now >= obligation.deadline)
+                return Recovery::Over;
+            all = false;
+        }
+        return all ? Recovery::Done : Recovery::Going;
+    }
+
+    // Blocks are counted by stop identity, the stop's pack, across holds, recoveries and the stop chosen again; a count
+    // is cleared only when the stop is verified cleared. The third block at one stop fails the run, with no recovery.
+    constexpr uint32_t BLOCKS_TO_FAIL = 3;
+
+    enum class BlockOutcome : uint8_t { Recover, Fail };
+
+    inline BlockOutcome CountBlock(std::map<uint32_t, uint32_t>& counts, uint32_t stopKey)
+    {
+        return ++counts[stopKey] >= BLOCKS_TO_FAIL ? BlockOutcome::Fail : BlockOutcome::Recover;
+    }
+
+    inline void StopCleared(std::map<uint32_t, uint32_t>& counts, uint32_t stopKey)
+    {
+        counts.erase(stopKey);
+    }
+
+    // A member far from its stand: a new path, its cached one dropped, when it has not come REPATH_GAIN yards nearer in
+    // REPATH_SECONDS. A new generation or a new destination starts the tracking again.
+    constexpr int64_t REPATH_SECONDS = 20;
+    constexpr float REPATH_GAIN = 1.0f;
+
+    struct Nearing
+    {
+        uint32_t generation = 0;
+        uint64_t destination = 0;  // a key of the place it walks to
+        float best = -1.0f;
+        int64_t at = 0;
+    };
+
+    inline bool Repath(Nearing& nearing, uint32_t generation, uint64_t destination, float distance, int64_t now)
+    {
+        if (nearing.generation != generation || nearing.destination != destination || nearing.best < 0.0f
+            || distance <= nearing.best - REPATH_GAIN)
+        {
+            nearing = { generation, destination, distance, now };
+            return false;
+        }
+        if (now - nearing.at < REPATH_SECONDS)
+            return false;
+        nearing.best = distance;
+        nearing.at = now;
+        return true;
+    }
+
+    // Keepers as an event's field: name:why, by the given names.
+    template<class NameOf>
+    std::string KeepText(const std::vector<Kept>& kept, NameOf nameOf)
+    {
+        std::string text;
+        for (const Kept& k : kept)
+            text += (text.empty() ? "" : ",") + nameOf(k.guid) + ":" + KeepName(k.why);
+        return text;
+    }
 
     // Joins words with commas, for a key=value field.
     inline std::string Join(const std::vector<std::string>& words)

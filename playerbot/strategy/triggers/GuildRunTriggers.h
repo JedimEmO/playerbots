@@ -69,11 +69,28 @@ namespace ai
         bool IsActive() override;
     };
 
-    // The leader at the pull spot with the party in place, alive, rested and out of a fight, or waited long enough.
+    // The leader at the pull spot with every expected member ready: alive and there, out of a fight, near, rested
+    // (runrules::Readiness).
     class RunPullReadyTrigger : public RunTrigger
     {
     public:
         RunPullReadyTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run pull ready") {}
+        bool IsActive() override;
+    };
+
+    // While the waiting budget runs, the members keeping the pull back are not the ones the leader last said.
+    class RunKeepersTrigger : public RunTrigger
+    {
+    public:
+        RunKeepersTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run keepers") {}
+        bool IsActive() override;
+    };
+
+    // The waiting budget is out with members still keeping the pull back, or a member is out of drink or food it needs.
+    class RunBlockTrigger : public RunTrigger
+    {
+    public:
+        RunBlockTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run block") {}
         bool IsActive() override;
     };
 

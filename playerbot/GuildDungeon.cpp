@@ -1375,7 +1375,40 @@ bool GuildDungeon::StartWaits(Run& run, Update& update, const std::string& what,
     return true;
 }
 
-GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name, runrules::Control control, bool permit)
+bool GuildDungeon::Carries(Player* member, bool drink)
+{
+    return member && SuppliesCarried(member, drink) > 0;
+}
+
+bool GuildDungeon::Makes(Player* member, bool drink)
+{
+    if (!member)
+        return false;
+    for (auto const& [id, spell] : member->GetSpellMap())
+    {
+        if (spell.state == PLAYERSPELL_REMOVED || spell.disabled || !spell.active)
+            continue;
+        SpellEntry const* info = sSpellTemplate.LookupEntry<SpellEntry>(id);
+        // A conjure takes no reagents; a cook's recipe, which does, makes nothing without them.
+        if (!info || info->Reagent[0] > 0)
+            continue;
+        for (uint32 i = 0; i < MAX_EFFECT_INDEX; ++i)
+        {
+            if (info->Effect[i] != SPELL_EFFECT_CREATE_ITEM || !info->EffectItemType[i])
+                continue;
+            ItemPrototype const* proto = sObjectMgr.GetItemPrototype(info->EffectItemType[i]);
+            if (!proto)
+                continue;
+            const bool isDrink = ItemUsageValue::IsManaFoodOrDrink(proto);
+            if (drink ? isDrink : (!isDrink && ItemUsageValue::IsHpFoodOrDrink(proto)))
+                return true;
+        }
+    }
+    return false;
+}
+
+GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name, runrules::Control control, bool permit,
+    uint32 recovery, const std::vector<uint32>& supplies, bool walkingOut)
 {
     Update update;
     std::lock_guard<std::mutex> guard(lock);
@@ -1387,6 +1420,9 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name,
     run.controlled = control == runrules::Control::Lead || control == runrules::Control::Hold;
     // Without the run's permit a pull the job asked for is let go: the party is not together.
     run.permit = permit;
+    run.recovery = control == runrules::Control::Recover ? recovery : 0;
+    run.recoverySupplies = control == runrules::Control::Recover ? supplies : std::vector<uint32>();
+    run.recoveryWalking = control == runrules::Control::Recover && walkingOut;
     if (!permit)
     {
         run.pullGuid.Clear();
@@ -1483,6 +1519,9 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name,
             return update;
         case runrules::Dispatch::Repair:
             TickRepair(leader, run, update);
+            return update;
+        case runrules::Dispatch::Recover:
+            TickRecover(leader, run, update);
             return update;
         default:
             break;
@@ -3234,6 +3273,19 @@ void GuildDungeon::TickRepair(Player* leader, Run& run, Update& update)
 
     // One repairer for the whole party: the leader's nearest on its own map, so that the party stays together and
     // meets again at the stone. A repairer's spawns can lie on other maps, as Grelkor's in Alterac Valley.
+    // A supply trip begun inside, after the run's block: out now, the vendor is chosen as before the party first set out.
+    if (run.supplyTrip && !run.repairPlace)
+    {
+        if (!leader->IsInWorld() || leader->IsBeingTeleported())
+        {
+            update.reason = "out of " + dungeon.name + " for drink and food";
+            return;
+        }
+        if (!StartSupplyTrip(leader, run, update))
+            back("gave_up", "drink and food, no vendor near to go to");
+        return;
+    }
+
     if (!run.repairPlace)
     {
         if (!leader->IsInWorld() || leader->IsBeingTeleported())
@@ -3487,6 +3539,78 @@ bool GuildDungeon::SupplyAt(Player* leader, Run& run, Unit* stop, Update& update
         return true;
     }
     return false;
+}
+
+void GuildDungeon::TickRecover(Player* leader, Run& run, Update& update)
+{
+    const Dungeon& dungeon = run.dungeon;
+    update.inside = update.status == "working";
+    if (run.phase != Phase::Bosses)
+    {
+        run.phase = Phase::Bosses;
+        update.strategiesChanged = true;
+    }
+    // The run walks the party to the entrance over its checked way first: the leader is not held with "stay" meanwhile,
+    // and the job moves nobody; its free travel takes over only outside.
+    if (run.recoveryWalking)
+    {
+        if (run.waiting)
+        {
+            run.waiting = false;
+            update.strategiesChanged = true;
+        }
+        update.reason = "walking out of " + dungeon.name + " for drink and food over the run's checked way";
+        return;
+    }
+    // A member the block names still out of drink or food: the party goes out for it, once for this recovery, as the
+    // repair trip goes out and back. The run's obligation ends the recovery once the member is back with what it lacked.
+    if (!run.recoverySupplies.empty() && run.recoveryTrip != run.recovery && leader->IsAlive())
+    {
+        std::string names;
+        for (uint32 guid : run.recoverySupplies)
+            if (Player* member = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid)))
+                if (sGuildBotMgr.IsGuildBot(member) && ((WantsSupply(member, true, false) && !Makes(member, true))
+                    || (WantsSupply(member, false, false) && !Makes(member, false))))
+                    names += (names.empty() ? "" : ", ") + std::string(member->GetName());
+        if (!names.empty())
+        {
+            run.recoveryTrip = run.recovery;
+            run.repairTrip = true;
+            run.supplyTrip = true;
+            run.supplyDone = false;
+            run.supplySince = 0;
+            run.supplyVendor.Clear();
+            run.supplyWalkers.clear();
+            run.supplyHandled.clear();
+            run.repairSince = 0;
+            run.repairPlace = nullptr;
+            run.repairArrived = false;
+            run.phase = Phase::Leave;
+            run.leaveStarted = time(nullptr);
+            run.leaderOutAt = 0;
+            run.insideReached = false;
+            run.leaveResting = false;
+            run.cleared = "out for drink and food, " + std::to_string(run.killed.size()) + " bosses down";
+            run.nextBoss = 0;
+            run.nextSpawn = 0;
+            run.waiting = false;
+            update.leaving = true;
+            update.strategiesChanged = true;
+            update.events.push_back({ "supply_trip", "from inside " + dungeon.name + ", for " + names });
+            update.reason = "leaving " + dungeon.name + " for drink and food, for " + names;
+            return;
+        }
+    }
+    // Otherwise the leader stands, with "stay" and no travel target, and nothing is pulled: the party eats, drinks,
+    // fights what comes, and its members come back to it.
+    if (!run.waiting)
+    {
+        run.waiting = true;
+        update.strategiesChanged = true;
+        if (PlayerbotAI* ai = leader->GetPlayerbotAI())
+            sTravelMgr.SetNullTravelTarget(ai->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get());
+    }
+    update.reason = "recovering in " + dungeon.name + " after the run's block; " + std::to_string(run.killed.size()) + " bosses down";
 }
 
 bool GuildDungeon::StartSupplyTrip(Player* leader, Run& run, Update& update)

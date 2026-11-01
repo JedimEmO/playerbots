@@ -55,8 +55,10 @@ public:
     // change of phase only asks for a release; under released it does the step or the trip, and hands the party back.
     // `permit` is the run's pull permit (GuildRunStates::Permit), worked out before this takes its lock: without it, the
     // job starts no fight, neither its own pulls, a kill step's pull or attack, nor a talk or use that starts an event.
+    // Under Control::Recover, `recovery` is the block's id, `supplies` the members it names for drink or food once the party
+    // is at the entrance, and `walkingOut` whether the run walks it there over its checked way first.
     Update Tick(Player* leader, const std::string& name, runrules::Control control = runrules::Control::None,
-        bool permit = true);
+        bool permit = true, uint32 recovery = 0, const std::vector<uint32>& supplies = {}, bool walkingOut = false);
     // The job ended or changed: forget the run.
     void Stop(uint32 leaderGuid);
 
@@ -166,6 +168,12 @@ public:
     // A guild character dead in a dungeon does not release for a while when a party member who can resurrect it
     // is alive and near; it waits to be resurrected, as a player would.
     static bool WaitsForResurrect(Player* dead);
+    // Whether a member carries drink, or food, suited to its level, in its bags. Reads only the member's own items, with
+    // no lock, for the run's readiness on any map's thread.
+    static bool Carries(Player* member, bool drink);
+    // Whether a member can make drink, or food, itself: a spell it knows that creates one with no reagents, as a mage's
+    // Conjure Water and Conjure Food. Its own AI makes some out of a fight, so it is never out of it.
+    static bool Makes(Player* member, bool drink);
     // Called for every guild character on each check: a living one forgets when it died.
     static void NoteAlive(Player* bot);
 
@@ -260,6 +268,10 @@ private:
         bool controlled = false;       // the run controller leads or holds the party, and the pull and rest steps stand down
         runrules::Control control = runrules::Control::None; // what the run controller has, this tick
         bool permit = true;        // the run's pull permit, this tick
+        uint32 recovery = 0;           // the run's recovery after a block, by the block's id, this tick, or 0
+        std::vector<uint32> recoverySupplies; // its members out of drink or food
+        uint32 recoveryTrip = 0;       // the recovery a supply trip from inside was started for, once each
+        bool recoveryWalking = false;  // the run walks the party out over its checked way: the job leaves it be
         bool stepWaiting = false;      // a table step waits for the run's release, its guard having returned
         std::set<int32> passed;        // bosses passed over as out of reach on this map
         int32 headwayBoss = 0;         // the boss the leader's headway is measured to
@@ -349,6 +361,9 @@ private:
     // The finish step: out, then the reset.
     void TickLeave(Player* leader, Run& run, Update& update);
     void TickRepair(Player* leader, Run& run, Update& update);
+    // A recovery after the run's block, inside with the party: a supply trip out and back once, when a member the block
+    // names is still out of drink or food; otherwise the leader stands, with no travel and no pull, while the party mends.
+    void TickRecover(Player* leader, Run& run, Update& update);
     // At a trip's stop: each party member that uses mana buys drink suited to its level, up to SUPPLY_STACK, and each
     // with no food suited to its level buys food, from the stop's vendor or one near it, with its own money. True when
     // every member is done or given up; members still on their way to the vendor keep it false, to SUPPLY_SECONDS.

@@ -9,6 +9,7 @@
 #include "playerbot/strategy/actions/ChangeTalentsAction.h"
 #include "playerbot/strategy/values/SharedValueContext.h"
 #include "playerbot/strategy/values/TrainerValues.h"
+#include "playerbot/strategy/values/ItemUsageValue.h"
 
 #include <sstream>
 
@@ -58,6 +59,7 @@ std::list<std::string> GuildBench::Help()
         "  bench setup <name> <level> [quality] [dungeon]  all of the above, in that order",
         "  bench kill <name>                          kill it, for the lab to see a run recover; lab and bench accounts only",
         "  bench mana <name> <percent>                set its mana to a share of its most; lab and bench accounts only",
+        "  bench take <name> drink|food               destroy every drink, or every food, it carries; lab and bench accounts only",
         "  bench clearroute <leader> <stop>           kill the packs of its run's stops before that one, with their pulls' extras",
         "                                             and the creatures that reach them, in its instance; lab and bench accounts only",
         "All but level need the character online and played by the engine; level works offline as a level change only.",
@@ -121,16 +123,18 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
     if (!bot->GetPlayerbotAI())
         return { "a player is playing " + name + "; the bench works only while the engine plays it" };
 
-    if (sub == "kill" || sub == "mana" || sub == "clearroute")
+    if (sub == "kill" || sub == "mana" || sub == "clearroute" || sub == "take")
     {
         // Only for the lab's and the benches' own accounts: the lab causes a death or a low pool on purpose,
         // to see a run recover from it, and a player's character is never its subject.
         std::string account;
         if (!sAccountMgr.GetName(sObjectMgr.GetPlayerAccountIdByGUID(guid), account)
             || !(account.rfind("LAB", 0) == 0 || account.rfind("GBENCH", 0) == 0) || account == "LABGM")
-            return { name + " is not on a lab or bench account; kill, mana and clearroute are for those only" };
+            return { name + " is not on a lab or bench account; kill, mana, take and clearroute are for those only" };
         if (sub == "kill")
             return Kill(bot, name);
+        if (sub == "take")
+            return Take(bot, name, first);
         if (sub == "clearroute")
             return ClearRoute(bot, first);
         return Mana(bot, name, first);
@@ -385,6 +389,37 @@ std::list<std::string> GuildBench::ClearRoute(Player* leader, const std::string&
     if (stop.empty() || number < 1)
         return { "usage: guildbot bench clearroute <leader> <stop, 1 on>" };
     return sGuildRunStates.ClearRoute(leader, uint32(number));
+}
+
+std::list<std::string> GuildBench::Take(Player* bot, const std::string& name, const std::string& what)
+{
+    if (what != "drink" && what != "food")
+        return { "usage: guildbot bench take <name> drink|food" };
+    const bool drink = what == "drink";
+    // Every carried item of that kind, by entry, counted first and destroyed after, so the bags are not changed while read.
+    std::map<uint32, uint32> found;
+    auto look = [&](Item* item)
+    {
+        ItemPrototype const* proto = item ? item->GetProto() : nullptr;
+        if (!proto)
+            return;
+        const bool isDrink = ItemUsageValue::IsManaFoodOrDrink(proto);
+        if (drink ? isDrink : (!isDrink && ItemUsageValue::IsHpFoodOrDrink(proto)))
+            found[proto->ItemId] += item->GetCount();
+    };
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        look(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
+    for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+        if (Bag* bag = dynamic_cast<Bag*>(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot)))
+            for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                look(bag->GetItemByPos(uint8(slot)));
+    uint32 total = 0;
+    for (auto const& [entry, count] : found)
+    {
+        bot->DestroyItemCount(entry, count, true);
+        total += count;
+    }
+    return { name + " has " + std::to_string(total) + " " + what + " fewer, and carries none" };
 }
 
 std::list<std::string> GuildBench::Mana(Player* bot, const std::string& name, const std::string& percent)

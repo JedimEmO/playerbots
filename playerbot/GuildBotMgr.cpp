@@ -1900,7 +1900,14 @@ void GuildBotMgr::CheckJobs()
             std::vector<std::pair<std::string, std::string>> runEvents;
             const runrules::Control control = sGuildRunStates.Prepare(bot, ArgValue(c, "name"), c.jobSeq, runEvents);
             const bool permit = sGuildRunStates.Permit(guid);
-            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"), control, permit);
+            // Under a recovery after a block: its id and the members out of drink or food, read before the job's lock.
+            uint32 recovery = 0;
+            std::vector<uint32> supplies;
+            bool walkingOut = false;
+            if (control == runrules::Control::Recover)
+                sGuildRunStates.Recovery(guid, recovery, supplies, walkingOut);
+            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"), control, permit, recovery, supplies,
+                walkingOut);
             if (!waiting.empty() && update.status == "working" && update.reason.rfind("waiting", 0) == 0)
                 update.reason = waiting;
             for (auto& [kind, detail] : runEvents)

@@ -10,6 +10,16 @@ void RunLeadStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
         "run choose",
         NextAction::array(0, new NextAction("run choose", ACTION_MOVE + 9), NULL)));
 
+    // A party that cannot get ready blocks before anything moves it on (docs/run-contract.md, "A block"), and who keeps the
+    // pull back is said as it changes.
+    triggers.push_back(new TriggerNode(
+        "run block",
+        NextAction::array(0, new NextAction("run block", ACTION_MOVE + 10), NULL)));
+
+    triggers.push_back(new TriggerNode(
+        "run keepers",
+        NextAction::array(0, new NextAction("run keepers", ACTION_MOVE + 0.5f), NULL)));
+
     // A cleared stop moves the run on before anything else, so the leader never walks to a dead pack's spot.
     triggers.push_back(new TriggerNode(
         "run cleared",
@@ -49,6 +59,11 @@ void RunLeadStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
 
 void RunLeadStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
 {
+    // The budget is watched in a fight too: a fight that does not end at the spot keeps the pull back, and blocks it.
+    triggers.push_back(new TriggerNode(
+        "run block",
+        NextAction::array(0, new NextAction("run block", ACTION_MOVE + 10), NULL)));
+
     // While the pull comes, the leader stays at the spot rather than meeting the pack on its way.
     triggers.push_back(new TriggerNode(
         "run hold",

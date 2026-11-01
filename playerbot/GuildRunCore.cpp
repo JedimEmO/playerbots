@@ -67,6 +67,8 @@ void RunCore::End(RunWorld& world, Generations& generations, const std::string& 
     settled.clear();
     choose = false;
     endSeen = false;
+    recovering = false;
+    obligations.clear();
     SetMode(world, generations, Mode::Ended, why);
 }
 
@@ -228,9 +230,10 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
     }
 
     // A member the engine plays apart with nothing else holding the run: REJOIN_SECONDS of that, and the run cannot
-    // regroup. A person's member apart holds the pull, and the run waits for it without end.
+    // regroup. A person's member apart holds the pull, and the run waits for it without end. Only in hold: in lead a
+    // member apart keeps the pull back, and the blocks at that stop end the run if it never comes back.
     const bool engineApart = std::any_of(apart.begin(), apart.end(), [](const auto& entry) { return !entry.second.human; });
-    if (!engineApart)
+    if (!engineApart || mode != Mode::Hold)
         apartSince = 0;
     else if (!apartSince)
         apartSince = now;
@@ -243,7 +246,10 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
         Note("run_rejoin", "result=cannot_rejoin apart=" + who);
         failed = true;
         End(world, generations, "cannot_rejoin");
+        return true;
     }
+    if (mode == Mode::Released && recovering)
+        CheckRecovery(world, generations, now);
     return true;
 }
 
@@ -254,6 +260,7 @@ bool RunCore::Permit() const
     facts.leaving = job.leaving;
     facts.apart = !apart.empty();
     facts.failed = failed;
+    facts.recovering = recovering;
     return runrules::PullPermit(facts);
 }
 
@@ -280,6 +287,13 @@ void RunCore::BeginHold(RunWorld& world, time_t now)
         StopWalk(guid, away);
     apart.clear();
     hasAnchor = false;
+    // A supply trip's walk out stops with them; it is planned again from where the party stands once the hold is over.
+    if (exiting || exitDone)
+    {
+        exiting = exitDone = false;
+        exitWanted = true;
+        exitAsked = 0;
+    }
     anchorKind.clear();
     // The cohort: the members alive inside who were not dead a moment ago, so a member just back at the entrance is not
     // taken for the party. Everyone is apart until it reaches the anchor; the cohort walks there within its minute.
@@ -418,8 +432,8 @@ void RunCore::Track(RunWorld& world, const std::vector<uint32_t>& members, time_
             Note("run_rejoin", "member=" + world.Name(guid) + " result=displaced");
         }
     }
-    // In lead and released the leader is the party, and never apart from it.
-    if (mode != Mode::Hold)
+    // In lead and released the leader is the party, and never apart from it; on a supply trip's walk out it walks too.
+    if (mode != Mode::Hold && !exiting)
     {
         auto self = apart.find(leader);
         if (self != apart.end() && !self->second.missing)
@@ -448,8 +462,8 @@ void RunCore::Track(RunWorld& world, const std::vector<uint32_t>& members, time_
             hasLeaderWay = true;
         }
     }
-    const bool hasTarget = mode == Mode::Hold ? hasAnchor : hasLeaderWay;
-    const Held target = mode == Mode::Hold ? anchor : leaderWay;
+    const bool hasTarget = exiting ? true : mode == Mode::Hold ? hasAnchor : hasLeaderWay;
+    const Held target = exiting ? exitPoint : mode == Mode::Hold ? anchor : leaderWay;
 
     for (auto it = apart.begin(); it != apart.end();)
     {
@@ -470,6 +484,13 @@ void RunCore::Track(RunWorld& world, const std::vector<uint32_t>& members, time_
                 held[guid] = at;
             Note("run_rejoin", "member=" + name + " result=arrived at=" + Num(at.x) + "," + Num(at.y) + "," + Num(at.z));
             it = apart.erase(it);
+            // The whole party at the exit: the job takes it out for its supplies.
+            if (exiting && apart.empty())
+            {
+                exiting = false;
+                exitDone = true;
+                Note("supply_trip", "result=at_exit");
+            }
             continue;
         }
         // The cohort's minute: not there in time, it stands where it is and walks again later as any member apart.
@@ -576,7 +597,8 @@ void RunCore::Settle(RunWorld& world, Generations& generations, const runrules::
     job = report;
     if (mode == Mode::Lead && (!report.inside || report.stepDue))
         SetMode(world, generations, Mode::Released, report.stepDue ? "step_due" : "job_not_on_bosses");
-    else if (mode == Mode::Released && report.inside && !report.stepDue && hasNext)
+    // A recovery is never handed back by the job's report: its obligations end it (CheckRecovery).
+    else if (mode == Mode::Released && !recovering && report.inside && !report.stepDue && hasNext)
     {
         // Handed back: to hold when a reason stands, else to lead, and the leader chooses its stop from where it stands.
         if (!holdReasons.empty())
@@ -593,6 +615,126 @@ void RunCore::Settle(RunWorld& world, Generations& generations, const runrules::
             SetMode(world, generations, Mode::Lead, "handed_back");
         }
     }
+}
+
+void RunCore::TakeBlock(RunWorld& world, Generations& generations, uint32_t id, uint32_t blockGeneration, uint32_t stopKey,
+    const std::vector<runrules::Kept>& reasons, const std::string& text, time_t now)
+{
+    // Once each block, and only one written in this generation in lead: a block of a plan a hold or a new five has since
+    // replaced is the old plan's, and the leader gathers again.
+    if (mode != Mode::Lead || blockGeneration != generation || reasons.empty() || !runrules::TakeBlock(lastBlock, id))
+        return;
+    const runrules::BlockOutcome outcome = runrules::CountBlock(blockCounts, stopKey);
+    const std::string count = std::to_string(blockCounts[stopKey]) + "/" + std::to_string(runrules::BLOCKS_TO_FAIL);
+    if (outcome == runrules::BlockOutcome::Fail)
+    {
+        Note("run_block", "result=fail stop=" + std::to_string(stopKey) + " count=" + count + " reasons=" + text);
+        failed = true;
+        End(world, generations, "blocked," + text);
+        return;
+    }
+    Note("run_block", "result=recover stop=" + std::to_string(stopKey) + " count=" + count + " reasons=" + text);
+    recovering = true;
+    obligations = runrules::Obligations(reasons, int64_t(now));
+    recoveryReasons = text;
+    exitWanted = std::any_of(reasons.begin(), reasons.end(), [](const runrules::Kept& k) { return k.why == runrules::Keep::Supplies; });
+    exiting = exitDone = false;
+    exitAsked = 0;
+    SetMode(world, generations, Mode::Released, "recovery," + text);
+}
+
+void RunCore::PlanExit(RunWorld& world, time_t now)
+{
+    auto noWay = [&](const std::string& why)
+    {
+        exitWanted = false;
+        runrules::NoSafeWay(obligations, int64_t(now));
+        Note("supply_trip", "result=no_safe_way blocker=" + why);
+    };
+    if (!exitAsked)
+        exitAsked = now;
+    Held exit;
+    if (!world.ExitPoint(exit))
+    {
+        noWay("no_exit_point");
+        return;
+    }
+    // The leader's way out is checked first; the walk it plans is the one each member is then planned and walks.
+    Walk walk;
+    std::string why;
+    switch (world.PlanWalk(leader, exit, walk, why))
+    {
+        case runrules::PlanResult::Planned:
+        {
+            exitWanted = false;
+            exiting = true;
+            exitPoint = exit;
+            std::string names;
+            for (uint32_t guid : expected)
+            {
+                if (!runrules::Movable(world.FactsOf(guid)))
+                    continue;
+                auto it = apart.find(guid);
+                if (it != apart.end())
+                    StopWalk(guid, it->second);
+                Apart away;
+                away.since = now;
+                apart[guid] = away;
+                names += (names.empty() ? "" : ",") + world.Name(guid);
+            }
+            Note("supply_trip", "result=walking_out to=" + Num(exit.x) + "," + Num(exit.y) + "," + Num(exit.z) + " members=" + names);
+            break;
+        }
+        case runrules::PlanResult::Blocked:
+            noWay(why.empty() ? std::string("blocked") : why);
+            break;
+        default:
+            // The tick's path searches spent: asked again next tick, up to EXIT_PLAN_SECONDS.
+            if (int64_t(now - exitAsked) >= runrules::EXIT_PLAN_SECONDS)
+                noWay("no_plan_in_time");
+            break;
+    }
+}
+
+void RunCore::CheckRecovery(RunWorld& world, Generations& generations, time_t now)
+{
+    // Not while the job takes the party out on a supply trip: its obligations are looked at again once it is back.
+    if (job.leaving)
+        return;
+    if (exitWanted)
+        PlanExit(world, now);
+    std::vector<runrules::Ready> members;
+    for (const runrules::Obligation& obligation : obligations)
+    {
+        runrules::Ready ready;
+        ready.guid = obligation.guid;
+        ready.facts = world.FactsOf(obligation.guid);
+        if (!world.ReadyOf(obligation.guid, leader, ready))
+            continue;
+        ready.rejoining = apart.count(obligation.guid) > 0;
+        members.push_back(ready);
+    }
+    const runrules::Recovery step = runrules::RecoveryStep(obligations, members, int64_t(now));
+    if (step == runrules::Recovery::Going)
+        return;
+    std::string state;
+    for (const runrules::Obligation& obligation : obligations)
+    {
+        auto it = std::find_if(members.begin(), members.end(), [&](const runrules::Ready& r) { return r.guid == obligation.guid; });
+        const bool met = it != members.end() && runrules::Met(obligation, *it);
+        state += (state.empty() ? "" : ",") + world.Name(obligation.guid) + ":" + runrules::KeepName(obligation.why)
+            + (met ? ":met" : ":unmet");
+    }
+    Note("run_recovery", std::string("result=") + (step == runrules::Recovery::Done ? "done" : "over") + " obligations=" + state);
+    if (exiting)
+        ClearApart();
+    exitWanted = exiting = exitDone = false;
+    recovering = false;
+    obligations.clear();
+    recoveryReasons.clear();
+    // The leader chooses its stop again from where it stands, and gathers with a new budget.
+    choose = true;
+    SetMode(world, generations, Mode::Lead, step == runrules::Recovery::Done ? "recovered" : "recovery_over");
 }
 
 void Failures::Record(uint32_t leader, uint32_t order, const std::string& why)

@@ -2,6 +2,7 @@
 #include "playerbot/strategy/Action.h"
 #include "AttackAction.h"
 #include "MovementActions.h"
+#include "playerbot/GuildRunRules.h"
 
 namespace ai
 {
@@ -21,6 +22,10 @@ namespace ai
         MoveToRunSpotAction(PlayerbotAI* ai) : MovementAction(ai, "move to run spot") {}
         bool Execute(Event& event) override;
         bool isUseful() override;
+
+    private:
+        // How near a member far from its stand has come, for a new path when it stops gaining (runrules::Repath).
+        runrules::Nearing nearing;
     };
 
     // A member apart from its party walks the next part of its walk back, exactly along the points the tick checked, as one
@@ -45,6 +50,22 @@ namespace ai
     {
     public:
         RunGatherAction(PlayerbotAI* ai) : Action(ai, "run gather") {}
+        bool Execute(Event& event) override;
+    };
+
+    // The leader says who keeps the pull back now, as telemetry.
+    class RunKeepersAction : public Action
+    {
+    public:
+        RunKeepersAction(PlayerbotAI* ai) : Action(ai, "run keepers") {}
+        bool Execute(Event& event) override;
+    };
+
+    // The leader blocks the pull with its reasons, rechecked now, and lets go of any pull it had asked for.
+    class RunBlockAction : public Action
+    {
+    public:
+        RunBlockAction(PlayerbotAI* ai) : Action(ai, "run block") {}
         bool Execute(Event& event) override;
     };
 

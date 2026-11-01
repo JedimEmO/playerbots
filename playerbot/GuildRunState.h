@@ -50,7 +50,9 @@ struct GuildRunStop
 
 // Where the leader is with the stop it is at: walking to its pull spot, waiting there for the party, pulling, or waiting
 // at the stop before's spot, for up to WAIT_SECONDS, for another pack's creature to leave the pull spot's reach.
-enum class GuildRunPull : uint8 { Approach, Gather, Pull, Wait };
+// Blocked: the party could not get ready in its budget, or a member lacks what waiting cannot mend; the leader wrote a
+// block, and nothing pulls until the tick hands the party to the job for a recovery (docs/run-contract.md, "A block").
+enum class GuildRunPull : uint8 { Approach, Gather, Pull, Wait, Blocked };
 
 using GuildRunMode = runrules::Mode;
 using GuildRunControl = runrules::Control;
@@ -95,6 +97,12 @@ struct GuildRunView
     std::vector<uint32> deadNear;
     // Whether the party may start a fight, as of the last reconcile; the live check is GuildRunStates::PullAllowed.
     bool permit = false;
+    // Readiness (docs/run-contract.md, "Readiness"): the members apart from the party, the waiting budget, the keepers as
+    // the leader last said them, and whether the job has the party for a recovery after a block.
+    std::vector<uint32> apartMembers;
+    runrules::Budget budget;
+    std::string keepers;
+    bool recovering = false;
 };
 
 // The shared state of a guild party's run inside one dungeon instance, which the party's AI plays by: the route of
@@ -120,9 +128,9 @@ public:
 
     // What the leader waits for before a pull: every member within PARTY_NEAR yards of the pull spot, alive, out of a
     // fight, with PULL_HEALTH percent health and PULL_MANA percent mana or more.
-    static constexpr float PARTY_NEAR = 12.0f;
-    static constexpr uint32 PULL_HEALTH = 80;
-    static constexpr uint32 PULL_MANA = 60;
+    static constexpr float PARTY_NEAR = runrules::READY_NEAR;
+    static constexpr uint32 PULL_HEALTH = runrules::READY_HEALTH;
+    static constexpr uint32 PULL_MANA = runrules::READY_MANA;
     // How long the controller may hold a leader still, out of a fight, before the tick says why.
     static constexpr time_t STALL_SECONDS = 60;
     // How long the party waits at the stop before for another pack's creature to leave, before it pulls anyway.
@@ -173,9 +181,19 @@ public:
     // Whether every expected member of the leader's run is there for a pull (GuildRunRules' Present), looked up through
     // the leader's own map, which is the run's instance. On the leader's map thread.
     static bool Present(Player* leader, const GuildRunView& view);
-    // Whether the bot's party may start a fight now: no run, or the run's permit and every expected member alive inside
-    // through the bot's own map. On the bot's map thread, right before a pull, a kill step's attack or an event start.
+    // Whether the bot's party may start a fight now: no run, or the run's permit, every expected member alive inside
+    // through the bot's own map, the pull phase not blocked, and nobody keeping the pull back (Readiness). A bot already in a
+    // fight is not held to readiness: it fights what came. On the bot's map thread, right before a pull, a kill step's
+    // attack or an event start.
     bool PullAllowed(Player* bot) const;
+    // Who keeps the pull back, and why (runrules::Readiness), through the bot's own map: at the stop's fight spot in lead,
+    // else around the leader, where the job gathers the party.
+    static std::vector<runrules::Kept> Readiness(Player* bot, const GuildRunView& view);
+    // The keepers' text for events, name:why.
+    static std::string KeepersText(const std::vector<runrules::Kept>& kept);
+    // For the job's recovery after a block: the block's id; the members with a supplies obligation, once the party has
+    // walked the checked way out to the entrance; and whether that walk is still to come or under way. False with none.
+    bool Recovery(uint32 leaderGuid, uint32& id, std::vector<uint32>& supplies, bool& walkingOut) const;
 
     // A member's run move, on its own map thread with no lock held (move to run spot), by runcore::RunMoves::Start. Its
     // previous run move and any run token no record holds are removed from its motion stack first; a removal deferred by
@@ -199,6 +217,11 @@ public:
     void Gather(Player* leader, const GuildRunStamp& stamp);
     void Pulled(Player* leader, const GuildRunStamp& stamp, ObjectGuid creature);
     void PullFailed(Player* leader, const GuildRunStamp& stamp);
+    // The leader blocks the pull with these reasons: its pull phase blocked, a plan revision, and a block for the tick to
+    // take once. Never empty.
+    void Block(Player* leader, const GuildRunStamp& stamp, const std::vector<runrules::Kept>& kept);
+    // Who keeps the pull back now, as telemetry: no plan revision, and run_keep said only when the list changes.
+    void Keepers(Player* leader, const GuildRunStamp& stamp, const std::vector<runrules::Kept>& kept);
     // On to the first stop with a living pack from the current one, or past it with skip, as for a pack that pulls
     // bring nothing of; a stop passed over is passed again. Without skip, the current stop's pack is dead: the leader saw
     // it cleared. Looks at the leader's own map, so only from its map's thread.
@@ -263,6 +286,14 @@ private:
         uint32 order = 0;          // the leader's job order the run was made for
         bool failureKept = false;  // its failure is in `failures`
         std::map<size_t, bool> wayChecked; // the route's way, by its first point, WAY_CHECK_POINTS at a time: on the navmesh
+        // Readiness: the waiting budget, the keepers as last said, and the block the leader wrote for the tick to take.
+        runrules::Budget budget;
+        std::string keepers;
+        uint32 blockId = 0;
+        uint32 blockGeneration = 0;
+        uint32 blockStop = 0;      // the blocked stop's pack
+        std::vector<runrules::Kept> blockReasons;
+        std::string blockText;
     };
 
     std::shared_ptr<State> Find(uint32 instanceId) const;

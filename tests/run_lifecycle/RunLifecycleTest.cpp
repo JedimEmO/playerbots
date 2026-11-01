@@ -139,6 +139,26 @@ namespace
             return summon.reach > 0.0f && runrules::FirstThreat({ summon }, part) >= 0;
         }
         bool Walking(uint32_t) override { return walkingMoves; }
+        // The way's point at the entrance, where a supply trip's walk out ends.
+        bool hasExit = true;
+        Held exit{ -200.0f, 0.0f, 0.0f };
+        bool ExitPoint(Held& at) override
+        {
+            at = exit;
+            return hasExit;
+        }
+        // Readiness as the tick sees each member: full health and mana, near the leader, unless set here.
+        std::map<uint32_t, runrules::Ready> ready;
+        bool ReadyOf(uint32_t guid, uint32_t, runrules::Ready& out) override
+        {
+            if (!facts[guid].online)
+                return false;
+            const Facts f = out.facts;
+            out = ready.count(guid) ? ready[guid] : runrules::Ready();
+            out.guid = guid;
+            out.facts = f;
+            return true;
+        }
     };
 
     runrules::Facts Inside()
@@ -1584,12 +1604,18 @@ namespace
         for (uint32_t guid : world.cancelled)
             CHECK(guid != 4);
 
-        // A bot apart beside the person: the bot's ten minutes still end the run, and only the bot is named.
+        // A bot apart beside the person, in lead: no deadline there, since the blocks at its stop govern (slice B).
         world.facts[3].alive = false;
         world.places[4] = { 100.0f, 0.0f, 0.0f };
         core.Reconcile(world, counter, 900);
-        CHECK(core.apartSince == 900);
-        core.Reconcile(world, counter, 900 + runrules::REJOIN_SECONDS);
+        CHECK(core.mode == Mode::Lead && core.apartSince == 0);
+        // In hold, the bot's ten minutes end the run, and only the bot is named.
+        world.facts[1].alive = false;
+        core.Reconcile(world, counter, 910);
+        world.facts[1] = Inside();
+        core.Reconcile(world, counter, 920);
+        CHECK(core.mode == Mode::Hold && core.apartSince == 920);
+        core.Reconcile(world, counter, 920 + runrules::REJOIN_SECONDS);
         CHECK(core.mode == Mode::Ended && core.failed && HasEvent(core, "run_rejoin", "result=cannot_rejoin apart=m3"));
         CHECK(!HasEvent(core, "run_rejoin", "apart=m3,m4"));
     }
@@ -1762,6 +1788,464 @@ namespace
             CHECK(!moves.Find(2, record) && moves.Find(12, record) && world.removed.size() == 1);
         }
     }
+
+    // Readiness: one member that keeps the pull back for each reason alone, the thresholds' edges, and the leader as one
+    // of the members like any other.
+    runrules::Ready ReadyMember(uint32_t guid)
+    {
+        runrules::Ready r;
+        r.guid = guid;
+        r.facts.online = r.facts.engine = r.facts.inWorld = r.facts.inInstance = r.facts.alive = true;
+        r.distance = 4.0f;
+        return r;
+    }
+
+    std::vector<runrules::Keep> WhyOf(const std::vector<runrules::Ready>& members, uint32_t guid)
+    {
+        std::vector<runrules::Keep> why;
+        for (const runrules::Kept& k : runrules::Readiness(members))
+            if (k.guid == guid)
+                why.push_back(k.why);
+        return why;
+    }
+
+    void ReadinessReasons()
+    {
+        using runrules::Keep;
+        std::vector<runrules::Ready> party;
+        for (uint32_t guid = 1; guid <= 5; ++guid)
+            party.push_back(ReadyMember(guid));
+        party[1].usesMana = true;
+        CHECK(runrules::Readiness(party).empty());
+
+        auto one = [&](std::function<void(runrules::Ready&)> change, uint32_t guid) {
+            std::vector<runrules::Ready> p = party;
+            change(p[guid - 1]);
+            return WhyOf(p, guid);
+        };
+        CHECK(one([](runrules::Ready& r) { r.facts.alive = false; }, 3) == std::vector<Keep>{ Keep::Dead });
+        CHECK(one([](runrules::Ready& r) { r.facts.inInstance = false; }, 3) == std::vector<Keep>{ Keep::Away });
+        CHECK(one([](runrules::Ready& r) { r.facts.online = false; }, 3) == std::vector<Keep>{ Keep::Away });
+        CHECK(one([](runrules::Ready& r) { r.facts.teleporting = true; }, 3) == std::vector<Keep>{ Keep::Away });
+        CHECK(one([](runrules::Ready& r) { r.rejoining = true; }, 3) == std::vector<Keep>{ Keep::Away });
+        // One not there is only dead or away, whatever else is true of it.
+        CHECK(one([](runrules::Ready& r) { r.facts.alive = false; r.health = 0; r.distance = 90.0f; }, 3) == std::vector<Keep>{ Keep::Dead });
+        CHECK(one([](runrules::Ready& r) { r.inFight = true; }, 3) == std::vector<Keep>{ Keep::Fight });
+        CHECK(one([](runrules::Ready& r) { r.distance = 12.0f; }, 3).empty());
+        CHECK(one([](runrules::Ready& r) { r.distance = 12.5f; }, 3) == std::vector<Keep>{ Keep::Far });
+        CHECK(one([](runrules::Ready& r) { r.health = 80; }, 3).empty());
+        CHECK(one([](runrules::Ready& r) { r.health = 79; }, 3) == std::vector<Keep>{ Keep::Health });
+        CHECK(one([](runrules::Ready& r) { r.mana = 60; }, 2).empty());
+        CHECK(one([](runrules::Ready& r) { r.mana = 59; }, 2) == std::vector<Keep>{ Keep::Mana });
+        // A rage or energy user's mana never counts.
+        CHECK(one([](runrules::Ready& r) { r.mana = 0; r.hasDrink = false; }, 3).empty());
+        // The leader is the first member, and counts like the rest.
+        CHECK(one([](runrules::Ready& r) { r.health = 50; }, 1) == std::vector<Keep>{ Keep::Health });
+        // Several reasons of one member are each said.
+        CHECK(one([](runrules::Ready& r) { r.distance = 30.0f; r.mana = 10; }, 2) == (std::vector<Keep>{ Keep::Far, Keep::Mana }));
+    }
+
+    void ReadinessSupplies()
+    {
+        using runrules::Keep;
+        runrules::Ready r = ReadyMember(2);
+        r.usesMana = true;
+        r.mana = 10;
+        r.hasDrink = false;
+        CHECK(WhyOf({ r }, 2) == std::vector<Keep>{ Keep::Supplies });
+        CHECK(runrules::BlocksAtOnce(runrules::Readiness({ r })));
+        r.hasDrink = true;
+        CHECK(WhyOf({ r }, 2) == std::vector<Keep>{ Keep::Mana });
+        CHECK(!runrules::BlocksAtOnce(runrules::Readiness({ r })));
+        // No drink at full mana is nothing yet.
+        r.mana = 100;
+        r.hasDrink = false;
+        CHECK(WhyOf({ r }, 2).empty());
+        runrules::Ready h = ReadyMember(3);
+        h.health = 40;
+        h.hasFood = false;
+        CHECK(WhyOf({ h }, 3) == std::vector<Keep>{ Keep::Supplies });
+        h.hasFood = true;
+        CHECK(WhyOf({ h }, 3) == std::vector<Keep>{ Keep::Health });
+        // Short of both with no food and no drink: supplies once.
+        r.mana = 10;
+        r.health = 40;
+        r.hasFood = false;
+        CHECK(WhyOf({ r }, 2) == std::vector<Keep>{ Keep::Supplies });
+        auto names = [](uint32_t guid) { return std::string("m") + std::to_string(guid); };
+        CHECK(runrules::KeepText(runrules::Readiness({ r, h }), names) == "m2:supplies,m3:health");
+    }
+
+    void ReadinessBudget()
+    {
+        runrules::Budget budget;
+        // Not started before the leader gathers.
+        runrules::TrackBudget(budget, 4, 7, false, 100);
+        CHECK(budget.since == 0 && !runrules::BudgetOut(budget, 10000));
+        runrules::TrackBudget(budget, 4, 7, true, 120);
+        CHECK(budget.since == 120);
+        // Kept across a change of reasons, a pull that brought nothing, and a wait at the stop before: the stop and the
+        // generation are the same, gathered or not.
+        runrules::TrackBudget(budget, 4, 7, false, 200);
+        runrules::TrackBudget(budget, 4, 7, true, 260);
+        CHECK(budget.since == 120);
+        CHECK(!runrules::BudgetOut(budget, 120 + 299));
+        CHECK(runrules::BudgetOut(budget, 120 + 300));
+        // A new generation starts it again at the next gather.
+        runrules::TrackBudget(budget, 4, 8, false, 500);
+        CHECK(budget.since == 0 && !runrules::BudgetOut(budget, 900));
+        runrules::TrackBudget(budget, 4, 8, true, 510);
+        CHECK(budget.since == 510);
+        // So does a new stop.
+        runrules::TrackBudget(budget, 5, 8, true, 600);
+        CHECK(budget.since == 600 && budget.stop == 5);
+    }
+
+    void ReadinessRecovery()
+    {
+        using runrules::Keep;
+        using runrules::Recovery;
+        // Mixed reasons keep their own deadlines: a mana obligation does not last as long as a dead member's.
+        std::vector<runrules::Obligation> obligations = runrules::Obligations({ { 2, Keep::Mana }, { 4, Keep::Dead } }, 1000);
+        CHECK(obligations.size() == 2 && obligations[0].deadline == 1180 && obligations[1].deadline == 1300);
+        runrules::Ready healer = ReadyMember(2), rogue = ReadyMember(4);
+        healer.usesMana = true;
+        healer.mana = 30;
+        rogue.facts.alive = false;
+        CHECK(runrules::RecoveryStep(obligations, { healer, rogue }, 1100) == Recovery::Going);
+        // The mana obligation passes its own deadline unmet: the recovery is over, though the dead member's runs on.
+        CHECK(runrules::RecoveryStep(obligations, { healer, rogue }, 1180) == Recovery::Over);
+        healer.mana = 80;
+        CHECK(runrules::RecoveryStep(obligations, { healer, rogue }, 1180) == Recovery::Going);
+        rogue.facts.alive = true;
+        CHECK(runrules::RecoveryStep(obligations, { healer, rogue }, 1200) == Recovery::Done);
+        // One the tick cannot see at all stays unmet.
+        CHECK(runrules::RecoveryStep(obligations, { healer }, 1200) == Recovery::Going);
+        // A member gone off the map keeps its health obligation unmet, at full health or not.
+        std::vector<runrules::Obligation> health = runrules::Obligations({ { 3, Keep::Health } }, 0);
+        runrules::Ready mage = ReadyMember(3);
+        mage.facts.inInstance = false;
+        CHECK(runrules::RecoveryStep(health, { mage }, 10) == Recovery::Going);
+        CHECK(runrules::RecoveryStep(health, { mage }, 180) == Recovery::Over);
+        mage.facts.inInstance = true;
+        CHECK(runrules::RecoveryStep(health, { mage }, 10) == Recovery::Done);
+    }
+
+    void ReadinessSupplyTrip()
+    {
+        using runrules::Keep;
+        using runrules::Recovery;
+        std::vector<runrules::Obligation> trip = runrules::Obligations({ { 3, Keep::Supplies } }, 0);
+        CHECK(trip[0].deadline == 900);
+        runrules::Ready mage = ReadyMember(3);
+        mage.usesMana = true;
+        mage.mana = 10;
+        mage.hasDrink = false;
+        // On the way out the member is off the map: its supplies leave readiness, but the obligation stays unmet.
+        mage.facts.inInstance = false;
+        CHECK(runrules::Readiness({ mage }).size() == 1 && runrules::Readiness({ mage })[0].why == Keep::Away);
+        CHECK(runrules::RecoveryStep(trip, { mage }, 60) == Recovery::Going);
+        // Drink bought outside is not enough: it must be back with the party.
+        mage.hasDrink = true;
+        CHECK(runrules::RecoveryStep(trip, { mage }, 400) == Recovery::Going);
+        mage.facts.inInstance = true;
+        mage.rejoining = true;
+        CHECK(runrules::RecoveryStep(trip, { mage }, 500) == Recovery::Going);
+        mage.rejoining = false;
+        CHECK(runrules::RecoveryStep(trip, { mage }, 500) == Recovery::Done);
+        // A trip interrupted, the member back with no drink: over at 15 minutes, not before.
+        mage.hasDrink = false;
+        CHECK(runrules::RecoveryStep(trip, { mage }, 899) == Recovery::Going);
+        CHECK(runrules::RecoveryStep(trip, { mage }, 900) == Recovery::Over);
+        // Drinking now, its last drink in use, counts as supplied (the caller's fact).
+        mage.hasDrink = true;
+        CHECK(runrules::Readiness({ mage })[0].why == Keep::Mana);
+        // So does a mage that knows Conjure Water, with none in its bags: short of mana, it waits and conjures; no trip.
+        runrules::Ready conjurer = ReadyMember(3);
+        conjurer.usesMana = true;
+        conjurer.mana = 10;
+        conjurer.hasDrink = true;
+        CHECK(WhyOf({ conjurer }, 3) == std::vector<Keep>{ Keep::Mana });
+        CHECK(!runrules::BlocksAtOnce(runrules::Readiness({ conjurer })));
+    }
+
+    void ReadinessBlocks()
+    {
+        using runrules::BlockOutcome;
+        using runrules::Keep;
+        std::map<uint32_t, uint32_t> counts;
+        // Keyed by the stop's pack: the same stop chosen again at another index counts on.
+        CHECK(runrules::CountBlock(counts, 41) == BlockOutcome::Recover);
+        CHECK(runrules::CountBlock(counts, 52) == BlockOutcome::Recover);
+        CHECK(runrules::CountBlock(counts, 41) == BlockOutcome::Recover);
+        // The third at one stop fails the run, with no third recovery.
+        CHECK(runrules::CountBlock(counts, 41) == BlockOutcome::Fail);
+        // Only a verified clear forgets a stop's count.
+        runrules::StopCleared(counts, 52);
+        CHECK(!counts.count(52) && counts[41] == 3);
+        // One block reconciled twice is taken once.
+        uint32_t taken = 0;
+        CHECK(runrules::TakeBlock(taken, 7));
+        CHECK(!runrules::TakeBlock(taken, 7));
+        CHECK(runrules::TakeBlock(taken, 8));
+        CHECK(!runrules::TakeBlock(taken, 0));
+        // A block is due only with reasons: a party ready at the deadline gets none.
+        runrules::Budget budget{ 3, 1, 100 };
+        CHECK(!runrules::BlockDue(budget, 400, {}, true));
+        CHECK(runrules::BlockDue(budget, 400, { { 2, Keep::Far } }, true));
+        CHECK(!runrules::BlockDue(budget, 399, { { 2, Keep::Far } }, true));
+        CHECK(runrules::BlockDue(budget, 120, { { 2, Keep::Supplies } }, true));
+        // Supplies block at once only with the leader gathered at its spot: walking there, or back from a fight, the
+        // party's far members are no reason, and the budget decides.
+        CHECK(!runrules::BlockDue(budget, 120, { { 1, Keep::Far }, { 2, Keep::Supplies } }, false));
+        CHECK(runrules::BlockDue(budget, 400, { { 1, Keep::Far }, { 2, Keep::Supplies } }, false));
+    }
+
+    void ReadinessPullGate()
+    {
+        using runrules::Keep;
+        CHECK(runrules::PullAllowed(false, false, {}));
+        // A pull fired before the block, executed after it: refused.
+        CHECK(!runrules::PullAllowed(true, false, {}));
+        CHECK(!runrules::PullAllowed(false, true, {}));
+        // A pull fired while ready, executed after a member's mana dropped: refused by the fresh readiness.
+        CHECK(!runrules::PullAllowed(false, false, { { 2, Keep::Mana } }));
+    }
+
+    void ReadinessRepath()
+    {
+        runrules::Nearing nearing;
+        CHECK(!runrules::Repath(nearing, 1, 77, 30.0f, 0));
+        CHECK(!runrules::Repath(nearing, 1, 77, 25.0f, 5));
+        // Not nearer by a yard for 20 seconds from the last gain: a new path, and the clock starts again.
+        CHECK(!runrules::Repath(nearing, 1, 77, 24.5f, 24));
+        CHECK(runrules::Repath(nearing, 1, 77, 24.5f, 25));
+        CHECK(!runrules::Repath(nearing, 1, 77, 24.5f, 44));
+        CHECK(runrules::Repath(nearing, 1, 77, 24.5f, 45));
+        // A new destination or generation starts the tracking again.
+        CHECK(!runrules::Repath(nearing, 1, 78, 24.5f, 70));
+        CHECK(!runrules::Repath(nearing, 1, 78, 24.5f, 89));
+        CHECK(!runrules::Repath(nearing, 2, 78, 24.5f, 95));
+        CHECK(!runrules::Repath(nearing, 2, 78, 24.5f, 114));
+        CHECK(runrules::Repath(nearing, 2, 78, 24.5f, 115));
+    }
+
+    // The core's side of a block: taken once, a recovery with its obligations, and back to lead.
+    void BlockTakenOnce()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        CHECK(core.mode == Mode::Lead && core.Permit());
+        const uint32_t generation = core.generation;
+        world.ready[3].usesMana = true;
+        world.ready[3].mana = 10;
+        core.TakeBlock(world, counter, 1, generation, 41, { { 3, runrules::Keep::Mana } }, "m3:mana", 100);
+        CHECK(core.mode == Mode::Released && core.reason == "recovery,m3:mana" && core.recovering);
+        CHECK(core.Control() == Control::Recover && !core.Permit());
+        CHECK(HasEvent(core, "run_block", "result=recover stop=41 count=1/3 reasons=m3:mana"));
+        // The same block again, reconciled twice: nothing more.
+        core.events.clear();
+        core.TakeBlock(world, counter, 1, generation, 41, { { 3, runrules::Keep::Mana } }, "m3:mana", 101);
+        CHECK(core.events.empty() && core.blockCounts[41] == 1);
+        // The job's report does not hand a recovery back.
+        JobReport inside;
+        inside.inside = true;
+        core.Settle(world, counter, inside);
+        CHECK(core.mode == Mode::Released && core.recovering);
+        // Under Recover the job pulls nothing and runs no step; its recovery and the trip's way out and back act.
+        CHECK(runrules::Job(Control::Recover, JobAct::Step, true) == JobMay::Return);
+        CHECK(runrules::Job(Control::Recover, JobAct::MoveOn, true) == JobMay::Return);
+        CHECK(runrules::Job(Control::Recover, JobAct::Recover, true) == JobMay::Act);
+        CHECK(runrules::Job(Control::Recover, JobAct::LeaveRepair, true) == JobMay::Act);
+        runrules::DispatchFacts facts;
+        facts.control = Control::Recover;
+        facts.phase = runrules::Phase::Bosses;
+        facts.onDungeonMap = facts.partyIn = true;
+        CHECK(runrules::Decide(facts) == runrules::Dispatch::Recover);
+        facts.phase = runrules::Phase::Leave;
+        CHECK(runrules::Decide(facts) == runrules::Dispatch::Leave);
+        // Mana not back: going on. Back: lead, a new generation, the leader choosing its stop again.
+        core.Reconcile(world, counter, 150);
+        CHECK(core.mode == Mode::Released && core.recovering);
+        world.ready[3].mana = 70;
+        const uint32_t before = core.generation;
+        core.Reconcile(world, counter, 160);
+        CHECK(core.mode == Mode::Lead && core.reason == "recovered" && !core.recovering && core.choose);
+        CHECK(core.generation != before && core.Permit());
+        CHECK(HasEvent(core, "run_recovery", "result=done obligations=m3:mana:met"));
+    }
+
+    void BlockStaleAndOver()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        // A block written under a generation since replaced is the old plan's.
+        core.TakeBlock(world, counter, 1, core.generation + 5, 41, { { 3, runrules::Keep::Far } }, "m3:far", 100);
+        CHECK(core.mode == Mode::Lead && core.blockCounts.empty());
+        // An empty block is no block.
+        core.TakeBlock(world, counter, 2, core.generation, 41, {}, "", 100);
+        CHECK(core.mode == Mode::Lead && core.blockCounts.empty());
+        // A far member that never comes nearer: over at its own deadline, back to lead.
+        world.ready[3].distance = 40.0f;
+        core.TakeBlock(world, counter, 3, core.generation, 41, { { 3, runrules::Keep::Far } }, "m3:far", 100);
+        CHECK(core.recovering);
+        core.Reconcile(world, counter, 279);
+        CHECK(core.recovering);
+        core.Reconcile(world, counter, 280);
+        CHECK(core.mode == Mode::Lead && core.reason == "recovery_over");
+        CHECK(HasEvent(core, "run_recovery", "result=over obligations=m3:far:unmet"));
+    }
+
+    void ThirdBlockFails()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        world.ready[2].health = 50;
+        time_t now = 100;
+        for (uint32_t id = 1; id <= 2; ++id)
+        {
+            core.TakeBlock(world, counter, id, core.generation, 41, { { 2, runrules::Keep::Health } }, "m2:health", now);
+            CHECK(core.recovering && core.blockCounts[41] == id);
+            now += runrules::RECOVERY_SECONDS;
+            core.Reconcile(world, counter, now);
+            CHECK(core.mode == Mode::Lead && !core.recovering);
+        }
+        // Another stop's block counts apart.
+        core.TakeBlock(world, counter, 3, core.generation, 52, { { 2, runrules::Keep::Health } }, "m2:health", now);
+        CHECK(core.blockCounts[52] == 1);
+        now += runrules::RECOVERY_SECONDS;
+        core.Reconcile(world, counter, now);
+        // The third at stop 41: the run ends failed, and no third recovery starts there.
+        core.events.clear();
+        core.TakeBlock(world, counter, 4, core.generation, 41, { { 2, runrules::Keep::Health } }, "m2:health", now);
+        CHECK(core.mode == Mode::Ended && core.failed && core.reason == "blocked,m2:health" && !core.recovering);
+        CHECK(HasEvent(core, "run_block", "result=fail stop=41 count=3/3"));
+        CHECK(!HasEvent(core, "run_mode", "mode=released"));
+        // A verified clear forgets a stop's count.
+        core.StopCleared(52);
+        CHECK(!core.blockCounts.count(52));
+    }
+
+    void RecoveryThroughHold()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        world.ready[3].usesMana = true;
+        world.ready[3].mana = 10;
+        core.TakeBlock(world, counter, 1, core.generation, 41, { { 3, runrules::Keep::Mana } }, "m3:mana", 100);
+        // The leader dies during the recovery: a hold, and the recovery is kept.
+        world.facts[1].alive = false;
+        core.Reconcile(world, counter, 110);
+        CHECK(core.mode == Mode::Hold && core.recovering && core.Control() == Control::Hold);
+        world.facts[1] = Inside();
+        for (time_t now = 120; now < 200 && core.mode == Mode::Hold; now += 5)
+            core.Reconcile(world, counter, now);
+        CHECK(core.mode == Mode::Released && core.recovering && core.Control() == Control::Recover);
+        world.ready[3].mana = 90;
+        core.Reconcile(world, counter, 210);
+        CHECK(core.mode == Mode::Lead && !core.recovering);
+    }
+
+    void ApartOverdueOnlyInHold()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        // A member apart in lead: the pull is held, but the run is not ended by time; blocks govern.
+        world.places[5] = { 300.0f, 0.0f, 0.0f };
+        world.plans[5] = runrules::PlanResult::Blocked;
+        core.Reconcile(world, counter, 110);
+        CHECK(core.mode == Mode::Lead && core.apart.count(5) && !core.Permit());
+        core.Reconcile(world, counter, 110 + runrules::REJOIN_SECONDS + 5);
+        CHECK(core.mode == Mode::Lead && !core.failed && core.apartSince == 0);
+    }
+
+    // A supply trip with no safe way out: no trip and no walk, the supplies obligation a wait for the member's own mana.
+    void SupplyNoSafeWay()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        world.ready[3].usesMana = true;
+        world.ready[3].mana = 10;
+        world.ready[3].hasDrink = false;
+        world.plans[1] = runrules::PlanResult::Blocked;
+        core.TakeBlock(world, counter, 1, core.generation, 41, { { 3, runrules::Keep::Supplies } }, "m3:supplies", 100);
+        CHECK(core.exitWanted && core.recovering);
+        core.Reconcile(world, counter, 105);
+        CHECK(!core.exitWanted && !core.exiting && core.apart.empty());
+        CHECK(HasEvent(core, "supply_trip", "result=no_safe_way blocker=spawn_99_stop_3"));
+        // The obligation is now the member's own health and mana, from now with the usual deadline; no block counted.
+        CHECK(core.obligations.size() == 2 && core.obligations[1].why == runrules::Keep::Mana && core.obligations[1].deadline == 105 + 180);
+        CHECK(core.blockCounts[41] == 1);
+        world.ready[3].mana = 70;
+        core.Reconcile(world, counter, 150);
+        CHECK(core.mode == Mode::Lead && HasEvent(core, "run_recovery", "result=done"));
+
+        // The way out not planned in time, the tick's searches spent: the same.
+        FakeWorld second = Party();
+        Counter counter2;
+        RunCore other = Started(second, counter2);
+        other.Reconcile(second, counter2, 100);
+        second.ready[3].usesMana = true;
+        second.ready[3].mana = 10;
+        second.ready[3].hasDrink = false;
+        second.plans[1] = runrules::PlanResult::Pending;
+        other.TakeBlock(second, counter2, 1, other.generation, 41, { { 3, runrules::Keep::Supplies } }, "m3:supplies", 100);
+        other.Reconcile(second, counter2, 101);
+        CHECK(other.exitWanted && !HasEvent(other, "supply_trip", "no_safe_way"));
+        other.Reconcile(second, counter2, 101 + runrules::EXIT_PLAN_SECONDS);
+        CHECK(!other.exitWanted && HasEvent(other, "supply_trip", "result=no_safe_way blocker=no_plan_in_time"));
+    }
+
+    // A clear way out: every member walks the checked way to the exit point, and only then does the job take them out.
+    void SupplyWalksOut()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        world.ready[3].usesMana = true;
+        world.ready[3].mana = 10;
+        world.ready[3].hasDrink = false;
+        core.TakeBlock(world, counter, 1, core.generation, 41, { { 3, runrules::Keep::Supplies } }, "m3:supplies", 100);
+        core.Reconcile(world, counter, 105);
+        CHECK(core.exiting && !core.exitDone && HasEvent(core, "supply_trip", "result=walking_out"));
+        // All five apart, the leader among them; on the next reconcile each walks a checked part toward the exit point.
+        CHECK(core.apart.size() == 5);
+        core.Reconcile(world, counter, 106);
+        for (uint32_t guid : world.members)
+            CHECK(core.apart[guid].walking && core.apart[guid].walk.to.x == -200.0f);
+        CHECK(!core.Permit());
+        // The members reach the exit: the walk out is done, and the job may take them out.
+        for (uint32_t guid : world.members)
+            world.places[guid] = { -200.0f + float(guid), 0.0f, 0.0f };
+        core.Reconcile(world, counter, 160);
+        CHECK(!core.exiting && core.exitDone && core.apart.empty() && HasEvent(core, "supply_trip", "result=at_exit"));
+        CHECK(core.mode == Mode::Released && core.recovering);
+        // Out on the trip the obligations wait; back inside with drink, rejoined: done.
+        JobReport out;
+        out.leaving = true;
+        core.Settle(world, counter, out);
+        core.Reconcile(world, counter, 300);
+        CHECK(core.recovering);
+        JobReport back;
+        back.inside = true;
+        core.Settle(world, counter, back);
+        world.ready[3].hasDrink = true;
+        core.Reconcile(world, counter, 400);
+        CHECK(core.mode == Mode::Lead && !core.recovering && HasEvent(core, "run_recovery", "result=done"));
+    }
 }
 
 int main()
@@ -1814,6 +2298,21 @@ int main()
     HumanInHold();
     FailedPartyKeepsGroup();
     SummonInTheWay();
+    ReadinessReasons();
+    ReadinessSupplies();
+    ReadinessBudget();
+    ReadinessRecovery();
+    ReadinessSupplyTrip();
+    ReadinessBlocks();
+    ReadinessPullGate();
+    ReadinessRepath();
+    BlockTakenOnce();
+    BlockStaleAndOver();
+    ThirdBlockFails();
+    RecoveryThroughHold();
+    ApartOverdueOnlyInHold();
+    SupplyNoSafeWay();
+    SupplyWalksOut();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

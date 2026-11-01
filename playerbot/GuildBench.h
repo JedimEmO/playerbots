@@ -34,4 +34,6 @@ private:
     static std::list<std::string> Kill(Player* bot, const std::string& name);
     static std::list<std::string> ClearRoute(Player* leader, const std::string& stop);
     static std::list<std::string> Mana(Player* bot, const std::string& name, const std::string& percent);
+    // For the lab's supply scenario: every drink, or every food, the character carries, destroyed.
+    static std::list<std::string> Take(Player* bot, const std::string& name, const std::string& what);
 };

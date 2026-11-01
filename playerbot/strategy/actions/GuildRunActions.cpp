@@ -3,6 +3,7 @@
 #include "playerbot/GuildRunState.h"
 #include "playerbot/GuildRuns.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
+#include "playerbot/strategy/values/LastMovementValue.h"
 #include "Entities/Creature.h"
 
 using namespace ai;
@@ -63,6 +64,15 @@ bool MoveToRunSpotAction::Execute(Event& event)
     }
     if (!spot || spot.getMapId() != bot->GetMapId())
         return false;
+    // A member far from its stand that has not come a yard nearer in 20 seconds gets a new path: the one kept from its
+    // last move is dropped, since MoveTo would walk it again. A new generation or a new stand starts the count afresh.
+    if (!view.lead && view.mode == GuildRunMode::Lead)
+    {
+        const uint64 destination = (uint64(uint32(int32(spot.getX() * 2.0f))) << 32) ^ uint64(uint32(int32(spot.getY() * 2.0f)));
+        if (runrules::Repath(nearing, view.stamp.generation, destination,
+            bot->GetDistance(spot.getX(), spot.getY(), spot.getZ()), int64_t(time(nullptr))))
+            AI_VALUE(LastMovement&, "last movement").clear();
+    }
     // A run move by its own token: the previous one and any leaked token go first, and a move the core had to defer
     // postpones this one (GuildRunStates::StartRunMove). MoveTo keeps every safeguard of the bots' moves, the path, its
     // no-route rejection and its clipping, and only issues its point move with the token for id.
@@ -128,6 +138,34 @@ bool RunGatherAction::Execute(Event& event)
     if (!Settled(bot))
         return false;
     sGuildRunStates.Gather(bot, StampOf(event));
+    Refresh(context);
+    return true;
+}
+
+bool RunKeepersAction::Execute(Event& event)
+{
+    if (!Settled(bot))
+        return false;
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    sGuildRunStates.Keepers(bot, StampOf(event), GuildRunStates::Readiness(bot, view));
+    Refresh(context);
+    return true;
+}
+
+bool RunBlockAction::Execute(Event& event)
+{
+    if (!Settled(bot))
+        return false;
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    // The reasons as they are now: a party that came ready meanwhile is not blocked.
+    const std::vector<runrules::Kept> kept = GuildRunStates::Readiness(bot, view);
+    if (kept.empty())
+        return false;
+    sGuildRunStates.Block(bot, StampOf(event), kept);
+    // A pull asked for under the old plan goes at once; fighting what comes stays.
+    if (PullStrategy* strategy = PullStrategy::Get(ai))
+        if (strategy->HasTarget())
+            ai->DoSpecificAction("pull end", event, true);
     Refresh(context);
     return true;
 }

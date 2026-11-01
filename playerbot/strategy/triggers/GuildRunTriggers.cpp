@@ -17,9 +17,6 @@ namespace
     // How long after the party goes on to a stop it waits for the last fight's loot before it walks.
     // Loot a member cannot take stays pending, as it did in the foundry, and an unbounded wait held parties for good.
     constexpr time_t RUN_LOOT_WAIT = 20;
-    // How long the leader waits at the pull spot for members far off or low, before it pulls anyway. A dead member
-    // is waited for without a limit: its corpse run is the job's.
-    constexpr time_t RUN_GATHER_MAX = 90;
     // How long a pull may go without a fight before it counts as having brought nothing.
     constexpr time_t RUN_PULL_WAIT = 20;
     // How long after the pull the leader holds at its spot, and how far it may be drawn off it meanwhile.
@@ -163,37 +160,39 @@ bool RunPullReadyTrigger::IsActive()
     if (!Leads(view) || view.index >= view.stops || view.pull != GuildRunPull::Gather
         || !InWorld(bot) || bot->IsInCombat())
         return false;
-    // The run's permit, nobody apart, and every expected member, the leader among them, online, in the world in the run's
-    // own instance, and alive: one offline, away, dead or walking back holds the pull back, before the gather's time limit
-    // below. The rest of readiness is below too.
+    // The one gate every pull goes through: the run's permit, nobody apart, every expected member there, and nobody,
+    // the leader included, keeping the pull back (GuildRunStates::PullAllowed, runrules::Readiness). No timer pulls: a
+    // party that cannot get ready blocks ("run block").
     if (!sGuildRunStates.PullAllowed(bot))
         return false;
     const WorldPosition& spot = GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot);
     // Not with another pack's creature in reach of the pull spot, as a patrol that came by while the party gathered,
     // unless the party has waited for it as long as it may.
-    if (DistanceTo(bot, spot) > RUN_AT_SPOT * 2 || (!view.waited && GuildRunStates::Reached(bot->GetMap(), bot, view.stop)))
-        return false;
+    return DistanceTo(bot, spot) <= RUN_AT_SPOT * 2 && (view.waited || !GuildRunStates::Reached(bot->GetMap(), bot, view.stop));
+}
 
-    Group* group = bot->GetGroup();
-    if (!group)
+bool RunKeepersTrigger::IsActive()
+{
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    // Once the waiting budget of this stop and generation runs: who keeps the pull back, when it changes.
+    if (!Leads(view) || view.index >= view.stops || !InWorld(bot) || view.pull == GuildRunPull::Blocked
+        || view.budget.stop != view.index || view.budget.generation != view.stamp.generation || !view.budget.since)
         return false;
-    bool ready = true;
-    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
-    {
-        Player* member = ref->getSource();
-        if (!member || member == bot)
-            continue;
-        // A member dead, or on another map after its release, holds the pull until it is back.
-        if (!member->IsAlive() || !member->IsInWorld() || member->GetMapId() != bot->GetMapId())
-            return false;
-        if (member->IsInCombat())
-            return false;
-        const bool hasMana = member->GetPowerType() == POWER_MANA && member->GetMaxPower(POWER_MANA);
-        if (DistanceTo(member, spot) > GuildRunStates::PARTY_NEAR || member->GetHealthPercent() < GuildRunStates::PULL_HEALTH
-            || (hasMana && member->GetPowerPercent(POWER_MANA) < GuildRunStates::PULL_MANA))
-            ready = false;
-    }
-    return ready || time(nullptr) - view.gatherSince >= RUN_GATHER_MAX;
+    return GuildRunStates::KeepersText(GuildRunStates::Readiness(bot, view)) != view.keepers;
+}
+
+bool RunBlockTrigger::IsActive()
+{
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    // Watched in and out of a fight, apart from the pull's own checks, which return early for a fight or a member away.
+    if (!Leads(view) || view.index >= view.stops || !InWorld(bot) || view.pull == GuildRunPull::Blocked
+        || view.pull == GuildRunPull::Pull || view.budget.stop != view.index || view.budget.generation != view.stamp.generation)
+        return false;
+    // The budget out, or a member out of what waiting cannot mend, that one only with the leader gathered at its spot;
+    // never with nobody keeping the pull back.
+    const bool gathered = view.pull == GuildRunPull::Gather
+        && DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) <= RUN_AT_SPOT * 2;
+    return runrules::BlockDue(view.budget, int64_t(time(nullptr)), GuildRunStates::Readiness(bot, view), gathered);
 }
 
 bool RunPullFailedTrigger::IsActive()

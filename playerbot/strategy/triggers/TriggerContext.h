@@ -309,6 +309,8 @@ namespace ai
             creators["run approach"] = [](PlayerbotAI* ai) { return new RunApproachTrigger(ai); };
             creators["run gather"] = [](PlayerbotAI* ai) { return new RunGatherTrigger(ai); };
             creators["run pull ready"] = [](PlayerbotAI* ai) { return new RunPullReadyTrigger(ai); };
+            creators["run keepers"] = [](PlayerbotAI* ai) { return new RunKeepersTrigger(ai); };
+            creators["run block"] = [](PlayerbotAI* ai) { return new RunBlockTrigger(ai); };
             creators["run pull failed"] = [](PlayerbotAI* ai) { return new RunPullFailedTrigger(ai); };
             creators["run cleared"] = [](PlayerbotAI* ai) { return new RunClearedTrigger(ai); };
             creators["run hold"] = [](PlayerbotAI* ai) { return new RunHoldTrigger(ai); };
