@@ -79,10 +79,12 @@ namespace ai
     };
 
     // The leader pulls the stop's pack: its creature nearest the pull spot, from range by the pull strategy, which brings
-    // the pull back to the spot. A tank that cannot pull from range attacks it. A pack whose own creatures reach its pull
-    // spot is pulled from the stop before's, from range and in sight only, else from its own spot. A pack out of range
-    // and out of sight from its own spot as well is passed over. The pull phase is written before anything moves, so the
-    // movement guard lets the pull's own move close on the pack, and goes back when nothing started.
+    // the pull back to the spot. Within the pull's range and in sight of where the leader stands, the spell is cast from
+    // there with no reach move; otherwise the strategy's pull reaches, as the movement guard allows. A tank that cannot
+    // pull from range attacks it. A pack whose own creatures reach its pull spot is pulled from the stop before's, from
+    // range and in sight only, else from its own spot. A pack out of range and out of sight from its own spot as well is
+    // passed over. The pull phase is written before anything moves, so the movement guard lets the pull's own move close
+    // on the pack, and goes back when nothing started.
     class RunPullAction : public AttackAction
     {
     public:
@@ -107,7 +109,8 @@ namespace ai
         bool Execute(Event& event) override;
     };
 
-    // Another pack's creature reaches the pull spot: the party waits at the stop before until it leaves.
+    // Another pack's creature reaches the way to the pull spot, the spot or its stands, by the guard's model: the party
+    // waits at the stop before until none does, and the waiting budget starts.
     class RunWaitAction : public Action
     {
     public:
@@ -115,19 +118,11 @@ namespace ai
         bool Execute(Event& event) override;
     };
 
-    // The pull spot is out of reach again: on to it.
+    // No blocker reaches the way, the spot or its stands, so the guard lets the walk: on to the spot.
     class RunGoAction : public Action
     {
     public:
         RunGoAction(PlayerbotAI* ai) : Action(ai, "run go") {}
-        bool Execute(Event& event) override;
-    };
-
-    // Waited long enough: on to the pull spot with the other pack's creature still in reach, so that a run never stands.
-    class RunWaitedAction : public Action
-    {
-    public:
-        RunWaitedAction(PlayerbotAI* ai) : Action(ai, "run waited") {}
         bool Execute(Event& event) override;
     };
 }

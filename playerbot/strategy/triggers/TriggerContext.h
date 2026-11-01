@@ -322,7 +322,6 @@ namespace ai
             creators["run walk"] = [](PlayerbotAI* ai) { return new RunWalkTrigger(ai); };
             creators["run reached"] = [](PlayerbotAI* ai) { return new RunReachedTrigger(ai); };
             creators["run clear"] = [](PlayerbotAI* ai) { return new RunClearTrigger(ai); };
-            creators["run wait over"] = [](PlayerbotAI* ai) { return new RunWaitOverTrigger(ai); };
             creators["leave molten core"] = [](PlayerbotAI* ai) { return new MoltenCoreLeaveDungeonTrigger(ai); };
             creators["enter karazhan"] = [](PlayerbotAI* ai) { return new KarazhanEnterDungeonTrigger(ai); };
             creators["leave karazhan"] = [](PlayerbotAI* ai) { return new KarazhanLeaveDungeonTrigger(ai); };

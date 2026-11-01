@@ -117,6 +117,9 @@ namespace
 
     // What a run's walks are planned on: its route, the stop it is at and the last one the leader saw cleared, the way's
     // legs already checked, and the tick's path searches left for every run.
+    // A player's base run speed, in yards a second: the wait's mover when no member is at hand (BlockerGone).
+    constexpr float RUN_SPEED = 7.0f;
+
     struct Ground
     {
         std::shared_ptr<const GuildPacks::Route> packs;
@@ -124,6 +127,9 @@ namespace
         size_t index = 0;
         std::map<size_t, bool>* wayChecked = nullptr;
         int* budget = nullptr;
+        const GuildRunStop* stop = nullptr;   // the run's current stop, for a blocker's recovery
+        bool ownSpot = false;                 // pulling it from its own spot (GuildRunStates::FightSpot)
+        std::vector<uint32> members;          // the members the run expects, whom a blocker's recovery judges for
     };
 
     // The world as one run sees it, on the world thread between map updates: its group by id, and its members through its
@@ -429,6 +435,29 @@ namespace
             return true;
         }
 
+        bool BlockerGone(uint32_t spawn) override
+        {
+            // Judged as the wait judges it, over the places the party holds at the stop with the whole leg, for each member
+            // the run expects in the instance; with none at hand, at the party's lowest level and a player's run speed:
+            // dead, gone, or out of reach of all of them.
+            if (!map || !ground.packs || !ground.stop)
+                return true;
+            GuildRunStop only = *ground.stop;
+            only.outsideReach = { spawn };
+            std::vector<Unit*> movers;
+            uint32 lowest = 0;
+            for (uint32 guid : ground.members)
+            {
+                Player* member = Here(guid);
+                if (member && member->IsAlive())
+                    movers.push_back(member);
+                if (Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false))
+                    lowest = lowest ? std::min(lowest, uint32(player->GetLevel())) : uint32(player->GetLevel());
+            }
+            return GuildRunStates::Blockers(map, movers, lowest, ground.packs.get(), only, GuildRunPull::Wait,
+                ground.ownSpot).empty();
+        }
+
         bool ReadyOf(uint32_t guid, uint32_t leader, runrules::Ready& ready) override
         {
             // Inside the run's instance only: a member elsewhere is seen offline, and its obligations stay unmet.
@@ -621,7 +650,6 @@ void GuildRunStates::Reset(State& state, size_t index)
     state.gatherSince = 0;
     state.pullTries = 0;
     state.waitSince = 0;
-    state.waited = false;
     state.ownSpot = false;
     state.stopAt = state.changedAt = time(nullptr);
 }
@@ -840,7 +868,9 @@ std::vector<std::tuple<uint32, std::string, std::string>> GuildRunStates::Reconc
     {
         std::lock_guard<std::mutex> guard(state->lock);
         ServerRunWorld world(state->mapId, state->instanceId,
-            Ground{ state->packs, state->lastCleared, state->index, &state->wayChecked, &planBudget });
+            Ground{ state->packs, state->lastCleared, state->index, &state->wayChecked, &planBudget,
+                state->index < state->route.size() ? &state->route[state->index] : nullptr, state->ownSpot,
+                std::vector<uint32>(state->core.expected.begin(), state->core.expected.end()) });
         // The leader's block, taken once: a recovery, or the run's end at the third at one stop.
         if (state->blockId)
             state->core.TakeBlock(world, generations, state->blockId, state->blockGeneration, state->blockStop,
@@ -1051,7 +1081,16 @@ std::vector<runrules::Kept> GuildRunStates::Readiness(Player* bot, const GuildRu
         }
         members.push_back(ready);
     }
-    return runrules::Readiness(members);
+    kept = runrules::Readiness(members);
+    // Waiting at the stop before: each creature that still reaches the way to the spot, the spot or its stands keeps the
+    // pull back as the leader's blocker. So a wait that never clears comes to a block when the budget runs out, never to
+    // a pull (docs/run-contract.md, "Waiting for a patrol").
+    if (atStop && view.pull == GuildRunPull::Wait)
+    {
+        const std::vector<runrules::Kept> blockers = runrules::BlockerKeepers(view.leader, Blockers(bot, view));
+        kept.insert(kept.end(), blockers.begin(), blockers.end());
+    }
+    return kept;
 }
 
 bool GuildRunStates::BlockNow(Player* leader, const GuildRunView& view, std::vector<runrules::Kept>& bots)
@@ -1385,7 +1424,6 @@ GuildRunView GuildRunStates::View(Player* bot) const
     view.pullAt = state->pullAt;
     view.stopAt = state->stopAt;
     view.waitSince = state->waitSince;
-    view.waited = state->waited;
     view.ownSpot = state->ownSpot;
     view.gatherSince = state->gatherSince;
     view.pullTries = state->pullTries;
@@ -1728,10 +1766,12 @@ void GuildRunStates::SayKeepers(State& state, const std::string& text)
         + " budget=" + std::to_string(state.budget.since ? time(nullptr) - state.budget.since : 0));
 }
 
-void GuildRunStates::Pulled(Player* leader, const GuildRunStamp& stamp, ObjectGuid creature)
+void GuildRunStates::Pulled(Player* leader, const GuildRunStamp& stamp, ObjectGuid creature, const std::string& detail)
 {
-    Write(leader, stamp, "pulled", [creature](State& state, Map*, std::string&)
+    Write(leader, stamp, "pulled", [creature, &detail](State& state, Map*, std::string& fields)
     {
+        // How the pull goes: cast from the spot, or the pull strategy's reach (RunPullAction).
+        fields = detail;
         // A pull goes only through the gate, with nobody keeping it back: said before the pull, since the keepers' own
         // write, fired the same tick, is refused once the pull has revised the plan.
         if (!state.keepers.empty())
@@ -1759,11 +1799,18 @@ void GuildRunStates::Wait(Player* leader, const GuildRunStamp& stamp, const std:
 {
     Write(leader, stamp, "waiting", [&detail](State& state, Map*, std::string& fields)
     {
-        if ((state.pull != GuildRunPull::Approach && state.pull != GuildRunPull::Gather) || state.waited)
+        if (state.pull != GuildRunPull::Approach && state.pull != GuildRunPull::Gather)
             return false;
         state.pull = GuildRunPull::Wait;
         state.waitSince = state.changedAt = time(nullptr);
         fields = "why=" + detail;
+        // The waiting budget starts here, as at a gather, when none runs under this stop and generation: a wait has no
+        // timer of its own, and one that never clears comes to a block through readiness, its blockers the reasons.
+        if (state.budget.stop != state.index || state.budget.generation != state.core.generation || !state.budget.since)
+        {
+            runrules::TrackBudget(state.budget, state.index, state.core.generation, true, int64_t(state.waitSince));
+            state.core.Note("run_budget", "stop=" + std::to_string(state.index + 1) + " from=wait");
+        }
         return true;
     });
 }
@@ -1776,20 +1823,6 @@ void GuildRunStates::Go(Player* leader, const GuildRunStamp& stamp)
             return false;
         state.pull = GuildRunPull::Approach;
         state.changedAt = time(nullptr);
-        return true;
-    });
-}
-
-void GuildRunStates::WaitedOut(Player* leader, const GuildRunStamp& stamp, const std::string& detail)
-{
-    Write(leader, stamp, "waited_out", [&detail](State& state, Map*, std::string& fields)
-    {
-        if (state.pull != GuildRunPull::Wait)
-            return false;
-        state.pull = GuildRunPull::Approach;
-        state.waited = true;
-        state.changedAt = time(nullptr);
-        fields = "why=" + detail;
         return true;
     });
 }
@@ -1940,27 +1973,103 @@ const std::vector<ai::WorldPosition>& GuildRunStates::FightStands(const GuildRun
     return before ? stop.beforeStands : stop.stands;
 }
 
-bool GuildRunStates::Reached(Map* map, Unit* bot, const GuildRunStop& stop)
+std::vector<Unit*> GuildRunStates::WaitMovers(Map* map, const std::vector<uint32>& expected)
 {
+    std::vector<Unit*> movers;
+    if (!map)
+        return movers;
+    for (uint32 guid : expected)
+    {
+        Player* member = map->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid));
+        if (member && member->IsInWorld() && !member->IsBeingTeleported() && member->IsAlive())
+            movers.push_back(member);
+    }
+    return movers;
+}
+
+std::vector<uint32> GuildRunStates::Blockers(Map* map, const std::vector<Unit*>& movers, uint32 level,
+    const GuildPacks::Route* packs, const GuildRunStop& stop, GuildRunPull pull, bool ownSpot)
+{
+    std::vector<uint32> found;
     // With no stop before there is nowhere to wait, and the party pulls with the creature in reach: otherwise
     // the approach, the gather and the pull would all hold for it, and nothing would start the wait.
-    if (!map || !bot || !stop.hasBefore)
-        return false;
+    if (!map || !packs || !stop.hasBefore || stop.outsideReach.empty())
+        return found;
+    auto vecOf = [](const ai::WorldPosition& at) { return runrules::Vec{ at.getX(), at.getY(), at.getZ() }; };
+    // The places the party holds, as FightSpot and FightStands choose them: pulling from the stop before, since a creature
+    // that stands still reaches the spot, its spot and stands alone, with no way to walk; else the way still to walk,
+    // the pull spot and its stands.
+    const bool fromBefore = stop.stillReach && !ownSpot;
+    std::vector<runrules::Vec> stands;
+    for (const ai::WorldPosition& stand : fromBefore ? stop.beforeStands : stop.stands)
+        stands.push_back(vecOf(stand));
+    // Each member judged for itself, as the guard judges each: its own aggro radius by its level, its own run speed, and
+    // on the way, the leg from its own nearest point. With no member at hand, at `level` (the route's when 0).
+    struct Judged { Unit* mover; float speed; std::vector<runrules::Vec> places; };
+    std::vector<Judged> judged;
+    std::vector<Unit*> each = movers;
+    if (each.empty())
+        each.push_back(nullptr);
+    for (Unit* mover : each)
+    {
+        Judged one{ mover, mover ? mover->GetSpeed(MOVE_RUN) : RUN_SPEED, {} };
+        if (fromBefore)
+        {
+            one.places.push_back(vecOf(stop.before));
+            one.places.insert(one.places.end(), stands.begin(), stands.end());
+        }
+        else
+            one.places = runguard::WaitPlaces(stop.leg, LegFrom(stop, pull, mover), vecOf(stop.pull), stands);
+        judged.push_back(std::move(one));
+    }
     for (uint32 spawn : stop.outsideReach)
     {
         Creature* creature = map->GetCreature(spawn);
-        // Dead, or not loaded, which a creature near the party is: gone.
-        if (!creature || !creature->IsInWorld() || !creature->IsAlive())
+        // Dead, or not loaded, which a creature near the party is: gone. Evading: the guard passes it, and so does the wait.
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || creature->GetCombatManager().IsInEvadeMode())
             continue;
-        // By the one rule: the 3D distance between centres within its aggro radius toward the bot and ReachPad.
-        const float reach = creature->GetAttackDistance(bot)
-            + runguard::ReachPad(creature->GetObjectBoundingRadius(), bot->GetObjectBoundingRadius());
-        const runrules::Vec pull = { stop.pull.getX(), stop.pull.getY(), stop.pull.getZ() };
-        const runrules::Vec at = { creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ() };
-        if (runrules::Distance(pull, at) <= reach)
-            return true;
+        // The guard's own threat toward each member: its live place and reach, bound by its loop while on it and out of a
+        // fight, at its widest walk inside the horizon (runguard::WaitReaches). One not to attack a member on sight
+        // passes that member, as the guard passes it. A blocker when it reaches the places for any member.
+        for (const Judged& one : judged)
+            if ((!one.mover || creature->CanAttackOnSight(one.mover))
+                && runguard::WaitReaches(GuildPacks::GuardThreatOf(*packs, creature, one.mover, level), one.places, one.speed))
+            {
+                found.push_back(spawn);
+                break;
+            }
     }
-    return false;
+    return found;
+}
+
+std::vector<uint32> GuildRunStates::Blockers(Player* bot, const GuildRunView& view)
+{
+    if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported() || !view.valid || view.index >= view.stops)
+        return {};
+    std::vector<Unit*> movers = WaitMovers(bot->GetMap(), view.expected);
+    if (movers.empty())
+        movers.push_back(bot);
+    return Blockers(bot->GetMap(), movers, 0, view.packs.get(), view.stop, view.pull, view.ownSpot);
+}
+
+size_t GuildRunStates::LegFrom(const GuildRunStop& stop, GuildRunPull pull, Unit* bot)
+{
+    if (pull == GuildRunPull::Wait)
+        return 0;
+    if (pull != GuildRunPull::Approach || !bot || stop.leg.empty())
+        return stop.leg.size();
+    // On its way: from the leg's point nearest the bot, so a creature behind it holds nothing.
+    const runrules::Vec at = { bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ() };
+    size_t nearest = 0;
+    for (size_t i = 1; i < stop.leg.size(); ++i)
+        if (runrules::Distance(stop.leg[i], at) < runrules::Distance(stop.leg[nearest], at))
+            nearest = i;
+    return nearest;
+}
+
+bool GuildRunStates::Reached(Player* bot, const GuildRunView& view)
+{
+    return !Blockers(bot, view).empty();
 }
 
 std::string GuildRunStates::Names(const std::vector<uint32>& spawns)
@@ -2022,12 +2131,28 @@ std::vector<GuildRunStop> GuildRunStates::BuildRoute(Player* leader, const std::
         for (const GuildPacks::Reacher& reacher : from.reachers)
             if (!reacher.ownPack && reacher.kind != GuildPacks::ReachKind::Static)
                 stop.outsideReach.push_back(reacher.spawn);
+        stop.pullCast = from.pullCast;
         // With no stop before, there is nowhere to wait or pull from afar: such a stop is pulled from its own spot.
         if (!route.empty())
         {
             stop.hasBefore = true;
             stop.before = route.back().pull;
             stop.beforeStands = route.back().stands;
+            // The leg the wait judges: the stop before's spot, then the way's points from its place along the way to this
+            // spot's, either way round.
+            stop.leg.push_back({ stop.before.getX(), stop.before.getY(), stop.before.getZ() });
+            if (!packs->points.empty())
+            {
+                const size_t last = packs->points.size() - 1;
+                const size_t a = std::min(last, size_t(packs->stops[route.size() - 1].pullAlong / 2.0f));
+                const size_t b = std::min(last, size_t(from.pullAlong / 2.0f));
+                for (size_t i = a;; i = a < b ? i + 1 : i - 1)
+                {
+                    stop.leg.push_back(VecOf(packs->points[i]));
+                    if (i == b)
+                        break;
+                }
+            }
         }
         route.push_back(stop);
     }

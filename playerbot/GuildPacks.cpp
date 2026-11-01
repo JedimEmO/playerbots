@@ -62,8 +62,9 @@ namespace
     // A pack is on the way when one of it would attack a party this much nearer than its aggro range to the route,
     // as the dungeon job looks ahead for its next pull.
     constexpr float ROUTE_AHEAD = 15.0f;
-    // A pull spot is this far from the nearest of its pack, back along the route, and the best is the middle.
-    constexpr float PULL_NEAR = 20.0f, PULL_FAR = 30.0f, PULL_BEST = 25.0f;
+    // A pull spot is this far from the nearest of its pack, back along the route, and the best is the middle; the route
+    // prefers one the pull is cast from (runguard::PULL_CAST).
+    constexpr float PULL_NEAR = runguard::PULL_NEAR, PULL_FAR = runguard::PULL_FAR, PULL_BEST = runguard::PULL_BEST;
     // At most this many spots are tried for one pack, and a route's predictions look at creatures this near a spot.
     constexpr size_t PULL_TRIES = 8;
     constexpr float ROUTE_REACH = 80.0f;
@@ -969,9 +970,11 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 continue;
             // One pacing a path that never leaves its reach of the spot, as the foundry's Goblin Engineers do, never moves
             // off: it is as one standing still. A wanderer's follower may be anywhere in its range, and counts as pacing;
-            // a patrol's follower paces when it may be in reach at every point of the loop, about its master.
-            const bool paces = line.size() == 1 || std::all_of(line.begin(), line.end(),
-                [&](const runrules::Vec& point) { return runguard::CreatureReaches({ at }, { point }, spread, reach); });
+            // a patrol's follower paces when it may be in reach at every point of the loop, about its master. Its reach as
+            // the wait judges it, with its walk inside the guard's horizon at a player's run speed across too
+            // (runguard::WaitNeverClears): a patrol the wait would never see leave is never one to wait for.
+            const bool paces = line.size() == 1
+                || runguard::WaitNeverClears(at, line, spread, reach, model.nodes[i].walk, RUN_SPEED);
             (paces ? found.strict : found.patrol).push_back(i);
         }
     };
@@ -1106,7 +1109,25 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         };
 
         struct Choice { G3D::Vector3 spot; size_t index = 0; bool offWay = false; int32 member = -1; Prediction prediction;
-                        std::vector<uint32> extras; Reached reached, leg; uint32 lateFirst = 0; float distance = 0.0f; };
+                        std::vector<uint32> extras; Reached reached, leg; uint32 lateFirst = 0; float distance = 0.0f;
+                        bool castable = false; };
+        // A pulled creature's wander range, which the cast range must cover too.
+        auto rangeOf = [&](int32 member)
+        {
+            const Node& node = model.nodes[member];
+            return node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f;
+        };
+        auto rankOf = [](const Choice& x)
+        {
+            runguard::SpotRank rank;
+            rank.strict = x.reached.strict.size();
+            rank.castable = x.castable;
+            rank.patrol = x.reached.patrol.size();
+            rank.extras = x.extras.size();
+            rank.lateFirst = x.lateFirst;
+            rank.distance = x.distance;
+            return rank;
+        };
         Choice best;
         bool have = false;
         std::set<uint32> tried;   // the packs this plan has planned first, whether that came to a stop or not
@@ -1134,12 +1155,15 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                     if (!own.count(joined.node))
                         c.extras.push_back(joined.node);
                 c.lateFirst = c.prediction.late.empty() ? std::numeric_limits<uint32>::max() : c.prediction.late.front().second;
-                // Fewest that would be pulled by walking there, then fewest patrols to wait for, then the rest as before.
-                const auto rank = [](const Choice& x) { return std::make_pair(x.reached.strict.size(), x.reached.patrol.size()); };
-                const bool better = !have || rank(c) < rank(best)
-                    || (rank(c) == rank(best) && (c.extras.size() < best.extras.size()
-                        || (c.extras.size() == best.extras.size() && (c.lateFirst > best.lateFirst
-                            || (c.lateFirst == best.lateFirst && std::fabs(c.distance - PULL_BEST) < std::fabs(best.distance - PULL_BEST))))));
+                // The pull cast from the spot, with no chase: the creature within PULL_CAST in 3D with its wander range, and
+                // in sight from eye height.
+                const G3D::Vector3& pulled = model.nodes[member].at;
+                c.castable = runguard::CastFits(c.distance, rangeOf(member))
+                    && VMAP::VMapFactory::createOrGetVMapManager()->isInLineOfSight(model.mapId, spot.x, spot.y, spot.z + EYE,
+                        pulled.x, pulled.y, pulled.z + EYE, false);
+                // Fewest that would be pulled by walking there, then one the pull is cast from, then fewest patrols to wait
+                // for, then the rest as before (runguard::BetterSpot). One not castable still ranks: no stop is dropped.
+                const bool better = !have || runguard::BetterSpot(rankOf(c), rankOf(best));
                 if (better)
                 {
                     best = c;
@@ -1157,7 +1181,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                 const size_t j = anchor - step;
                 int32 member = -1;
                 const float d = distanceToPack(route[j], member);
-                if (d >= PULL_NEAR && d <= PULL_FAR)
+                if (runguard::OnWayTry(d))
                     tries.push_back(j);
                 else if (d >= PULL_NEAR / 2.0f && std::fabs(d - PULL_BEST) < fallbackOff)
                 {
@@ -1175,10 +1199,34 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                     weigh(route[j], j, false, member);
             }
 
-            // Off the way, when the way passes no nearer than PULL_FAR or every spot on it is reached: PULL_BEST from the
-            // nearest of the pack, toward the way and turned either side, on the navmesh by a path from the way, and in
-            // sight of the creature.
-            if (have && (best.distance > PULL_FAR + ROUTE_STEP || !best.reached.strict.empty()))
+            // Off the way, when the way passes no nearer than PULL_FAR, every spot on it is reached, or none is castable:
+            // from the nearest of the pack, toward the way and turned either side, on the navmesh by a path from the way,
+            // and in sight of the creature. First placed across so that its 3D distance fits the cast range at the way's
+            // height (runguard::OffWayAcross); then, when none of those is castable and clear, PULL_BEST across as before.
+            // For castability alone, only when the pack does not reach the way's point nearest it: a spot placed across
+            // from the pack lies beyond a way that passes nearer, and the walk to it, past that point, would pull the pack
+            // on the approach, where it is not the plan's own pull yet. The leg's test spares the pack's own near the spot.
+            auto packReaches = [&](const G3D::Vector3& q)
+            {
+                const runrules::Vec at = { q.x, q.y, q.z };
+                for (uint32 i : pack.members)
+                {
+                    const Node& node = model.nodes[i];
+                    if (dead.count(i) || !node.aggroes)
+                        continue;
+                    const auto line = moverLines.find(i);
+                    const auto range = patrolRange.find(i);
+                    const std::vector<runrules::Vec> where = line != moverLines.end() ? line->second
+                        : std::vector<runrules::Vec>{ { node.at.x, node.at.y, node.at.z } };
+                    const float spread = range != patrolRange.end() ? range->second
+                        : node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f;
+                    if (runguard::CreatureReaches({ at }, where, spread, GuardReach(node, level) + ROUTE_STEP))
+                        return true;
+                }
+                return false;
+            };
+            if (have && runguard::OffWayWanted(best.distance, PULL_FAR + ROUTE_STEP, !best.reached.strict.empty(),
+                best.castable, packReaches(route[anchor])))
             {
                 int32 member = -1;
                 distanceToPack(route[anchor], member);
@@ -1191,20 +1239,32 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                         heading = G3D::Vector3(1.0f, 0.0f, 0.0f);
                     heading = heading / heading.length();
                     const ai::WorldPosition onWayPoint(model.mapId, toward.x, toward.y, toward.z);
-                    for (float degrees : { 0.0f, 35.0f, -35.0f, 70.0f, -70.0f })
+                    const float castAcross = runguard::OffWayAcross(toward.z - from.z, rangeOf(member));
+                    std::vector<float> acrosses;
+                    if (castAcross > 0.0f)
+                        acrosses.push_back(castAcross);
+                    if (castAcross <= 0.0f || std::fabs(castAcross - PULL_BEST) > 1.0f)
+                        acrosses.push_back(PULL_BEST);
+                    for (size_t a = 0; a < acrosses.size(); ++a)
                     {
-                        const float angle = degrees * float(M_PI) / 180.0f;
-                        const G3D::Vector3 direction(heading.x * std::cos(angle) - heading.y * std::sin(angle),
-                            heading.x * std::sin(angle) + heading.y * std::cos(angle), 0.0f);
-                        const G3D::Vector3 wanted = from + direction * PULL_BEST;
-                        const ai::WorldPosition target(model.mapId, wanted.x, wanted.y, toward.z);
-                        const std::vector<ai::WorldPosition> path = onWayPoint.getPathTo(target, nullptr);
-                        if (!target.isPathTo(path, 3.0f))
-                            continue;
-                        const G3D::Vector3 spot(path.back().getX(), path.back().getY(), path.back().getZ());
-                        if (VMAP::VMapFactory::createOrGetVMapManager()->isInLineOfSight(model.mapId, spot.x, spot.y, spot.z + EYE,
-                            from.x, from.y, from.z + EYE, false))
-                            weigh(spot, anchor, true, member);
+                        // The PULL_BEST spots only when no cast spot came clear.
+                        if (a > 0 && best.castable && best.reached.strict.empty())
+                            break;
+                        for (float degrees : { 0.0f, 35.0f, -35.0f, 70.0f, -70.0f })
+                        {
+                            const float angle = degrees * float(M_PI) / 180.0f;
+                            const G3D::Vector3 direction(heading.x * std::cos(angle) - heading.y * std::sin(angle),
+                                heading.x * std::sin(angle) + heading.y * std::cos(angle), 0.0f);
+                            const G3D::Vector3 wanted = from + direction * acrosses[a];
+                            const ai::WorldPosition target(model.mapId, wanted.x, wanted.y, toward.z);
+                            const std::vector<ai::WorldPosition> path = onWayPoint.getPathTo(target, nullptr);
+                            if (!target.isPathTo(path, 3.0f))
+                                continue;
+                            const G3D::Vector3 spot(path.back().getX(), path.back().getY(), path.back().getZ());
+                            if (VMAP::VMapFactory::createOrGetVMapManager()->isInLineOfSight(model.mapId, spot.x, spot.y, spot.z + EYE,
+                                from.x, from.y, from.z + EYE, false))
+                                weigh(spot, anchor, true, member);
+                        }
                     }
                 }
             }
@@ -1305,6 +1365,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
         stop.pullAlong = float(best.offWay ? nearestPoint(best.spot, best.index) : best.index) * ROUTE_STEP;
         stop.offWay = best.offWay;
         stop.pullDistance = best.distance;
+        stop.pullCast = best.castable;
         stop.clean = best.extras.empty();
         for (uint32 i : best.extras)
             stop.extras.push_back(model.nodes[i].spawn);
@@ -1524,9 +1585,10 @@ std::vector<std::string> GuildPacks::PrintRoute(const MapModel& model, const Rou
         std::string wait;
         if (wanderers || patrolling)
             wait = Format("; wait for %u wanderer%s, %u patrol%s", wanderers, wanderers == 1 ? "" : "s", patrolling, patrolling == 1 ? "" : "s");
-        lines.push_back(Format("%u. pack %u%s%s, %u (%u elite): %s; pull at (%.1f %.1f %.1f)%s %.0f yd, %s%s; %u stand", uint32(n + 1),
+        lines.push_back(Format("%u. pack %u%s%s, %u (%u elite): %s; pull at (%.1f %.1f %.1f)%s %.0f yd%s, %s%s; %u stand", uint32(n + 1),
             stop.pack, stop.boss ? " boss" : "", stop.clearsWay ? " first, to clear the next spot" : "", uint32(stop.spawns.size()), elites, packText.c_str(), stop.pullSpot.x, stop.pullSpot.y,
-            stop.pullSpot.z, stop.offWay ? " off the way" : "", stop.pullDistance, verdict.c_str(), wait.c_str(), uint32(stop.stand.size())).substr(0, 260));
+            stop.pullSpot.z, stop.offWay ? " off the way" : "", stop.pullDistance, stop.pullCast ? " cast" : " reach", verdict.c_str(), wait.c_str(),
+            uint32(stop.stand.size())).substr(0, 260));
         if (!stop.notCleared.empty())
         {
             std::string notCleared;
@@ -1962,15 +2024,29 @@ std::vector<runguard::GuardThreat> GuildPacks::LiveThreats(const Route& route, M
         const float d = runrules::LinesDistance({ at }, line);
         if (d < 0.0f || d > most)
             continue;
-        runguard::GuardThreat threat = envelope
-            ? runguard::EnvelopeThreat(*envelope, &at, reach, speed, creature->IsInCombat() || runguard::OffEnvelope(*envelope, at))
-            : runguard::LiveThreat(creature->GetDbGuid(), creature->GetEntry(), at, reach, speed);
-        threat.aggro = aggro;
+        runguard::GuardThreat threat = GuardThreatOf(route, creature, mover);
         threats.push_back(threat);
         if (found)
             found->push_back(creature->GetObjectGuid());
     }
     return threats;
+}
+
+runguard::GuardThreat GuildPacks::GuardThreatOf(const Route& route, Creature* creature, Unit* mover, uint32 level)
+{
+    const runrules::Vec at = { creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ() };
+    const runguard::Envelope* envelope = route.reach && creature->GetDbGuid() ? route.reach->BySpawn(creature->GetDbGuid()) : nullptr;
+    const float aggro = mover ? creature->GetAttackDistance(mover)
+        : runguard::AggroRadius(float(creature->GetDetectionRange()), int32_t(creature->GetLevel()),
+            int32_t(level ? level : route.level));
+    const float reach = aggro + runguard::ReachPad(creature->GetObjectBoundingRadius(),
+        mover ? mover->GetObjectBoundingRadius() : PLAYER_BOUNDING);
+    const float speed = LiveSpeed(creature, envelope && envelope->kind != runguard::Kind::Still);
+    runguard::GuardThreat threat = envelope
+        ? runguard::EnvelopeThreat(*envelope, &at, reach, speed, creature->IsInCombat() || runguard::OffEnvelope(*envelope, at))
+        : runguard::LiveThreat(creature->GetDbGuid(), creature->GetEntry(), at, reach, speed);
+    threat.aggro = aggro;
+    return threat;
 }
 
 int32 GuildPacks::StopOf(const Route& route, uint32 spawn)

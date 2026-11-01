@@ -384,7 +384,6 @@ namespace ai
             creators["run next"] = [](PlayerbotAI* ai) { return new RunNextAction(ai); };
             creators["run wait"] = [](PlayerbotAI* ai) { return new RunWaitAction(ai); };
             creators["run go"] = [](PlayerbotAI* ai) { return new RunGoAction(ai); };
-            creators["run waited"] = [](PlayerbotAI* ai) { return new RunWaitedAction(ai); };
             creators["disable molten core strategy"] = [](PlayerbotAI* ai) { return new MoltenCoreDisableDungeonStrategyAction(ai); };
             creators["enable blackwing lair strategy"] = [](PlayerbotAI* ai) { return new BlackwingLairEnableDungeonStrategyAction(ai); };
             creators["disable blackwing lair strategy"] = [](PlayerbotAI* ai) { return new BlackwingLairDisableDungeonStrategyAction(ai); };

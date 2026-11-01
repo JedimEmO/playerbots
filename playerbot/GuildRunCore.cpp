@@ -786,15 +786,20 @@ void RunCore::CheckRecovery(RunWorld& world, Generations& generations, time_t no
         ready.rejoining = apart.count(obligation.guid) > 0;
         members.push_back(ready);
     }
-    const runrules::Recovery step = runrules::RecoveryStep(obligations, members, int64_t(now));
+    // A blocker's obligation is met by its creature, no longer reaching the stop's places.
+    std::vector<uint32_t> gone;
+    for (const runrules::Obligation& obligation : obligations)
+        if (obligation.why == runrules::Keep::Blocker && world.BlockerGone(obligation.spawn))
+            gone.push_back(obligation.spawn);
+    const runrules::Recovery step = runrules::RecoveryStep(obligations, members, int64_t(now), gone);
     if (step == runrules::Recovery::Going)
         return;
     std::string state;
     for (const runrules::Obligation& obligation : obligations)
     {
-        auto it = std::find_if(members.begin(), members.end(), [&](const runrules::Ready& r) { return r.guid == obligation.guid; });
-        const bool met = it != members.end() && runrules::Met(obligation, *it);
-        state += (state.empty() ? "" : ",") + world.Name(obligation.guid) + ":" + runrules::KeepName(obligation.why)
+        const bool met = runrules::MetNow(obligation, members, gone);
+        state += (state.empty() ? "" : ",") + (obligation.why == runrules::Keep::Blocker
+            ? "blocker:" + std::to_string(obligation.spawn) : world.Name(obligation.guid) + ":" + runrules::KeepName(obligation.why))
             + (met ? ":met" : ":unmet");
     }
     Note("run_recovery", std::string("result=") + (step == runrules::Recovery::Done ? "done" : "over") + " obligations=" + state);

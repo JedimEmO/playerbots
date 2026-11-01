@@ -1079,6 +1079,285 @@ namespace
         }
         CHECK(off == 0);
     }
+    // Item 4b-1, the wait's model (runguard::WaitReaches): on random patrols and followers, live anywhere on or about their
+    // loops, in or out of a fight, walking or running, a path whose every sample the wait passes is passed by GuardPath,
+    // within the horizon and past it; so whenever the guard refuses a path, the wait holds for that creature. A wait that
+    // ends when no blocker reaches the way, the spot and the stands ends only when the guard lets the walk.
+    void TestWaitModelAgrees()
+    {
+        std::mt19937 rng(41);
+        std::uniform_real_distribution<float> pos(-40.0f, 40.0f), height(-10.0f, 10.0f), reachOf(8.0f, 22.0f), unit(0.0f, 1.0f);
+        int clearPaths = 0, reachedPaths = 0, refused = 0, broken = 0, oldMissed = 0;
+        for (int trial = 0; trial < 12000; ++trial)
+        {
+            const Envelope e = RandomEnvelope(rng, 2 + trial % 2, reachOf(rng));
+            Vec live = RandomOnEnvelope(rng, e);
+            // Drawn a little off its loop now and then, up to OFF_ENVELOPE_MARGIN, as a patrol between its points.
+            if (trial % 5 == 0)
+                live = { live.x + unit(rng) * 3.0f, live.y - unit(rng) * 3.0f, live.z };
+            const float liveReach = e.reach * (0.7f + 0.5f * unit(rng));
+            const float speed = trial % 7 == 0 ? 7.0f : 2.5f;
+            const bool drawn = trial % 11 == 0;
+            const GuardThreat threat = EnvelopeThreat(e, &live, liveReach, speed, drawn);
+            // A path of two or three points, up to twice the horizon long.
+            std::vector<Vec> path = { { pos(rng), pos(rng), height(rng) } };
+            const int legs = 1 + trial % 2;
+            for (int k = 0; k < legs; ++k)
+            {
+                const float angle = unit(rng) * 6.2831853f, length = unit(rng) * HORIZON;
+                path.push_back({ path.back().x + length * std::cos(angle), path.back().y + length * std::sin(angle),
+                    path.back().z + height(rng) / 4.0f });
+            }
+            std::vector<Vec> places;
+            for (const PathPoint& sample : Samples(path))
+                places.push_back(sample.at);
+            const bool waits = WaitReaches(threat, places, 7.0f);
+            const GuardResult verdict = GuardPath(path, { threat }, 7.0f, false);
+            if (verdict.verdict != Verdict::Allow)
+                ++refused;
+            if (!waits)
+            {
+                ++clearPaths;
+                if (verdict.verdict != Verdict::Allow)
+                    ++broken;
+            }
+            else
+                ++reachedPaths;
+            // The model the wait had before 4b-1: its live place and reach, no walk and no bound, the pull spot only.
+            const bool oldReached = runrules::Distance(path.back(), live) <= liveReach;
+            if (!oldReached && verdict.verdict != Verdict::Allow)
+                ++oldMissed;
+        }
+        CHECK(broken == 0);
+        // Both answers were exercised, and the guard refused often enough to matter.
+        CHECK(clearPaths > 1000 && reachedPaths > 1000 && refused > 1000);
+        // The old model let the party go to spots the guard then refused.
+        CHECK(oldMissed > 0);
+        printf("wait model: %d clear, %d reached, %d refused by the guard, %d the old model missed\n", clearPaths, reachedPaths,
+            refused, oldMissed);
+    }
+
+    // The foundry's stop 71 in 4a (3600052): a two-point loop 7.1 yards long at z 21, and a walkway spot its loop reaches
+    // from the near end only. Live at the far end, the old model (its live place within its live reach of the spot) said
+    // clear, Go fired, and the guard refused the walk: its walk across over the horizon (9.6 yards at 2.5 a second for a
+    // mover at 7) carries it into reach. The wait's model holds there, from both ends; it clears once the spot is out of
+    // the loop's reach.
+    void TestStop71()
+    {
+        Envelope e;
+        e.spawn = 3600052;
+        e.kind = Kind::Patrol;
+        e.reach = 15.0f;
+        e.where = { { 0.0f, 0.0f, 21.0f }, { 7.1f, 0.0f, 21.0f }, { 0.0f, 0.0f, 21.0f } };
+        CHECK(std::fabs(MaxSpread(2.5f, 7.0f) - 9.64f) < 0.05f);
+        const Vec spot = { 20.0f, 0.0f, 21.0f }, waiting = { 40.0f, 0.0f, 21.0f };
+        const std::vector<Vec> walk = { waiting, spot };
+        for (const Vec& live : { Vec{ 0.0f, 0.0f, 21.0f }, Vec{ 7.1f, 0.0f, 21.0f } })
+        {
+            const GuardThreat threat = EnvelopeThreat(e, &live, 15.0f, 2.5f);
+            CHECK(WaitReaches(threat, WaitPlaces({ waiting }, 0, spot, {}), 7.0f));
+            CHECK(GuardPath(walk, { threat }, 7.0f, false).verdict == Verdict::Refuse);
+        }
+        // At the far end the old model said clear.
+        CHECK(runrules::Distance(spot, Vec{ 0.0f, 0.0f, 21.0f }) > 15.0f);
+        // A spot out of the loop's reach: clear by the wait, and the guard lets the walk.
+        const Vec farSpot = { 30.0f, 0.0f, 21.0f };
+        const GuardThreat nearEnd = EnvelopeThreat(e, &e.where[1], 15.0f, 2.5f);
+        CHECK(!WaitReaches(nearEnd, WaitPlaces({ waiting }, 0, farSpot, {}), 7.0f));
+        CHECK(GuardPath({ waiting, farSpot }, { nearEnd }, 7.0f, false).verdict == Verdict::Allow);
+        // A stand in its reach holds the wait, as the guard would refuse the member's walk to it.
+        CHECK(WaitReaches(nearEnd, WaitPlaces({ waiting }, 0, farSpot, { { 20.0f, 2.0f, 21.0f } }), 7.0f));
+        // Evading or exempt, or with no place: no blocker.
+        GuardThreat exempt = nearEnd;
+        exempt.exempt = true;
+        CHECK(!WaitReaches(exempt, { spot }, 7.0f));
+        CHECK(!WaitReaches(GuardThreat(), { spot }, 7.0f));
+    }
+
+    // The route and the wait agree on a patrol that never leaves (WaitNeverClears): a patrol the route counts as pacing at a
+    // place holds the wait there from every live place on its loop, so the route never plans a wait that cannot end. The
+    // old test, reach alone at every loop point, is the narrower: what it called pacing still is.
+    void TestWaitNeverClears()
+    {
+        // 3600052's loop: the walkway spot 20 yards from its near end, 27.1 from its far end, reach 15. The old test said
+        // a patrol to wait for; the wait's model never clears, so the route counts it as pacing.
+        const std::vector<Vec> loop = { { 0.0f, 0.0f, 21.0f }, { 7.1f, 0.0f, 21.0f }, { 0.0f, 0.0f, 21.0f } };
+        const Vec spot = { 20.0f, 0.0f, 21.0f };
+        CHECK(!std::all_of(loop.begin(), loop.end(), [&](const Vec& p) { return CreatureReaches({ spot }, { p }, 0.0f, 15.0f); }));
+        CHECK(WaitNeverClears(spot, loop, 0.0f, 15.0f, 2.5f, 7.0f));
+        // Out of the loop's reach at all: the bound clears it, whatever the walk.
+        CHECK(!WaitNeverClears({ 30.0f, 0.0f, 21.0f }, loop, 0.0f, 15.0f, 2.5f, 7.0f));
+        // A long loop that leaves: one to wait for.
+        CHECK(!WaitNeverClears(spot, { { 0, 0, 21 }, { -40, 0, 21 }, { 0, 0, 21 } }, 0.0f, 15.0f, 2.5f, 7.0f));
+
+        std::mt19937 rng(73);
+        std::uniform_real_distribution<float> pos(-30.0f, 30.0f), height(-8.0f, 8.0f), reachOf(8.0f, 22.0f), unit(0.0f, 1.0f);
+        int never = 0, narrower = 0, clears = 0;
+        for (int trial = 0; trial < 4000; ++trial)
+        {
+            const Envelope e = RandomEnvelope(rng, 2 + trial % 2, reachOf(rng));
+            const Vec place = { pos(rng), pos(rng), height(rng) };
+            const float walk = trial % 9 == 0 ? 7.0f : 2.5f;
+            const bool old = CreatureReaches({ place }, e.where, e.range, e.reach)
+                && std::all_of(e.where.begin(), e.where.end(),
+                    [&](const Vec& p) { return CreatureReaches({ place }, { p }, e.range, e.reach); });
+            const bool now = WaitNeverClears(place, e.where, e.range, e.reach, walk, 7.0f);
+            CHECK(!old || now);
+            narrower += now && !old;
+            if (!now)
+            {
+                ++clears;
+                continue;
+            }
+            ++never;
+            // A patrol: from every live place on its loop, between its points too, the wait holds.
+            if (e.kind != Kind::Patrol)
+                continue;
+            for (int k = 0; k < 20; ++k)
+            {
+                const Vec live = RandomOnEnvelope(rng, e);
+                CHECK(WaitReaches(EnvelopeThreat(e, &live, e.reach, walk), { place }, 7.0f));
+            }
+        }
+        printf("wait never clears: %d of %d places (%d the old test called patrols to wait for), %d clear\n", never,
+            never + clears, narrower, clears);
+        CHECK(never > 100 && narrower > 20 && clears > 100);
+    }
+
+    // The wait judges each member with its own reach (GuildRunStates::Blockers): a creature reaches farther toward a
+    // member of a lower level, about a yard a level, so a spot clear for the leader can be reached for that member, and the
+    // guard refuses that member's walk. A blocker for any member is the wait's blocker.
+    void TestWaitEachMember()
+    {
+        const float pad = ReachPad(0.5f, 0.4f);
+        const float leaderReach = AggroRadius(15.0f, 24, 24) + pad, memberReach = AggroRadius(15.0f, 24, 20) + pad;
+        CHECK(memberReach - leaderReach == 4.0f);
+        Envelope e;
+        e.spawn = 7;
+        e.kind = Kind::Patrol;
+        e.reach = leaderReach;
+        e.where = { { 0, 0, 0 }, { 4, 0, 0 }, { 0, 0, 0 } };
+        const Vec live = { 0, 0, 0 };
+        // A stand two yards past the leader's reach of the loop, two inside the member's, the spot far off.
+        const float stand = 4.0f + leaderReach + 2.0f;
+        const std::vector<Vec> places = WaitPlaces({}, 0, { 60, 0, 0 }, { { stand, 0, 0 } });
+        const GuardThreat forLeader = EnvelopeThreat(e, &live, leaderReach, 2.5f);
+        const GuardThreat forMember = EnvelopeThreat(e, &live, memberReach, 2.5f);
+        CHECK(!WaitReaches(forLeader, places, 7.0f));
+        CHECK(WaitReaches(forMember, places, 7.0f));
+        // The walk to the stand, inside the horizon: the guard lets the leader's and refuses the member's.
+        const std::vector<Vec> walk = { { stand + 10.0f, 0, 0 }, { stand, 0, 0 } };
+        CHECK(GuardPath(walk, { forLeader }, 7.0f, false).verdict == Verdict::Allow);
+        CHECK(GuardPath(walk, { forMember }, 7.0f, false).verdict != Verdict::Allow);
+    }
+
+    // Off-way spots: for the cast alone only when the pack does not reach the way's point nearest it.
+    void TestOffWayWanted()
+    {
+        CHECK(OffWayWanted(33.0f, 32.0f, false, true, true));     // the way passes far from the pack
+        CHECK(OffWayWanted(25.0f, 32.0f, true, true, true));      // every spot on it is reached
+        CHECK(OffWayWanted(25.0f, 32.0f, false, false, false));   // none castable, and the way out of the pack's reach
+        CHECK(!OffWayWanted(25.0f, 32.0f, false, false, true));   // none castable, but the way passes within its reach
+        CHECK(!OffWayWanted(25.0f, 32.0f, false, true, false));   // a castable, clear spot on the way
+    }
+
+    // The places the wait judges: the leg from its point `from` on, sampled as GuardPath samples, the spot, the stands.
+    void TestWaitPlaces()
+    {
+        const std::vector<Vec> leg = { { 0, 0, 0 }, { 10, 0, 0 }, { 20, 0, 0 } };
+        const Vec spot = { 30, 0, 0 };
+        const std::vector<Vec> all = WaitPlaces(leg, 0, spot, { { 33, 3, 0 } });
+        // 30 yards at SAMPLE, the start included, and the stand.
+        CHECK(all.size() == size_t(30.0f / SAMPLE) + 1 + 1);
+        CHECK(runrules::Distance(all.front(), leg.front()) < 0.01f && runrules::Distance(all[all.size() - 2], spot) < 0.01f);
+        CHECK(runrules::Distance(all.back(), Vec{ 33, 3, 0 }) < 0.01f);
+        // From the second point: the first ten yards are behind.
+        const std::vector<Vec> ahead = WaitPlaces(leg, 1, spot, {});
+        CHECK(ahead.size() == size_t(20.0f / SAMPLE) + 1 && runrules::Distance(ahead.front(), leg[1]) < 0.01f);
+        // Past the leg: the spot alone.
+        const std::vector<Vec> none = WaitPlaces(leg, leg.size(), spot, {});
+        CHECK(none.size() == 1 && runrules::Distance(none.front(), spot) < 0.01f);
+        // A blocker on the leg behind the mover holds nothing once the mover is past it.
+        const GuardThreat behind = Moving(9, { 2, 6, 0 }, 8.0f, 2.5f);
+        CHECK(WaitReaches(behind, WaitPlaces(leg, 0, spot, {}), 7.0f));
+        CHECK(!WaitReaches(behind, WaitPlaces(leg, 2, spot, {}), 7.0f));
+    }
+
+    // Pull spots: the cast window, the off-way spot placed across, and the choice, which prefers a castable spot and
+    // keeps every stop.
+    void TestPullSpots()
+    {
+        CHECK(CastFits(28.0f, 0.0f) && !CastFits(28.1f, 0.0f) && CastFits(26.0f, 2.0f) && !CastFits(27.0f, 2.0f));
+        CHECK(OnWayTry(20.0f) && OnWayTry(30.0f) && !OnWayTry(19.9f) && !OnWayTry(30.1f));
+        // Level with the creature: PULL_BEST across, as before. Twenty yards below a walkway: across so 3D fits.
+        CHECK(std::fabs(OffWayAcross(0.0f, 0.0f) - PULL_BEST) < 0.01f);
+        const float across = OffWayAcross(20.0f, 0.0f);
+        CHECK(std::fabs(across - std::sqrt(27.0f * 27.0f - 400.0f)) < 0.01f);
+        CHECK(CastFits(std::sqrt(across * across + 400.0f), 0.0f));
+        // Too far below, or with a wide wander: none fits.
+        CHECK(OffWayAcross(27.5f, 0.0f) == 0.0f && OffWayAcross(20.0f, 6.5f) == 0.0f);
+        std::mt19937 rng(5);
+        std::uniform_real_distribution<float> dzOf(-30.0f, 30.0f), rangeOf(0.0f, 8.0f);
+        int fits = 0;
+        for (int trial = 0; trial < 2000; ++trial)
+        {
+            const float dz = dzOf(rng), range = rangeOf(rng);
+            const float a = OffWayAcross(dz, range);
+            if (a <= 0.0f)
+                continue;
+            ++fits;
+            CHECK(a >= PULL_ACROSS_LEAST && a <= PULL_BEST && CastFits(std::sqrt(a * a + dz * dz), range));
+        }
+        CHECK(fits > 500);
+
+        // The choice: walking there pulling nothing first, then castable, then the patrols to wait for.
+        SpotRank reach, cast;
+        reach.distance = 25.0f;
+        cast.castable = true;
+        cast.distance = 27.0f;
+        CHECK(BetterSpot(cast, reach) && !BetterSpot(reach, cast));
+        SpotRank castPatrol = cast;
+        castPatrol.patrol = 1;
+        CHECK(BetterSpot(castPatrol, reach));
+        SpotRank castStrict = cast;
+        castStrict.strict = 1;
+        CHECK(BetterSpot(reach, castStrict));
+        CHECK(BestSpot({ reach, castStrict, castPatrol, cast }) == 3);
+        CHECK(BestSpot({}) == -1);
+        // A stop whose spots are none castable keeps its best one: never dropped for it.
+        std::uniform_int_distribution<int> count(0, 3), size(1, 8);
+        std::uniform_real_distribution<float> distanceOf(20.0f, 30.0f), unit(0.0f, 1.0f);
+        int stops = 0, chosen = 0, castChosen = 0, castAvailable = 0;
+        for (int trial = 0; trial < 3000; ++trial)
+        {
+            std::vector<SpotRank> spots(size_t(size(rng)));
+            for (SpotRank& spot : spots)
+            {
+                spot.strict = size_t(count(rng)) / 2;
+                spot.patrol = size_t(count(rng));
+                spot.extras = size_t(count(rng));
+                spot.distance = distanceOf(rng);
+                spot.castable = trial % 3 != 0 && unit(rng) < 0.4f;
+            }
+            ++stops;
+            const int best = BestSpot(spots);
+            chosen += best >= 0;
+            // When a castable spot is as clear of strict reachers as any, a castable one is chosen.
+            size_t least = spots[0].strict;
+            for (const SpotRank& spot : spots)
+                least = std::min(least, spot.strict);
+            const bool castClear = std::any_of(spots.begin(), spots.end(),
+                [&](const SpotRank& spot) { return spot.castable && spot.strict == least; });
+            if (castClear)
+            {
+                ++castAvailable;
+                castChosen += best >= 0 && spots[best].castable;
+            }
+            CHECK(best >= 0 && spots[best].strict == least);
+        }
+        CHECK(chosen == stops && castChosen == castAvailable && castAvailable > 500);
+    }
+
 }
 
 int main()
@@ -1101,6 +1380,13 @@ int main()
     TestServerTruth();
     TestMargin();
     TestChaseEnd();
+    TestWaitModelAgrees();
+    TestStop71();
+    TestWaitPlaces();
+    TestPullSpots();
+    TestWaitNeverClears();
+    TestWaitEachMember();
+    TestOffWayWanted();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

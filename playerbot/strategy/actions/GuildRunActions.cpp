@@ -252,15 +252,24 @@ bool RunPullAction::Execute(Event& event)
     // with the stamp unchanged.
     if (!sGuildRunStates.PullAllowed(bot))
         return false;
+    // From the spot, with no chase, when the creature is within the pull's range and in sight of where the leader stands,
+    // as the route plans its spots (runguard::PULL_CAST): the pull spell is cast at once. Otherwise the pull strategy's own
+    // pull, whose reach move the movement guard judges.
+    const bool fromSpot = fromRange && inSight && distance <= range;
     // The pull phase first, and the leader's own copy of the run read afresh, before anything can move it: the pull's
     // move, or a melee fallback's chase, launches then under the plan's exemption for the stop's pack, which the movement
     // guard reads from that copy. A write refused for a stale stamp pulls nothing.
-    sGuildRunStates.Pulled(bot, stamp, target->GetObjectGuid());
+    sGuildRunStates.Pulled(bot, stamp, target->GetObjectGuid(), "from=" + std::string(fromSpot ? "spot" : "reach")
+        + " distance=" + std::to_string(uint32(distance)) + " range=" + std::to_string(uint32(range)));
     Refresh(context);
     const GuildRunView pulling = sGuildRunStates.View(bot);
     if (!pulling.valid || pulling.pull != GuildRunPull::Pull || pulling.pulled != target->GetObjectGuid())
         return false;
     bool started = ai->DoSpecificAction("pull my target", Event("attack anything", target->GetObjectGuid()), true);
+    // The pull asked for, its spell cast now from where the leader stands: "pull action" run directly takes no reach move.
+    // When it casts nothing, as with a seal still to put on, the pull strategy's own steps follow as before.
+    if (started && fromSpot)
+        ai->DoSpecificAction("pull action", Event("attack anything", target->GetObjectGuid()), true);
     if (!started && !fromBefore)
         started = Attack(nullptr, target);
     if (!started)
@@ -271,7 +280,8 @@ bool RunPullAction::Execute(Event& event)
         return false;
     }
 
-    sGuildRuns.NotePull(bot, target);
+    // The run's own pull, for the fight table: began=pull, apart from the dungeon job's (job_pull).
+    sGuildRuns.NotePull(bot, target, "pull");
     Refresh(context);
     return true;
 }
@@ -303,8 +313,14 @@ bool RunWaitAction::Execute(Event& event)
     if (!Settled(bot))
         return false;
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    // The blockers by name and spawn, as the guard's model finds them now for each member.
+    const std::vector<uint32> blockers = GuildRunStates::Blockers(bot, view);
+    std::string spawns;
+    for (uint32 spawn : blockers)
+        spawns += (spawns.empty() ? "" : ",") + std::to_string(spawn);
     sGuildRunStates.Wait(bot, StampOf(event), "stop " + std::to_string(view.index + 1) + ", at the stop before until "
-        + GuildRunStates::Names(view.stop.outsideReach) + " leaves its pull spot's reach");
+        + GuildRunStates::Names(blockers) + " no longer reach the way to its pull spot, the spot or its stands blockers="
+        + (spawns.empty() ? std::string("none") : spawns));
     Refresh(context);
     return true;
 }
@@ -314,18 +330,6 @@ bool RunGoAction::Execute(Event& event)
     if (!Settled(bot))
         return false;
     sGuildRunStates.Go(bot, StampOf(event));
-    Refresh(context);
-    return true;
-}
-
-bool RunWaitedAction::Execute(Event& event)
-{
-    if (!Settled(bot))
-        return false;
-    GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    sGuildRunStates.WaitedOut(bot, StampOf(event), "stop " + std::to_string(view.index + 1) + ", waited "
-        + std::to_string(uint32(GuildRunStates::WAIT_SECONDS)) + " s at the stop before; pulling with "
-        + GuildRunStates::Names(view.stop.outsideReach) + " still about");
     Refresh(context);
     return true;
 }

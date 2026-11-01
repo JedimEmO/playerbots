@@ -186,6 +186,53 @@ namespace runguard
         return speed * ((moverSpeed > 0.0f ? HORIZON / moverSpeed : 0.0f) + RENEW_SECONDS);
     }
 
+    // The widest a threat may be across anywhere the guard counts it: its spread, and for one that moves its walk until
+    // the mover is past the horizon (MaxSpread). SpreadAt is never more than this inside the horizon.
+    inline float WidestSpread(const GuardThreat& threat, float moverSpeed)
+    {
+        return threat.speed > 0.0f ? threat.spread + MaxSpread(threat.speed, moverSpeed) : threat.spread;
+    }
+
+    // The wait's model of a creature that walks about (docs/run-contract.md, "Waiting for a patrol"): whether it reaches
+    // any of the places the party is to walk and stand at, judged as the guard judges a path, by its live place, live reach
+    // and the bound of its loop (EnvelopeThreat), at its widest walk inside the horizon. A threat that reaches none of a
+    // path's samples this way is passed by GuardPath on that path; so a wait that ends when no mover reaches the walk,
+    // the spot and the stands ends only when the guard would let the party walk there.
+    inline bool WaitReaches(const GuardThreat& threat, const std::vector<Vec>& places, float moverSpeed)
+    {
+        if (threat.exempt || threat.where.empty())
+            return false;
+        const float spread = WidestSpread(threat, moverSpeed);
+        for (const Vec& place : places)
+        {
+            // Farther from its one live place than its reach and walk: not reached, its loop's bound unasked. The walk
+            // spreads across only, so the place's distance to it is never under the 3D distance less the walk.
+            if (threat.where.size() == 1 && runrules::Distance(place, threat.where[0]) - spread > threat.reach)
+                continue;
+            if (Reaches(threat, place, spread))
+                return true;
+        }
+        return false;
+    }
+
+    // Whether the wait for a creature that walks a loop would never end at a place (docs/engine.md, "Pull spots"): the
+    // loop reaches the place at all (the bound WaitReaches keeps), and from every point of it the creature reaches the
+    // place with its spread and its walk inside the horizon at `moverSpeed` across (WidestSpread). A point between two
+    // of the loop's is never farther from the place than both, so its points suffice. The route counts such a one as
+    // pacing, as one standing still: it avoids the place, pulls from the stop before, or clears that pack first, and never
+    // plans a wait for it.
+    inline bool WaitNeverClears(const Vec& place, const std::vector<Vec>& loop, float spread, float reach, float walk,
+        float moverSpeed)
+    {
+        if (loop.empty() || !CreatureReaches({ place }, loop, spread, reach))
+            return false;
+        const float wide = spread + MaxSpread(walk, moverSpeed);
+        for (const Vec& point : loop)
+            if (!CreatureReaches({ place }, { point }, wide, reach))
+                return false;
+        return true;
+    }
+
     // Whether a launch moves at all: STILL_MOVE across or more. A facing or a fall is no move, and accepts nothing.
     inline bool Moves(const std::vector<Vec>& path)
     {
@@ -266,6 +313,25 @@ namespace runguard
             done += length;
         }
         return clipped;
+    }
+
+    // The places the wait judges (WaitReaches): the way still to walk to the pull spot, from its point `from` on, every
+    // SAMPLE yards as GuardPath samples a path; the spot; and the members' stand points there. With no way, the spot and
+    // the stands alone.
+    inline std::vector<Vec> WaitPlaces(const std::vector<Vec>& leg, size_t from, const Vec& spot, const std::vector<Vec>& stands)
+    {
+        std::vector<Vec> places;
+        if (from < leg.size())
+        {
+            std::vector<Vec> ahead(leg.begin() + from, leg.end());
+            ahead.push_back(spot);
+            for (const PathPoint& sample : Samples(ahead))
+                places.push_back(sample.at);
+        }
+        else
+            places.push_back(spot);
+        places.insert(places.end(), stands.begin(), stands.end());
+        return places;
     }
 
     enum class Verdict : uint8_t { Allow, Clip, Refuse };
@@ -1060,6 +1126,89 @@ namespace runguard
         if (facts.newCreature)
             return Stale::NewCreature;
         return Stale::None;
+    }
+
+    // Pull spots (docs/engine.md, "Pull spots"). The route plans a spot this far from the nearest of its pack, in 3D, the
+    // best in the middle; and prefers one from which the pull is cast where the leader stands: the pulled creature within
+    // PULL_CAST yards in 3D, its wander range included, and in sight from eye height. The leader's pull spell reaches
+    // about 30 yards; PULL_CAST keeps it a little short of that, so a creature on the edge of its range is still in reach.
+    constexpr float PULL_NEAR = 20.0f, PULL_FAR = 30.0f, PULL_BEST = 25.0f;
+    constexpr float PULL_CAST = 28.0f;
+    constexpr float PULL_ACROSS_LEAST = 5.0f;    // an off-way spot nearer than this across is no pull spot
+
+    // Whether a pull is cast from a spot this far from the pulled creature, in 3D, with that creature's wander range.
+    inline bool CastFits(float distance, float range)
+    {
+        return distance + range <= PULL_CAST;
+    }
+
+    // Whether a point of the way this far from the pulled creature is tried as a pull spot: from PULL_NEAR to PULL_FAR,
+    // as before, of which those from PULL_NEAR to PULL_CAST less the creature's range are castable.
+    inline bool OnWayTry(float distance)
+    {
+        return distance >= PULL_NEAR && distance <= PULL_FAR;
+    }
+
+    // How far across from the pulled creature an off-way spot is placed so that its 3D distance fits PULL_CAST, with a
+    // yard to spare, at `dz` yards above or below it: at most PULL_BEST. 0 when none fits, or nearer than
+    // PULL_ACROSS_LEAST, and the spot is placed PULL_BEST across as before.
+    inline float OffWayAcross(float dz, float range)
+    {
+        const float most = PULL_CAST - range - 1.0f;
+        if (most <= std::fabs(dz))
+            return 0.0f;
+        const float across = std::min(PULL_BEST, std::sqrt(most * most - dz * dz));
+        return across < PULL_ACROSS_LEAST ? 0.0f : across;
+    }
+
+    // A pull spot as the route weighs it: the creatures standing still or pacing that walking there pulls (strict), whether
+    // the pull is cast from it (castable), the patrols to wait for, what the pull brings beyond the pack, the second the
+    // first late arrival could come, and the distance to the pulled creature.
+    struct SpotRank
+    {
+        size_t strict = 0;
+        bool castable = false;
+        size_t patrol = 0;
+        size_t extras = 0;
+        uint32_t lateFirst = std::numeric_limits<uint32_t>::max();
+        float distance = 0.0f;
+    };
+
+    // Whether `a` is the better spot: fewer that walking there pulls, then castable, then fewer patrols to wait for, fewer
+    // extras, the later first arrival, and the distance nearer PULL_BEST. A spot that is not castable still ranks, so a
+    // pack with no castable spot keeps its best one and is never dropped for it.
+    inline bool BetterSpot(const SpotRank& a, const SpotRank& b)
+    {
+        if (a.strict != b.strict)
+            return a.strict < b.strict;
+        if (a.castable != b.castable)
+            return a.castable;
+        if (a.patrol != b.patrol)
+            return a.patrol < b.patrol;
+        if (a.extras != b.extras)
+            return a.extras < b.extras;
+        if (a.lateFirst != b.lateFirst)
+            return a.lateFirst > b.lateFirst;
+        return std::fabs(a.distance - PULL_BEST) < std::fabs(b.distance - PULL_BEST);
+    }
+
+    // Whether the route tries spots off the way for a pack, beside its best on the way: that one is farther than `far`
+    // from the pack, or walking there pulls a creature (reached), or the pull is not cast from it. For the cast alone,
+    // only when the pack does not reach the way's point nearest it: an off-way spot is placed across from the pack toward
+    // that point, and lies beyond a way that passes nearer, so the walk to it would pull the pack on the approach.
+    inline bool OffWayWanted(float bestDistance, float far, bool reached, bool castable, bool packReachesWay)
+    {
+        return bestDistance > far || reached || (!castable && !packReachesWay);
+    }
+
+    // The best of the spots tried, -1 only with none tried.
+    inline int BestSpot(const std::vector<SpotRank>& spots)
+    {
+        int best = -1;
+        for (size_t i = 0; i < spots.size(); ++i)
+            if (best < 0 || BetterSpot(spots[i], spots[best]))
+                best = int(i);
+        return best;
     }
 
     enum class WaitAt : uint8_t { None, Arrival, Way };

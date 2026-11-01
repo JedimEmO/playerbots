@@ -781,7 +781,10 @@ namespace runrules
     // A person's member also keeps it back while eating or drinking, and, as a healer, out of sight of the tank.
     // Guarded is far, for a member the movement guard refused lately by a creature that moves (runguard::GuardedNow), for
     // as long as its allowance lasts (runplayer::GuardedClock): waited for, never blocked on.
-    enum class Keep : uint8_t { Dead, Away, Fight, Far, Health, Mana, Supplies, Eating, Sight, Guarded };
+    // Blocker is the leader's, while it waits at the stop before for a creature that walks about and still reaches the
+    // way to the pull spot, the spot or its stands (runguard::WaitReaches): waited for while the budget lasts, then
+    // blocked on, and its recovery met only when that creature no longer reaches them (BlockerGone).
+    enum class Keep : uint8_t { Dead, Away, Fight, Far, Health, Mana, Supplies, Eating, Sight, Guarded, Blocker };
 
     inline const char* KeepName(Keep keep)
     {
@@ -796,6 +799,7 @@ namespace runrules
             case Keep::Eating: return "eating";
             case Keep::Sight: return "sight";
             case Keep::Guarded: return "guarded";
+            case Keep::Blocker: return "blocker";
             default: return "supplies";
         }
     }
@@ -855,7 +859,29 @@ namespace runrules
         uint32_t guid = 0;
         Keep why = Keep::Dead;
         bool person = false;       // a person's reason: waited for, never blocked on
+        uint32_t spawn = 0;        // for a blocker: the creature, by spawn
     };
+
+    // The leader's blocker reasons while it waits at the stop before: one for each creature that still reaches (Keep::Blocker).
+    inline std::vector<Kept> BlockerKeepers(uint32_t leader, const std::vector<uint32_t>& reaching)
+    {
+        std::vector<Kept> kept;
+        for (uint32_t spawn : reaching)
+            kept.push_back({ leader, Keep::Blocker, false, spawn });
+        return kept;
+    }
+
+    // Where a wait at the stop before goes (docs/run-contract.md, "Waiting for a patrol"): on to the pull spot once no
+    // blocker reaches, to a block when the readiness budget's block is due, else it waits. Never on for time alone: a
+    // wait has no timer of its own, and nothing pulls because time ran out.
+    enum class WaitStep : uint8_t { Wait, Go, Block };
+
+    inline WaitStep WaitNext(bool blockersClear, bool blockDue)
+    {
+        if (blockersClear)
+            return WaitStep::Go;
+        return blockDue ? WaitStep::Block : WaitStep::Wait;
+    }
 
     // Each member that keeps the pull back, with each of its reasons, in the members' order. One not there is only dead or
     // away. One short of health with no food, or of mana with no drink, is supplies in place of that shortfall, since
@@ -900,8 +926,9 @@ namespace runrules
         return std::any_of(kept.begin(), kept.end(), [](const Kept& k) { return k.why == Keep::Supplies; });
     }
 
-    // The waiting budget: one per stop and generation, from the first time the leader gathers at the stop's spot under
-    // that generation. A change of reasons, a pull that brought nothing, or a wait at the stop before keeps it.
+    // The waiting budget: one per stop and generation, from the first time under that generation the leader gathers at the
+    // stop's spot, begins to wait at the stop before, or is refused on its way. A change of reasons, a pull that brought
+    // nothing, or a wait at the stop before keeps it.
     constexpr int64_t READY_BUDGET = 300;
 
     struct Budget
@@ -960,6 +987,7 @@ namespace runrules
         uint32_t guid = 0;
         Keep why = Keep::Dead;
         int64_t deadline = 0;
+        uint32_t spawn = 0;        // for a blocker: the creature
     };
 
     inline std::vector<Obligation> Obligations(const std::vector<Kept>& block, int64_t now)
@@ -972,16 +1000,19 @@ namespace runrules
                 continue;
             const int64_t seconds = k.why == Keep::Supplies ? RECOVERY_SUPPLY_SECONDS
                 : k.why == Keep::Dead || k.why == Keep::Away ? RECOVERY_DEAD_SECONDS : RECOVERY_SECONDS;
-            obligations.push_back({ k.guid, k.why, now + seconds });
+            obligations.push_back({ k.guid, k.why, now + seconds, k.spawn });
         }
         return obligations;
     }
 
     // Whether an obligation is met by the member as it is now. A member not there, or still rejoining, meets none but
     // its own return, so a member gone off the map keeps its health or supplies unresolved. Supplies are met only with
-    // the member back with the party and carrying what it lacked.
+    // the member back with the party and carrying what it lacked. A blocker's is never met by the member: only by the
+    // creature no longer reaching (RecoveryStep's `gone`).
     inline bool Met(const Obligation& obligation, const Ready& member)
     {
+        if (obligation.why == Keep::Blocker)
+            return false;
         const Facts& f = member.facts;
         const bool back = f.online && f.inWorld && !f.teleporting && f.inInstance && f.alive && !member.rejoining;
         if (!back)
@@ -1026,13 +1057,23 @@ namespace runrules
     // A member the tick cannot see is passed as not there.
     enum class Recovery : uint8_t { Going, Done, Over };
 
-    inline Recovery RecoveryStep(const std::vector<Obligation>& obligations, const std::vector<Ready>& members, int64_t now)
+    // Whether an obligation is met now: a blocker's when its creature is among `gone`, no longer reaching the stop's places;
+    // any other by its member (Met).
+    inline bool MetNow(const Obligation& obligation, const std::vector<Ready>& members, const std::vector<uint32_t>& gone)
+    {
+        if (obligation.why == Keep::Blocker)
+            return std::find(gone.begin(), gone.end(), obligation.spawn) != gone.end();
+        auto it = std::find_if(members.begin(), members.end(), [&](const Ready& r) { return r.guid == obligation.guid; });
+        return it != members.end() && Met(obligation, *it);
+    }
+
+    inline Recovery RecoveryStep(const std::vector<Obligation>& obligations, const std::vector<Ready>& members, int64_t now,
+        const std::vector<uint32_t>& gone = {})
     {
         bool all = true;
         for (const Obligation& obligation : obligations)
         {
-            auto it = std::find_if(members.begin(), members.end(), [&](const Ready& r) { return r.guid == obligation.guid; });
-            if (it != members.end() && Met(obligation, *it))
+            if (MetNow(obligation, members, gone))
                 continue;
             if (now >= obligation.deadline)
                 return Recovery::Over;
@@ -1091,7 +1132,8 @@ namespace runrules
     {
         std::string text;
         for (const Kept& k : kept)
-            text += (text.empty() ? "" : ",") + nameOf(k.guid) + ":" + KeepName(k.why);
+            text += (text.empty() ? "" : ",") + (k.why == Keep::Blocker ? std::string("blocker:") + std::to_string(k.spawn)
+                : nameOf(k.guid) + ":" + KeepName(k.why));
         return text;
     }
 

@@ -197,14 +197,10 @@ std::vector<runguard::GuardThreat> GuildMoveGuard::Threats(Player* bot, const Gu
             // Drawn off its envelope: the live scan has it where it is.
             if (runguard::OffEnvelope(envelope, at))
                 continue;
-            // The server's aggro radius toward the bot, with ReachPad: the one rule (runguard::PlaceDistance).
-            const float aggro = creature->GetAttackDistance(bot);
-            const float reach = aggro + runguard::ReachPad(creature->GetObjectBoundingRadius(), bot->GetObjectBoundingRadius());
-            // A wanderer moves even while it pauses; anything with a spline moves now.
-            const float speed = GuildPacks::LiveSpeed(creature, envelope.kind == runguard::Kind::Wanderer);
-            // Out of a fight and on its envelope, it does not leave it: what it reaches is bound by its shared reach.
-            threat = runguard::EnvelopeThreat(envelope, &at, reach, speed, creature->IsInCombat());
-            threat.aggro = aggro;
+            // The server's aggro radius toward the bot, with ReachPad: the one rule (runguard::PlaceDistance). A wanderer
+            // moves even while it pauses; anything with a spline moves now. Out of a fight and on its envelope, it does
+            // not leave it: what it reaches is bound by its shared reach. The one model the wait shares (GuardThreatOf).
+            threat = GuildPacks::GuardThreatOf(route, creature, bot);
             threat.exempt = inFight(creature) || pulling.count(envelope.spawn);
         }
         if (!threat.where.empty())

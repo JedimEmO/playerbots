@@ -25,7 +25,8 @@ class WorldPacket;
 //   guildbot_run_member  per run and member: levels, experience, coin, deaths, seconds inside
 //   guildbot_run_boss    per run and boss: when it died, minutes since the run entered or the boss before
 //   guildbot_loot        per item looted in a run: who, how (need, greed, master, looted), its source and its fate
-//   guildbot_fight       per fight in a run: how it began, what the party met, deaths, the healer's mana at the start
+//   guildbot_fight       per fight in a run: how it began (pull, job_pull, walked_in, attacked, member), what the party
+//                        met, deaths, the healer's mana at the start
 //   guildbot_fight_member per fight and member: its role, deaths, seconds attacked and attacked off the tank, mana, health
 class GuildRuns
 {
@@ -48,8 +49,9 @@ public:
     // About once a second, on the world thread: the fight log of each open run's party,
     // and an off_mesh_move event for each of its moves from off the navmesh, or straight with an end off it.
     void SampleFights();
-    // The dungeon job's pull step pulled this creature for the leader's party; the next fight began with it.
-    void NotePull(Player* leader, Creature* creature);
+    // A pull of this creature for the leader's party: the next fight began with it, and `began` says by whose pull, the
+    // run controller's (pull) or the dungeon job's own (job_pull), so the fight table tells a run's pull from the others.
+    void NotePull(Player* leader, Creature* creature, const char* began);
 
     std::list<std::string> HandleRuns(const std::string& args);
 
@@ -181,7 +183,7 @@ private:
     std::map<std::string, uint32> recentPushes;       // receiver, entry, slot: when, to count a broadcast once
     // Pulls the dungeon job made, by leader guid: the creature, its entry and when. Its own lock: the job notes them
     // under its own.
-    struct NotedPull { uint32 entry = 0; ObjectGuid guid; time_t at = 0; };
+    struct NotedPull { uint32 entry = 0; ObjectGuid guid; time_t at = 0; std::string began; };
     std::mutex pullLock;
     std::map<uint32, NotedPull> pulls;
     // For each guild character in a run's party: the last move looked at, and when it last made an off_mesh_move.

@@ -80,6 +80,9 @@ namespace runcore
         // A member as readiness sees it (runrules::Ready), for a recovery's obligations: its distance is to the leader.
         // False when it cannot be seen, as one offline; its facts are FactsOf's either way.
         virtual bool ReadyOf(uint32_t guid, uint32_t leader, runrules::Ready& ready) = 0;
+        // Whether a blocker a block named (runrules::Keep::Blocker) no longer reaches the current stop's way, spot or stands
+        // by the wait's model (runguard::WaitReaches), or is dead or gone; its recovery obligation is met then.
+        virtual bool BlockerGone(uint32_t spawn) = 0;
     };
 
     // A member apart from its party: dead, outside, offline or a player's (missing), back but not yet with the party, new in

@@ -30,12 +30,8 @@ void RunLeadStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
         "run cleared",
         NextAction::array(0, new NextAction("run next", ACTION_MOVE + 8), NULL)));
 
-    // Then the wait at the stop before while another pack's creature reaches the pull spot: its end after
-    // GuildRunStates::WAIT_SECONDS, when the party goes on anyway, its start, and the creature gone.
-    triggers.push_back(new TriggerNode(
-        "run wait over",
-        NextAction::array(0, new NextAction("run waited", ACTION_MOVE + 7), NULL)));
-
+    // Then the wait at the stop before while another pack's creature reaches the way to the pull spot, the spot or its
+    // stands: its start, and the creature gone. It has no timer: one that never clears blocks through "run block".
     triggers.push_back(new TriggerNode(
         "run reached",
         NextAction::array(0, new NextAction("run wait", ACTION_MOVE + 6), NULL)));

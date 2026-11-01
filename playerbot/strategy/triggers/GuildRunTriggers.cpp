@@ -147,9 +147,9 @@ bool RunApproachTrigger::IsActive()
     // In the foundry the leaders stood 11 to 23 yards off for the rest of the run.
     if (view.pull == GuildRunPull::Gather)
         return DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) > RUN_AT_SPOT * 2;
-    // Not to a pull spot another pack's creature reaches: "run reached" has the party wait at the stop before,
-    // unless it has waited as long as it may.
-    if (view.pull == GuildRunPull::Approach && !view.waited && GuildRunStates::Reached(bot->GetMap(), bot, view.stop))
+    // Not on toward a pull spot while another pack's creature reaches the way there, the spot or its stands, by the
+    // guard's model of it (GuildRunStates::Reached): "run reached" has the party wait at the stop before.
+    if (view.pull == GuildRunPull::Approach && GuildRunStates::Reached(bot, view))
         return false;
     if (DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) <= RUN_AT_SPOT)
         return false;
@@ -163,7 +163,7 @@ bool RunGatherTrigger::IsActive()
     if (!Leads(view) || view.index >= view.stops || view.pull != GuildRunPull::Approach || !InWorld(bot))
         return false;
     return DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) <= RUN_AT_SPOT
-        && (view.waited || !GuildRunStates::Reached(bot->GetMap(), bot, view.stop));
+        && !GuildRunStates::Reached(bot, view);
 }
 
 bool RunPullReadyTrigger::IsActive()
@@ -179,9 +179,9 @@ bool RunPullReadyTrigger::IsActive()
     if (!sGuildRunStates.PullAllowed(bot))
         return false;
     const WorldPosition& spot = GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot);
-    // Not with another pack's creature in reach of the pull spot, as a patrol that came by while the party gathered,
-    // unless the party has waited for it as long as it may.
-    return DistanceTo(bot, spot) <= RUN_AT_SPOT * 2 && (view.waited || !GuildRunStates::Reached(bot->GetMap(), bot, view.stop));
+    // Not with another pack's creature in reach of the pull spot or its stands, as a patrol that came by while the party
+    // gathered: the party waits for it, and a wait that never clears blocks. No timer pulls.
+    return DistanceTo(bot, spot) <= RUN_AT_SPOT * 2 && !GuildRunStates::Reached(bot, view);
 }
 
 bool RunKeepersTrigger::IsActive()
@@ -284,26 +284,20 @@ bool RunLeashTrigger::IsActive()
 bool RunReachedTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    // On the way, or gathered at the spot when a patrol or wanderer comes by: the wait, and its cap, apply to both.
+    // On the way, or gathered at the spot when a patrol comes by: the party waits at the stop before.
     if (!Leads(view) || view.index >= view.stops
         || (view.pull != GuildRunPull::Approach && view.pull != GuildRunPull::Gather)
-        || view.waited || !view.stop.hasBefore || view.stop.outsideReach.empty() || !InWorld(bot))
+        || !view.stop.hasBefore || view.stop.outsideReach.empty() || !InWorld(bot))
         return false;
-    return GuildRunStates::Reached(bot->GetMap(), bot, view.stop);
+    return GuildRunStates::Reached(bot, view);
 }
 
 bool RunClearTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!Leads(view) || view.pull != GuildRunPull::Wait || !InWorld(bot))
+    if (!Leads(view) || view.index >= view.stops || view.pull != GuildRunPull::Wait || !InWorld(bot))
         return false;
-    return !GuildRunStates::Reached(bot->GetMap(), bot, view.stop);
-}
-
-bool RunWaitOverTrigger::IsActive()
-{
-    GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    if (!Leads(view) || view.pull != GuildRunPull::Wait)
-        return false;
-    return time(nullptr) - view.waitSince >= GuildRunStates::WAIT_SECONDS;
+    // Go only when the guard's model has no blocker on the whole way to the spot, the spot or its stands
+    // (runguard::WaitReaches), so the guard lets the walk there. The block, when it comes, is "run block"'s.
+    return runrules::WaitNext(!GuildRunStates::Reached(bot, view), false) == runrules::WaitStep::Go;
 }

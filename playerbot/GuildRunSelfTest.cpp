@@ -666,6 +666,82 @@ std::list<std::string> GuildRunSelfTest(const std::string& args)
                     + std::to_string(stop.stand.size()) + (by.empty() ? std::string() : " paced_by=" + by));
             }
         }
+        // G11. The wait's model agrees with the guard (docs/run-contract.md, "Waiting for a patrol"): on a character in lead
+        //      at a stop with a stop before and creatures to wait for, no creature the wait passes (not a blocker,
+        //      GuildRunStates::Blockers) is the one the guard refuses on any part, of at most its horizon, of the way from the
+        //      waiting spot to the pull spot. A blocker the guard passes is the wait being careful, and is only listed.
+        //      Reads only: the guard is asked, nothing moves.
+        {
+            GuildRunView view;
+            const bool guarded = sGuildMoveGuard.Guarded(bot, view) && view.mode == GuildRunMode::Lead;
+            if (!guarded || view.index >= view.stops || !view.stop.hasBefore || view.stop.outsideReach.empty()
+                || view.stop.leg.empty())
+                out.push_back("skip wait_model  " + name + " is not at a stop with a stop before and creatures to wait for, in lead");
+            else if (view.stop.stillReach && !view.ownSpot)
+                out.push_back("skip wait_model  " + name + "'s stop is pulled from the stop before, with no way to walk");
+            else
+            {
+                // For this character alone, as the guard is asked for it alone below.
+                const std::vector<uint32> blockers = GuildRunStates::Blockers(bot->GetMap(), { bot }, 0, view.packs.get(),
+                    view.stop, GuildRunPull::Wait, view.ownSpot);
+                std::vector<runrules::Vec> way = view.stop.leg;
+                way.push_back({ view.stop.pull.getX(), view.stop.pull.getY(), view.stop.pull.getZ() });
+                // The way in parts of at most the horizon, each a path of its samples.
+                std::vector<std::vector<runrules::Vec>> parts(1);
+                for (const runguard::PathPoint& sample : runguard::Samples(way))
+                {
+                    if (sample.along > runguard::HORIZON * float(parts.size()))
+                        parts.push_back({ parts.back().back() });
+                    parts.back().push_back(sample.at);
+                }
+                std::string disagree, careful;
+                for (const std::vector<runrules::Vec>& part : parts)
+                {
+                    std::string by;
+                    runguard::GuardThreat blocker;
+                    const runguard::GuardResult verdict = sGuildMoveGuard.Check(bot, view, part, false, &by, &blocker);
+                    const bool waited = std::find(view.stop.outsideReach.begin(), view.stop.outsideReach.end(), blocker.spawn)
+                        != view.stop.outsideReach.end();
+                    if (verdict.verdict != runguard::Verdict::Allow && waited
+                        && std::find(blockers.begin(), blockers.end(), blocker.spawn) == blockers.end())
+                        disagree += (disagree.empty() ? "" : ",") + std::to_string(blocker.spawn);
+                }
+                for (uint32 spawn : blockers)
+                    careful += (careful.empty() ? "" : ",") + std::to_string(spawn);
+                check("wait_model", disagree.empty(), "stop=" + std::to_string(view.index + 1) + " parts="
+                    + std::to_string(parts.size()) + " blockers=" + (careful.empty() ? std::string("none") : careful)
+                    + (disagree.empty() ? std::string() : " guard_refused_by=" + disagree));
+            }
+        }
+        // G12. The pull is cast from the spot (docs/engine.md, "Pull spots"): on a character in lead at a stop the route
+        //      planned castable, the pulled creature, where it stands now, is within runguard::PULL_CAST yards of the pull
+        //      spot in 3D, its wander range included, and in sight from eye height. A stop planned to reach is listed.
+        {
+            GuildRunView view;
+            const bool guarded = sGuildMoveGuard.Guarded(bot, view) && view.mode == GuildRunMode::Lead;
+            Creature* pulled = guarded && view.index < view.stops && view.stop.pulled
+                ? bot->GetMap()->GetCreature(view.stop.pulled) : nullptr;
+            if (!guarded || view.index >= view.stops)
+                out.push_back("skip pull_cast  " + name + " is not at a stop of a run in lead");
+            else if (!view.stop.pullCast)
+                out.push_back("skip pull_cast  stop " + std::to_string(view.index + 1) + " is planned to reach, not cast");
+            else if (!pulled || !pulled->IsAlive() || pulled->IsInCombat())
+                out.push_back("skip pull_cast  the stop's pulled creature is not alive here and out of a fight");
+            else
+            {
+                const runguard::Envelope* envelope = view.packs && view.packs->reach ? view.packs->reach->BySpawn(view.stop.pulled)
+                    : nullptr;
+                const float range = envelope && envelope->kind == runguard::Kind::Wanderer ? envelope->range : 0.0f;
+                const ai::WorldPosition& spot = view.stop.pull;
+                const float distance = runrules::Distance({ spot.getX(), spot.getY(), spot.getZ() },
+                    { pulled->GetPositionX(), pulled->GetPositionY(), pulled->GetPositionZ() });
+                const bool sight = bot->GetMap()->IsInLineOfSight(spot.getX(), spot.getY(), spot.getZ() + 2.0f,
+                    pulled->GetPositionX(), pulled->GetPositionY(), pulled->GetPositionZ() + 2.0f, false);
+                check("pull_cast", runguard::CastFits(distance, range) && sight, "stop=" + std::to_string(view.index + 1)
+                    + " distance=" + runguard::Fixed1(distance) + " range=" + runguard::Fixed1(range)
+                    + (sight ? std::string() : " out_of_sight"));
+            }
+        }
     }
 
     fresh();

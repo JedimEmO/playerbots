@@ -41,15 +41,21 @@ struct GuildRunStop
     // before's spot;
     bool stillReach = false;
     std::vector<uint32> reachedBy;          // those creatures, for the events
-    // another pack's wanderers and patrols, by where they are now: the party first waits at the stop before's spot.
+    // another pack's creatures that walk about, by the guard's model of them (GuildRunStates::Blockers): the party first
+    // waits at the stop before's spot until none reaches the way there, the spot or its stands.
     std::vector<uint32> outsideReach;
     bool hasBefore = false;                 // there is a stop before, whose places the two use
     ai::WorldPosition before;               // the stop before's pull spot
     std::vector<ai::WorldPosition> beforeStands; // and its stand points
+    // The way from the stop before's pull spot to this one: that spot, then the route's points between, the pull spot
+    // left out (runguard::WaitPlaces adds it). Empty with no stop before.
+    std::vector<runrules::Vec> leg;
+    bool pullCast = false;                  // the route planned the pull to be cast from the spot (GuildPacks::Stop::pullCast)
 };
 
 // Where the leader is with the stop it is at: walking to its pull spot, waiting there for the party, pulling, or waiting
-// at the stop before's spot, for up to WAIT_SECONDS, for another pack's creature to leave the pull spot's reach.
+// at the stop before's spot for another pack's creature to leave the reach of the way there, the spot and its stands; a
+// wait ends when none reaches them, or in a block when the readiness budget runs out with one still reaching.
 // Blocked: the party could not get ready in its budget, or a member lacks what waiting cannot mend; the leader wrote a
 // block, and nothing pulls until the tick hands the party to the job for a recovery (docs/run-contract.md, "A block").
 enum class GuildRunPull : uint8 { Approach, Gather, Pull, Wait, Blocked };
@@ -76,7 +82,6 @@ struct GuildRunView
     time_t stopAt = 0;         // when the party went on to this stop
     time_t gatherSince = 0;    // when the leader came to the pull spot
     time_t waitSince = 0;      // when the leader began waiting at the stop before
-    bool waited = false;       // it waited as long as it may, and pulls with the other pack's creature still in reach
     bool ownSpot = false;      // a creature reaches the spot for good, and pulling from the stop before failed: from its own
     uint32 pullTries = 0;      // pulls of this stop that brought nothing
     GuildRunMode mode = GuildRunMode::Ended;
@@ -142,8 +147,6 @@ public:
     static constexpr uint32 PULL_MANA = runrules::READY_MANA;
     // How long the controller may hold a leader still, out of a fight, before the tick says why.
     static constexpr time_t STALL_SECONDS = 60;
-    // How long the party waits at the stop before for another pack's creature to leave, before it pulls anyway.
-    static constexpr time_t WAIT_SECONDS = 90;
 
     // From the guild tick, for a dungeon leader, outside GuildDungeon's lock, on either side of the job's own tick.
     // Before it: with the leader in a dungeon's instance, the run state is made the first time, from GuildPacks' route
@@ -233,7 +236,7 @@ public:
     // it stands at its pull spot, it pulled a creature, a pull brought nothing. Each that changes something counts a
     // plan revision, with its own event.
     void Gather(Player* leader, const GuildRunStamp& stamp);
-    void Pulled(Player* leader, const GuildRunStamp& stamp, ObjectGuid creature);
+    void Pulled(Player* leader, const GuildRunStamp& stamp, ObjectGuid creature, const std::string& detail = "");
     void PullFailed(Player* leader, const GuildRunStamp& stamp);
     // The leader blocks the pull with these reasons: its pull phase blocked, a plan revision, and a block for the tick to
     // take once. Never empty.
@@ -253,11 +256,12 @@ public:
     // the run's progress and never by where the leader stands, so no living stop is left behind (runrules::NextLiving).
     // The stops passed are noted, each dead or skipped with why. The tick never chooses a stop.
     void Choose(Player* leader, const GuildRunStamp& stamp);
-    // It waits at the stop before for another pack's wanderer or patrol to leave; it goes on when none is in reach, or when
-    // it has waited WAIT_SECONDS; it pulls its pack from its own spot after the stop before's failed; it passes the stop over.
+    // It waits at the stop before for another pack's creature that walks about to leave, and the waiting budget starts,
+    // as at a gather, when none runs under this stop and generation; it goes on when none reaches (Blockers). There is no
+    // timer of its own: a wait that never clears comes to a block through readiness, the blockers its reasons. It pulls
+    // its pack from its own spot after the stop before's failed; it passes the stop over.
     void Wait(Player* leader, const GuildRunStamp& stamp, const std::string& detail);
     void Go(Player* leader, const GuildRunStamp& stamp);
-    void WaitedOut(Player* leader, const GuildRunStamp& stamp, const std::string& detail);
     void UseOwnSpot(Player* leader, const GuildRunStamp& stamp, const std::string& detail);
     void Skip(Player* leader, const GuildRunStamp& stamp, const std::string& detail);
 
@@ -265,10 +269,26 @@ public:
     // stands still or is of the pack's own reaches the pull spot, unless pulling from there failed. The stand points there.
     static const ai::WorldPosition& FightSpot(const GuildRunStop& stop, GuildRunPull pull, bool ownSpot);
     static const std::vector<ai::WorldPosition>& FightStands(const GuildRunStop& stop, GuildRunPull pull, bool ownSpot);
-    // Whether another pack's wanderer or patrol is alive and within reach of the stop's pull spot where it is now: its aggro
-    // range toward the bot, both bounding radii and a 3 yard margin, as GuildPacks measures reach. Never for a stop
-    // with no stop before, which has nowhere to wait. On the map's own thread.
-    static bool Reached(Map* map, Unit* bot, const GuildRunStop& stop);
+    // The members the wait judges for: each the run expects that is alive, in the world on this map and not teleporting.
+    static std::vector<Unit*> WaitMovers(Map* map, const std::vector<uint32>& expected);
+    // The stop's blockers: the creatures of outsideReach that are alive, in the world and not evading, and that reach the
+    // places the party holds by the wait's model (runguard::WaitReaches), for any of `movers` they attack on sight: the
+    // guard's own threat toward that member (GuildPacks::GuardThreatOf), live place, live reach and the bound of its loop,
+    // at its widest walk inside the horizon at the member's run speed, as the guard judges each member. The places: where
+    // FightSpot has the party pull from the stop before (stillReach and not ownSpot), that spot and its stands alone;
+    // else the way still to walk from each member's point of the leg (LegFrom in `pull`), the pull spot and its stands.
+    // With no movers, at `level` (the route's when 0) and a player's run speed. None for a stop with no stop before,
+    // which has nowhere to wait. On the map's own thread, or the world thread outside map updates.
+    static std::vector<uint32> Blockers(Map* map, const std::vector<Unit*>& movers, uint32 level, const GuildPacks::Route* packs,
+        const GuildRunStop& stop, GuildRunPull pull, bool ownSpot);
+    // The same for a bot's run view: every member the run expects here (WaitMovers), or the bot with none. The wait's Clear
+    // and Go, the approach, the gather, the pull, the Wait write and readiness all judge by it.
+    static std::vector<uint32> Blockers(Player* bot, const GuildRunView& view);
+    // The places a member still walks to in this pull phase: waiting, the whole leg; on its way, the leg from its nearest
+    // point; gathered or pulling, none (the spot and stands only).
+    static size_t LegFrom(const GuildRunStop& stop, GuildRunPull pull, Unit* bot);
+    // Whether any blocker reaches, for the members in a bot's view (Blockers).
+    static bool Reached(Player* bot, const GuildRunView& view);
     // Creatures' names, by spawn guid, for the events.
     static std::string Names(const std::vector<uint32>& spawns);
 
@@ -302,7 +322,6 @@ private:
         time_t gatherSince = 0;
         uint32 pullTries = 0;
         time_t waitSince = 0;
-        bool waited = false;
         bool ownSpot = false;
         time_t changedAt = 0;      // the stop or the pull last changed
         time_t reportedPullAt = 0; // the pull the tick last reported as an event

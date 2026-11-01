@@ -184,7 +184,7 @@ void GuildRuns::EnsureTables()
         " ended TIMESTAMP NULL DEFAULT NULL,"
         " leader INT UNSIGNED NOT NULL DEFAULT 0,"
         " x FLOAT NOT NULL DEFAULT 0, y FLOAT NOT NULL DEFAULT 0, z FLOAT NOT NULL DEFAULT 0,"   // the leader at the start
-        " began VARCHAR(16) NOT NULL DEFAULT '',"             // pull, walked_in, attacked, member
+        " began VARCHAR(16) NOT NULL DEFAULT '',"             // pull, job_pull, walked_in, attacked, member
         " leader_reason VARCHAR(255) NOT NULL DEFAULT '',"    // the job's reason at the start
         " pulled INT NOT NULL DEFAULT 0,"                     // the creature entry pulled, or 0
         " pack INT UNSIGNED NOT NULL DEFAULT 0,"              // hostiles within call-for-help reach of the first, out of combat
@@ -553,12 +553,12 @@ void GuildRuns::Sweep()
     }
 }
 
-void GuildRuns::NotePull(Player* leader, Creature* creature)
+void GuildRuns::NotePull(Player* leader, Creature* creature, const char* began)
 {
     if (!leader || !creature)
         return;
     std::lock_guard<std::mutex> guard(pullLock);
-    pulls[leader->GetGUIDLow()] = { creature->GetEntry(), creature->GetObjectGuid(), time(nullptr) };
+    pulls[leader->GetGUIDLow()] = { creature->GetEntry(), creature->GetObjectGuid(), time(nullptr), began ? began : "pull" };
 }
 
 void GuildRuns::SampleFights()
@@ -631,8 +631,9 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
         }
         fight.leaderReason = sGuildBotMgr.GetReason(fight.leader).substr(0, 255);
 
-        // How it began: the job's pull, the leader walking into it on its way, the party set on where it stood,
-        // or a member before the leader. A pull begins one fight only.
+        // How it began: the run's pull or the job's (the kind noted with it), the leader walking into it on its way, the
+        // party set on where it stood, or a member before the leader. A pull begins one fight only.
+        std::string pulledBy;
         {
             std::lock_guard<std::mutex> pullGuard(pullLock);
             auto pull = pulls.find(fight.leader);
@@ -642,6 +643,7 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
                 {
                     fight.pulled = pull->second.entry;
                     fight.pulledGuid = pull->second.guid;
+                    pulledBy = pull->second.began;
                 }
                 pulls.erase(pull);
             }
@@ -649,7 +651,7 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
         const bool leaderFirst = leaderInside && leader->IsAlive() && leader->IsInCombat();
         const bool onTheWay = fight.leaderReason.rfind("on the way to", 0) == 0
             || (fight.leaderReason.empty() && leaderInside && leader->IsMoving());
-        fight.began = fight.pulled ? "pull" : !leaderFirst ? "member" : onTheWay ? "walked_in" : "attacked";
+        fight.began = fight.pulled ? pulledBy : !leaderFirst ? "member" : onTheWay ? "walked_in" : "attacked";
         // A fight the party did not pull: each member's last movement guard check before it, what it found nearest and
         // where, so a walk-in can be explained by the creature's place and timing, not by its label alone.
         if (!fight.pulled)

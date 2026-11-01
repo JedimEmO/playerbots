@@ -149,6 +149,9 @@ namespace
             at = exit;
             return hasExit;
         }
+        // The blockers no longer reaching the stop's places (runguard::WaitReaches), by spawn.
+        std::set<uint32_t> blockersGone;
+        bool BlockerGone(uint32_t spawn) override { return blockersGone.count(spawn) > 0; }
         // Readiness as the tick sees each member: full health and mana, near the leader, unless set here.
         std::map<uint32_t, runrules::Ready> ready;
         bool ReadyOf(uint32_t guid, uint32_t, runrules::Ready& out) override
@@ -2896,6 +2899,158 @@ namespace
         }
     }
 
+
+    // Item 4b-1: a wait at the stop before has no timer. The Wait write starts the budget (GuildRunStates::Wait, TrackBudget);
+    // each blocker still reaching keeps the pull back as the leader's (runrules::BlockerKeepers); the wait goes on only
+    // when none reaches, and otherwise comes to a block when the budget runs out, never to a pull.
+    void WaitHasNoTimer()
+    {
+        using runrules::Keep;
+        using runrules::WaitStep;
+        const size_t stop = 8;
+        const uint32_t generation = 4;
+        CHECK(runrules::WaitNext(true, false) == WaitStep::Go && runrules::WaitNext(true, true) == WaitStep::Go);
+        CHECK(runrules::WaitNext(false, false) == WaitStep::Wait && runrules::WaitNext(false, true) == WaitStep::Block);
+        const std::vector<runrules::Kept> blockers = runrules::BlockerKeepers(1, { 3600052 });
+        CHECK(blockers.size() == 1 && blockers[0].guid == 1 && blockers[0].why == Keep::Blocker && blockers[0].spawn == 3600052
+            && !blockers[0].person);
+        CHECK(runrules::KeepText(blockers, [](uint32_t guid) { return "m" + std::to_string(guid); }) == "blocker:3600052");
+        CHECK(std::string(runrules::KeepName(Keep::Blocker)) == "blocker");
+        // A blocker is a bot's reason: the budget runs, a block may name it, and waiting never meets it at once.
+        CHECK(runplayer::WaitOf(blockers) == runplayer::Wait::Bots && runplayer::BotReasons(blockers).size() == 1);
+        CHECK(!runrules::BlocksAtOnce(blockers));
+
+        // A blocker that never leaves, the party otherwise ready at the waiting spot. The budget starts at the Wait write,
+        // at 1000; from then on, at every second for an hour, the wait either waits or blocks, and never goes on.
+        {
+            runrules::Budget budget;
+            runrules::TrackBudget(budget, stop, generation, true, 1000);
+            runplayer::GuardedClock clock;
+            int64_t firstBlock = 0;
+            bool went = false;
+            for (int64_t now = 1000; now <= 4600; ++now)
+            {
+                std::vector<runrules::Kept> bots;
+                const bool due = runplayer::BlockDueNow(budget, 0, clock, blockers, false, now, bots);
+                const WaitStep step = runrules::WaitNext(false, due);
+                went = went || step == WaitStep::Go;
+                if (step == WaitStep::Block && !firstBlock)
+                {
+                    firstBlock = now;
+                    CHECK(bots.size() == 1 && bots[0].why == Keep::Blocker && bots[0].spawn == 3600052);
+                }
+            }
+            CHECK(!went && firstBlock == 1000 + runrules::READY_BUDGET);
+        }
+        // One that leaves at 1100: the wait goes on then, and nothing blocks before.
+        {
+            runrules::Budget budget;
+            runrules::TrackBudget(budget, stop, generation, true, 1000);
+            runplayer::GuardedClock clock;
+            int64_t wentAt = 0;
+            bool blocked = false;
+            for (int64_t now = 1000; now <= 1400 && !wentAt; ++now)
+            {
+                const bool clear = now >= 1100;
+                const std::vector<runrules::Kept> kept = clear ? std::vector<runrules::Kept>() : blockers;
+                std::vector<runrules::Kept> bots;
+                const WaitStep step = runrules::WaitNext(clear, runplayer::BlockDueNow(budget, 0, clock, kept, false, now, bots));
+                blocked = blocked || step == WaitStep::Block;
+                if (step == WaitStep::Go)
+                    wentAt = now;
+            }
+            CHECK(wentAt == 1100 && !blocked);
+        }
+        // Beside a guarded member: the guarded clock does not freeze the budget, since a blocker is a bot's reason, and the
+        // block names the blocker alone.
+        {
+            runrules::Budget budget;
+            runrules::TrackBudget(budget, stop, generation, true, 1000);
+            runplayer::GuardedClock clock;
+            std::string keepers;
+            std::vector<runrules::Kept> kept = blockers;
+            kept.push_back({ 3, Keep::Guarded, false });
+            CHECK(runplayer::WaitOf(kept) == runplayer::Wait::Bots);
+            std::vector<runrules::Kept> bots;
+            const int64_t at = FirstBlock(1000, 2000, stop, generation, budget, clock, keepers,
+                [&](int64_t) { return kept; },
+                [&](const std::string& text, const std::vector<runrules::Kept>& now)
+                { return runplayer::KeepersDue(text, keepers, now, clock, stop, generation); }, bots);
+            CHECK(at == 1000 + runrules::READY_BUDGET);
+            CHECK(bots.size() == 1 && bots[0].why == Keep::Blocker);
+        }
+        // A wait begun after a gather keeps the gather's budget; one at a new stop or generation starts its own.
+        {
+            runrules::Budget budget;
+            runrules::TrackBudget(budget, stop, generation, true, 900);
+            runrules::TrackBudget(budget, stop, generation, true, 1000);
+            CHECK(budget.since == 900);
+            runrules::TrackBudget(budget, stop, generation + 1, true, 1000);
+            CHECK(budget.since == 1000 && budget.generation == generation + 1);
+        }
+    }
+
+    // A block on a blocker is counted, and its recovery is met only when the blocker no longer reaches the stop's places
+    // (RunWorld::BlockerGone), whatever the leader's own state; one that never leaves runs out at RECOVERY_SECONDS; the
+    // third at one stop fails the run.
+    void BlockerBlocksAndRecovers()
+    {
+        using runrules::Keep;
+        const std::vector<runrules::Kept> reasons = runrules::BlockerKeepers(1, { 3600052 });
+        // Its obligation: three minutes, its creature kept.
+        {
+            const std::vector<runrules::Obligation> owed = runrules::Obligations(reasons, 100);
+            CHECK(owed.size() == 1 && owed[0].why == Keep::Blocker && owed[0].spawn == 3600052
+                && owed[0].deadline == 100 + runrules::RECOVERY_SECONDS);
+            runrules::Ready leader = ReadyMember(1);
+            CHECK(!runrules::Met(owed[0], leader));
+            CHECK(runrules::RecoveryStep(owed, { leader }, 150) == runrules::Recovery::Going);
+            CHECK(runrules::RecoveryStep(owed, { leader }, 150, { 3600099 }) == runrules::Recovery::Going);
+            CHECK(runrules::RecoveryStep(owed, { leader }, 150, { 3600052 }) == runrules::Recovery::Done);
+            // Gone with the leader not seen: met, since it is the creature's.
+            CHECK(runrules::RecoveryStep(owed, {}, 150, { 3600052 }) == runrules::Recovery::Done);
+            CHECK(runrules::RecoveryStep(owed, { leader }, 100 + runrules::RECOVERY_SECONDS) == runrules::Recovery::Over);
+        }
+        // Through the core: counted, recovered once the blocker is gone.
+        {
+            FakeWorld world = Party();
+            Counter counter;
+            RunCore core = Started(world, counter);
+            core.Reconcile(world, counter, 100);
+            core.TakeBlock(world, counter, 1, core.generation, 71, reasons, "blocker:3600052", 100);
+            CHECK(core.recovering && core.blockCounts[71] == 1);
+            CHECK(HasEvent(core, "run_block", "result=recover stop=71 count=1/3 reasons=blocker:3600052"));
+            core.Reconcile(world, counter, 150);
+            CHECK(core.recovering && core.mode == Mode::Released);
+            world.blockersGone.insert(3600052);
+            core.Reconcile(world, counter, 160);
+            CHECK(core.mode == Mode::Lead && core.reason == "recovered" && !core.recovering && core.choose);
+            CHECK(HasEvent(core, "run_recovery", "result=done obligations=blocker:3600052:met"));
+        }
+        // One that never leaves: over at its deadline, and the third block at the stop fails the run.
+        {
+            FakeWorld world = Party();
+            Counter counter;
+            RunCore core = Started(world, counter);
+            core.Reconcile(world, counter, 100);
+            time_t now = 100;
+            for (uint32_t id = 1; id <= 2; ++id)
+            {
+                core.TakeBlock(world, counter, id, core.generation, 71, reasons, "blocker:3600052", now);
+                CHECK(core.recovering && core.blockCounts[71] == id);
+                now += runrules::RECOVERY_SECONDS - 1;
+                core.Reconcile(world, counter, now);
+                CHECK(core.recovering);
+                ++now;
+                core.Reconcile(world, counter, now);
+                CHECK(core.mode == Mode::Lead && core.reason == "recovery_over");
+                CHECK(HasEvent(core, "run_recovery", "result=over obligations=blocker:3600052:unmet"));
+            }
+            core.TakeBlock(world, counter, 3, core.generation, 71, reasons, "blocker:3600052", now);
+            CHECK(core.mode == Mode::Ended && core.failed && core.reason == "blocked,blocker:3600052");
+            CHECK(HasEvent(core, "run_block", "result=fail stop=71 count=3/3 reasons=blocker:3600052"));
+        }
+    }
 }
 
 int main()
@@ -2976,6 +3131,8 @@ int main()
     GuardedThroughThreeBlocks();
     RefusedLeaderOnTheWay();
     GuardedKeepersCarriedOver();
+    WaitHasNoTimer();
+    BlockerBlocksAndRecovers();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

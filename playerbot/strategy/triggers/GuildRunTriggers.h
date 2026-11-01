@@ -143,7 +143,8 @@ namespace ai
         bool IsActive() override;
     };
 
-    // On its way, or gathered, the leader finds another pack's wanderer or patrol in reach of the stop's pull spot.
+    // On its way, or gathered, the leader finds another pack's creature that walks about reaching the way to the stop's
+    // pull spot, the spot or its stands, by the guard's model (GuildRunStates::Reached).
     class RunReachedTrigger : public RunTrigger
     {
     public:
@@ -151,19 +152,12 @@ namespace ai
         bool IsActive() override;
     };
 
-    // Waiting at the stop before, the leader finds the pull spot out of every other pack's reach again.
+    // Waiting at the stop before, the leader finds the way to the pull spot, the spot and its stands out of every blocker's
+    // reach by the same model, so the guard would let the walk there.
     class RunClearTrigger : public RunTrigger
     {
     public:
         RunClearTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run clear") {}
-        bool IsActive() override;
-    };
-
-    // The leader has waited at the stop before as long as it may, and pulls with the creature still in reach.
-    class RunWaitOverTrigger : public RunTrigger
-    {
-    public:
-        RunWaitOverTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run wait over") {}
         bool IsActive() override;
     };
 }

@@ -69,6 +69,9 @@ public:
         float pullAlong = 0.0f;                 // yards along the route of the pull spot, or of the way's point nearest it when off it
         bool offWay = false;                    // the pull spot is off the way, by a navmesh path from it
         float pullDistance = 0.0f;              // yards from the pull spot to the pulled creature
+        // The pull is cast from the spot: the pulled creature within runguard::PULL_CAST yards of it in 3D, its wander range
+        // included, and in sight from eye height. The route prefers such a spot, and keeps its best one when none is.
+        bool pullCast = false;
         bool clean = false;                     // the pull brings nothing beyond the pack
         std::vector<uint32> extras;             // what the pull brings beyond the pack
         // Whether no creature standing still or wandering, and none of the pack's own, reaches the pull spot itself, by the
@@ -170,6 +173,13 @@ public:
     // How fast a creature may move toward a path, in yards a second: its spline's speed while it moves, its run speed in a
     // fight, its walk speed when it is one that walks about (`walks`: a wanderer, a patrol, a follower), else 0.
     static float LiveSpeed(Creature* creature, bool walks);
+    // The movement guard's threat for one living creature toward `mover` (or with none at `level`, the route's when 0), as the guard
+    // builds it at each check: a modelled one by its envelope (runguard::EnvelopeThreat), drawn when in a fight or off
+    // its envelope, and any other where it stands (runguard::LiveThreat); its aggro reach with runguard::ReachPad, and its
+    // speed (LiveSpeed). LiveThreats and the guard's own reach index take theirs from it, and the wait judges its
+    // blockers by it (GuildRunStates::Blockers), so the three share one model. The creature's own map thread, or the world
+    // thread outside map updates.
+    static runguard::GuardThreat GuardThreatOf(const Route& route, Creature* creature, Unit* mover, uint32 level = 0);
     // The stop whose pack, or whose pull's extras, a creature is of, or -1.
     static int32 StopOf(const Route& route, uint32 spawn);
 
