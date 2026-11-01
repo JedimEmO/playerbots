@@ -49,13 +49,14 @@ namespace ai
             float maxDist,
             bool isWalking);
 
-        void DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking);
+        // moveId, when not 0, is the point move's id instead of the map's: a run move's token (GuildRunStates).
+        void DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking, uint32 moveId = 0);
 
         Unit* GetMover(Player* bot);
 
-        bool MoveTo2(const WorldPosition& endPos, bool idle = false, bool react = false, bool noPath = false, bool ignoreEnemyTargets = false);
+        bool MoveTo2(const WorldPosition& endPos, bool idle = false, bool react = false, bool noPath = false, bool ignoreEnemyTargets = false, uint32 moveId = 0);
 
-        bool MoveTo(uint32 mapId, float x, float y, float z, bool idle = false, bool react = false, bool noPath = false, bool ignoreEnemyTargets = false);
+        bool MoveTo(uint32 mapId, float x, float y, float z, bool idle = false, bool react = false, bool noPath = false, bool ignoreEnemyTargets = false, uint32 moveId = 0);
         bool MoveTo(Unit* target, float distance = 0.0f);
         bool MoveNear(WorldObject* target, float distance = sPlayerbotAIConfig.contactDistance);
         float GetFollowAngle();

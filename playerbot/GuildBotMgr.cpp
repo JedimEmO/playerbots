@@ -6,6 +6,7 @@
 #include "playerbot/GuildPacks.h"
 #include "playerbot/GuildRuns.h"
 #include "playerbot/GuildRunState.h"
+#include "playerbot/GuildRunSelfTest.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/Engine.h"
@@ -1196,6 +1197,8 @@ void GuildBotMgr::Tick(uint32 elapsed)
         // Every run, after this tick's orders, logins and membership and before any job moves or pulls.
         ReconcileRuns();
         CheckJobs();
+        // The jobs may have changed a run's mode (Prepare, Settle): its stale moves stop before the maps update.
+        sGuildRunStates.CleanMoves();
         sGuildRuns.Sweep();
     }
     else
@@ -1222,6 +1225,7 @@ void GuildBotMgr::ReconcileRuns()
         return;
     for (auto& [guid, kind, detail] : sGuildRunStates.Reconcile())
         Event(guid, kind, detail);
+    sGuildRunStates.CleanMoves();
 }
 
 void GuildBotMgr::EnsureTables()
@@ -2308,7 +2312,10 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
         auto [what, leader] = SplitWord(rest);
         if (what == "state")
             return sGuildRunStates.Describe(leader);
-        return { "guildbot run state [leader]   every run the controller keeps: its mode, members and holds; reads only" };
+        if (what == "selftest")
+            return GuildRunSelfTest(leader);
+        return { "guildbot run state [leader]   every run the controller keeps: its mode, members and holds; reads only",
+            "guildbot run selftest <character> <second character>   the run's move removal on a lab character's motion stack" };
     }
 
     if (!tablesReady)

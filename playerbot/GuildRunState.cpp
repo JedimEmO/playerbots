@@ -100,6 +100,11 @@ namespace
             std::vector<runrules::Motion> stack;
             for (MovementGenerator const* generator : *motion)
             {
+                if (runrules::IsRunToken(generator->GetMoveId()))
+                {
+                    stack.push_back(runrules::Motion::RunToken);
+                    continue;
+                }
                 switch (generator->GetMovementGeneratorType())
                 {
                     case IDLE_MOTION_TYPE: stack.push_back(runrules::Motion::Idle); break;
@@ -487,6 +492,22 @@ std::list<std::string> GuildRunStates::Describe(const std::string& leaderName) c
             auto refused = state->refused.find(guid);
             if (refused != state->refused.end())
                 line << " refused=" << refused->second;
+            // Its run move's record, and its motion stack, bottom first, as type:id.
+            GuildRunStamp moveStamp;
+            if (const uint32 token = RunMoveOf(guid, moveStamp))
+                line << " run_move=" << std::hex << token << std::dec << "@" << moveStamp.generation << ":" << moveStamp.plan;
+            if (Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid), false))
+            {
+                line << " stack=";
+                bool first = true;
+                for (MovementGenerator const* generator : *player->GetMotionMaster())
+                {
+                    line << (first ? "" : ",") << uint32(generator->GetMovementGeneratorType());
+                    if (generator->GetMoveId())
+                        line << ":" << std::hex << generator->GetMoveId() << std::dec;
+                    first = false;
+                }
+            }
             out.push_back(line.str());
         }
     }
@@ -640,6 +661,135 @@ ai::WorldPosition GuildRunStates::PlaceOf(const GuildRunView& view, Player* bot)
     return stands[index];
 }
 
+namespace
+{
+    runrules::Removal Removal(MotionMaster::RemoveResult result)
+    {
+        switch (result)
+        {
+            case MotionMaster::RemoveResult::Removed: return runrules::Removal::Removed;
+            case MotionMaster::RemoveResult::Deferred: return runrules::Removal::Deferred;
+            default: return runrules::Removal::NotFound;
+        }
+    }
+
+    // The members' motion, for the run moves: any member in the world on the world pass, or only those on `map` on a map's
+    // pass, which runs on that map's thread.
+    class ServerMoveWorld : public runcore::MoveWorld
+    {
+    public:
+        explicit ServerMoveWorld(Map* map = nullptr) : map(map) {}
+
+        runcore::MoveMember Member(uint32_t guid) override
+        {
+            runcore::MoveMember member;
+            Player* player = Find(guid);
+            member.visible = !map || player;
+            if (!player)
+                return member;
+            member.online = true;
+            member.engine = sGuildBotMgr.GetPlayerBot(guid) == player;
+            member.inWorld = player->IsInWorld();
+            member.teleporting = player->IsBeingTeleported();
+            member.mapId = player->GetMapId();
+            member.instanceId = player->GetInstanceId();
+            return member;
+        }
+        bool HasMove(uint32_t guid, uint32_t token) override
+        {
+            Player* player = Find(guid);
+            return player && player->GetMotionMaster()->HasMove(token);
+        }
+        uint32_t TopMove(uint32_t guid) override
+        {
+            Player* player = Find(guid);
+            return player && !player->GetMotionMaster()->empty() ? player->GetMotionMaster()->GetCurrent()->GetMoveId() : 0;
+        }
+        std::vector<uint32_t> MoveIds(uint32_t guid) override
+        {
+            std::vector<uint32_t> ids;
+            if (Player* player = Find(guid))
+                for (MovementGenerator const* generator : *player->GetMotionMaster())
+                    ids.push_back(generator->GetMoveId());
+            return ids;
+        }
+        runrules::Removal RemoveMove(uint32_t guid, uint32_t token) override
+        {
+            Player* player = Find(guid);
+            return player ? Removal(player->GetMotionMaster()->RemoveMove(token)) : runrules::Removal::NotFound;
+        }
+
+    private:
+        Player* Find(uint32_t guid) const
+        {
+            const ObjectGuid object(HIGHGUID_PLAYER, guid);
+            return map ? map->GetPlayer(object) : sObjectMgr.GetPlayer(object, false);
+        }
+
+        Map* map;
+    };
+}
+
+bool GuildRunStates::StartRunMove(Player* bot, const GuildRunView& view, const std::function<bool(uint32 token)>& move)
+{
+    // Still the run and the stamp the move was chosen under, after the removals' callbacks.
+    auto current = [this, bot, &view]()
+    {
+        const GuildRunView now = View(bot);
+        return now.valid && now.leader == view.leader && runrules::Accepts(now.mode, now.stamp, view.stamp, false);
+    };
+    return StartRunMove(bot, view, current, move);
+}
+
+bool GuildRunStates::StartRunMove(Player* bot, const GuildRunView& view, const std::function<bool()>& current,
+    const std::function<bool(uint32 token)>& move)
+{
+    if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported() || !view.valid)
+        return false;
+    ServerMoveWorld world(bot->GetMap());
+    return moves.Start(world, bot->GetGUIDLow(), view.stamp, view.leader, current, move);
+}
+
+void GuildRunStates::StopStaleMoves(Map* map, uint32 leaderGuid, const runcore::RunNow& run)
+{
+    if (!map)
+        return;
+    ServerMoveWorld world(map);
+    moves.Clean(world, { { leaderGuid, run } }, leaderGuid);
+}
+
+void GuildRunStates::CleanMoves()
+{
+    // The runs as they stand: each state's lock taken alone, and let go, before the records' lock.
+    std::map<uint32, runcore::RunNow> runs;   // by leader
+    std::vector<std::shared_ptr<State>> states;
+    {
+        std::lock_guard<std::mutex> guard(registryLock);
+        for (auto const& [instanceId, state] : byInstance)
+            states.push_back(state);
+    }
+    for (const std::shared_ptr<State>& state : states)
+    {
+        std::lock_guard<std::mutex> guard(state->lock);
+        runcore::RunNow& run = runs[state->leader];
+        run.stamp = state->core.Stamp();
+        run.mode = state->core.mode;
+        run.instanceId = state->instanceId;
+        run.expected.assign(state->core.expected.begin(), state->core.expected.end());
+    }
+    ServerMoveWorld world;
+    moves.Clean(world, runs);
+}
+
+uint32 GuildRunStates::RunMoveOf(uint32 guid, GuildRunStamp& stamp) const
+{
+    runcore::MoveRecord record;
+    if (!moves.Find(guid, record))
+        return 0;
+    stamp = record.stamp;
+    return record.token;
+}
+
 bool GuildRunStates::Write(Player* leader, const GuildRunStamp& stamp, const char* what,
     const std::function<bool(State&, Map*, std::string&)>& write)
 {
@@ -649,18 +799,28 @@ bool GuildRunStates::Write(Player* leader, const GuildRunStamp& stamp, const cha
     std::shared_ptr<State> state = Find(leader->GetInstanceId());
     if (!state || state->leader != leader->GetGUIDLow())
         return false;
-    std::lock_guard<std::mutex> guard(state->lock);
-    if (!runrules::Accepts(state->core.mode, state->core.Stamp(), stamp, true))
+    Map* map = nullptr;
+    runcore::RunNow now;
     {
-        ++state->refused[leader->GetGUIDLow()];
-        return false;
+        std::lock_guard<std::mutex> guard(state->lock);
+        if (!runrules::Accepts(state->core.mode, state->core.Stamp(), stamp, true))
+        {
+            ++state->refused[leader->GetGUIDLow()];
+            return false;
+        }
+        map = leader->GetMap();
+        std::string fields;
+        if (!write(*state, map, fields))
+            return false;
+        state->core.Revise(what, "stop=" + std::to_string(state->index + 1) + " pull=" + PullName(state->pull)
+            + (fields.empty() ? "" : " " + fields));
+        now.stamp = state->core.Stamp();
+        now.mode = state->core.mode;
+        now.instanceId = state->instanceId;
+        now.expected.assign(state->core.expected.begin(), state->core.expected.end());
     }
-    Map* map = leader->GetMap();
-    std::string fields;
-    if (!write(*state, map, fields))
-        return false;
-    state->core.Revise(what, "stop=" + std::to_string(state->index + 1) + " pull=" + PullName(state->pull)
-        + (fields.empty() ? "" : " " + fields));
+    // The plan changed: what the old plan set moving on this map stops now, with the state's lock let go.
+    StopStaleMoves(map, leader->GetGUIDLow(), now);
     return true;
 }
 

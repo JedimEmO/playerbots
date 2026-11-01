@@ -62,8 +62,13 @@ bool MoveToRunSpotAction::Execute(Event& event)
     }
     if (!spot || spot.getMapId() != bot->GetMapId())
         return false;
-    // MoveTo builds a path on the navmesh to the spot, which the dungeon model put on the navmesh.
-    return MoveTo(spot.getMapId(), spot.getX(), spot.getY(), spot.getZ());
+    // A run move by its own token: the previous one and any leaked token go first, and a move the core had to defer
+    // postpones this one (GuildRunStates::StartRunMove). MoveTo keeps every safeguard of the bots' moves, the path, its
+    // no-route rejection and its clipping, and only issues its point move with the token for id.
+    return sGuildRunStates.StartRunMove(bot, view, [&](uint32 token)
+    {
+        return MoveTo(spot.getMapId(), spot.getX(), spot.getY(), spot.getZ(), false, false, false, false, token);
+    });
 }
 
 bool RunChooseAction::Execute(Event& event)

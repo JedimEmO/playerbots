@@ -151,6 +151,22 @@ public:
     // the leader's own map, which is the run's instance. On the leader's map thread.
     static bool Present(Player* leader, const GuildRunView& view);
 
+    // A member's run move, on its own map thread with no lock held (move to run spot), by runcore::RunMoves::Start. Its
+    // previous run move and any run token no record holds are removed from its motion stack first; a removal deferred by
+    // the core postpones the move, the previous record kept, and a run move a removal's callback started stands. Then,
+    // with the view's run and stamp still the bot's, `move` is called with a new token (GuildRunRules' NextToken), and the
+    // move is recorded only if a move with that token is then on top. Returns whether a move started.
+    bool StartRunMove(Player* bot, const GuildRunView& view, const std::function<bool(uint32 token)>& move);
+    // The same, with `current` in place of the view's check; for the self-test, whose characters have no run.
+    bool StartRunMove(Player* bot, const GuildRunView& view, const std::function<bool()>& current,
+        const std::function<bool(uint32 token)>& move);
+    // Every run move's record, on the world thread between map updates: retired once its move is gone, kept while current,
+    // its token removed when stale, or left for the next tick (GuildRunRules' RecordStep). The only pass that reaches a
+    // member outside its run's instance. Each tick, and again after the jobs.
+    void CleanMoves();
+    // The member's run move, for the console: its token and stamp, or 0.
+    uint32 RunMoveOf(uint32 guid, GuildRunStamp& stamp) const;
+
     // The leader's AI, on its map's thread, each under the stamp of the trigger that fired it, and only in the mode lead:
     // it stands at its pull spot, it pulled a creature, a pull brought nothing. Each that changes something counts a
     // plan revision, with its own event.
@@ -232,6 +248,9 @@ private:
     bool Write(Player* leader, const GuildRunStamp& stamp, const char* what,
         const std::function<bool(State&, Map*, std::string&)>& write);
     static const char* PullName(GuildRunPull pull);
+    // A leader's write changed the plan: on the instance's map thread, with no lock held, the run's stale run moves of
+    // members on that map are removed at once; the rest wait for CleanMoves.
+    void StopStaleMoves(Map* map, uint32 leaderGuid, const runcore::RunNow& run);
 
     // Where a held leader stands and what keeps it: loot, its AI's fight state, and each member not ready for the pull.
     static std::string StallReason(Player* leader, size_t index, const GuildRunStop& stop, GuildRunPull pull, bool ownSpot);
@@ -252,6 +271,9 @@ private:
         uint64 Start() const override;
     };
     Counter generations;
+    // Run moves, by member guid, apart from the run states, so that a run's moves are cleaned up after it ends. Their own
+    // lock, taken after a state's and never before it, and never held across a removal or a move.
+    runcore::RunMoves moves;
 };
 
 #define sGuildRunStates GuildRunStates::instance()

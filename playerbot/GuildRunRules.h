@@ -200,12 +200,13 @@ namespace runrules
         return facts.engine && facts.alive && facts.inWorld && !facts.teleporting && facts.inInstance;
     }
 
-    // A character's motion stack, bottom first, as the run's cancellation sees it.
-    enum class Motion : uint8_t { Idle, Point, Path, Follow, Chase, Other };
+    // A character's motion stack, bottom first, as the run's cancellation sees it. A point or path move with a run token
+    // is the run's own (RunToken), stopped only by its record (RecordStep), never by this cancellation.
+    enum class Motion : uint8_t { Idle, Point, Path, Follow, Chase, Other, RunToken };
 
-    // The run's coarse cancellation of a member's motion: when a point, path or follow is anywhere in the stack, the
-    // stack is cleared to its idle base, since the core cannot take one generator from under another; when a chase was on
-    // top, the member's fight, it is put back with its target, offset and angle, if the target is still the victim.
+    // The cancellation of a member's motion when it is placed in hold: a follow, or a point or path move that is not the
+    // run's, anywhere in the stack, and the stack is cleared to its idle base; when a chase was on top, the member's fight,
+    // it is put back with its target, offset and angle, if the target is still the victim.
     struct CancelPlan
     {
         bool clear = false;
@@ -311,6 +312,75 @@ namespace runrules
             return false;
         place = placeOf(view);
         return true;
+    }
+
+    // Run move ids: the top bit set, so that no other point or path move a player can get shares one. A token is never 0
+    // and never reused while a record or the member's stack holds it, so a wrap after 2^31 moves collides with nothing.
+    constexpr uint32_t RUN_TOKEN_BIT = 0x80000000u;
+
+    inline bool IsRunToken(uint32_t id)
+    {
+        return (id & RUN_TOKEN_BIT) != 0 && id != RUN_TOKEN_BIT;
+    }
+
+    template<class InUse>
+    uint32_t NextToken(uint32_t& counter, InUse inUse)
+    {
+        for (uint32_t tries = 0; tries < 1000; ++tries)
+        {
+            counter = counter >= 0x7FFFFFFFu ? 1u : counter + 1u;
+            const uint32_t token = RUN_TOKEN_BIT | counter;
+            if (!inUse(token))
+                return token;
+        }
+        return 0;
+    }
+
+    // A run move's record, and what the cleanup does with it.
+    struct RecordFacts
+    {
+        bool runExists = false;
+        bool stampCurrent = false;    // the run's generation and plan revision are the record's
+        bool memberInRun = false;     // still one of the run's expected members
+        bool onRecordInstance = false; // standing on the record's map and instance
+        bool online = false;
+        bool engine = false;          // played by the engine, not a player
+        bool inWorld = false;
+        bool teleporting = false;
+        bool tokenInStack = false;    // a move with the record's token is in the member's motion stack
+        bool reachable = true;        // the pass may touch the member: the world pass, or the map pass on the member's own map
+    };
+
+    enum class RecordAction : uint8_t
+    {
+        Retire, // the move is gone: the record goes
+        Keep,   // current
+        Remove, // stale: RemoveMove its token
+        Wait,   // stale, but not to be touched now: between maps, a player's, or not on this pass's map
+        Drop,   // offline: logging out destroyed the stack
+    };
+
+    inline RecordAction RecordStep(const RecordFacts& facts)
+    {
+        if (!facts.online)
+            return RecordAction::Drop;
+        const bool settled = facts.inWorld && !facts.teleporting;
+        if (settled && !facts.tokenInStack)
+            return RecordAction::Retire;
+        if (facts.runExists && facts.stampCurrent && facts.memberInRun && facts.onRecordInstance)
+            return RecordAction::Keep;
+        if (!facts.engine || !settled || !facts.reachable)
+            return RecordAction::Wait;
+        return RecordAction::Remove;
+    }
+
+    // What issuing a new run move does with the member's previous one and any token no record holds: the result of
+    // removing each. A deferred removal postpones the new move; the old record stays.
+    enum class Removal : uint8_t { Removed, NotFound, Deferred };
+
+    inline bool MayIssue(const std::vector<Removal>& removals)
+    {
+        return std::none_of(removals.begin(), removals.end(), [](Removal removal) { return removal == Removal::Deferred; });
     }
 
     // Joins words with commas, for a key=value field.

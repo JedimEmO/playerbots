@@ -1061,7 +1061,7 @@ void MovementAction::UpdateFlyingState(
 #endif // !MANGOSBOT_ZERO
 }
 
-void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking)
+void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bool masterWalking, uint32 moveId)
 {
     MotionMaster& mm = *bot->GetMotionMaster();
 
@@ -1080,14 +1080,14 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
     if (!generatePath || bot->IsFreeFlying())
     {
 #ifdef MANGOSBOT_ZERO
-        mm.MovePoint(movePosition.getMapId(),
+        mm.MovePoint(moveId ? moveId : movePosition.getMapId(),
             movePosition.getX(),
             movePosition.getY(),
             movePosition.getZ(),
             moveMode,
             generatePath);
 #else
-        mm.MovePoint(movePosition.getMapId(),
+        mm.MovePoint(moveId ? moveId : movePosition.getMapId(),
             Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f),
             moveMode,
             bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.f,
@@ -1127,14 +1127,14 @@ void MovementAction::DispatchMovement(TravelPath movePath, bool generatePath, bo
             WorldPosition movePosition = path.back();
 
 #ifdef MANGOSBOT_ZERO
-            mm.MovePoint(movePosition.getMapId(),
+            mm.MovePoint(moveId ? moveId : movePosition.getMapId(),
                 movePosition.getX(),
                 movePosition.getY(),
                 movePosition.getZ(),
                 moveMode,
                 generatePath);
 #else
-            mm.MovePoint(movePosition.getMapId(),
+            mm.MovePoint(moveId ? moveId : movePosition.getMapId(),
                 Position(movePosition.getX(), movePosition.getY(), movePosition.getZ(), 0.f),
                 moveMode,
                 bot->IsFlying() ? bot->GetSpeed(MOVE_FLIGHT) : 0.f,
@@ -1167,7 +1167,7 @@ Unit* MovementAction::GetMover(Player* bot)
     return bot;
 }
 
-bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react, bool noPath, bool ignoreEnemyTargets)
+bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react, bool noPath, bool ignoreEnemyTargets, uint32 moveId)
 {
     if (!endPos.isValid())
         return false;
@@ -1418,7 +1418,7 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     */
     // END DEBUG
 
-    DispatchMovement(movePath, generatePath, masterWalking);
+    DispatchMovement(movePath, generatePath, masterWalking, moveId);
 
     if (!idle)
         ClearIdleState();
@@ -1426,9 +1426,9 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
     return true;
 }
 
-bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, bool react, bool noPath, bool ignoreEnemyTargets)
+bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle, bool react, bool noPath, bool ignoreEnemyTargets, uint32 moveId)
 {
-    return MoveTo2(WorldPosition(mapId, x, y, z), idle, react, noPath, ignoreEnemyTargets);
+    return MoveTo2(WorldPosition(mapId, x, y, z), idle, react, noPath, ignoreEnemyTargets, moveId);
 
     WorldPosition endPosition(mapId, x, y, z, 0);
     if (!endPosition.isValid())

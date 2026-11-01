@@ -34,20 +34,14 @@ void RunCore::Revise(const std::string& what, const std::string& fields)
     Note("run_plan", "what=" + what + (fields.empty() ? "" : " " + fields));
 }
 
-void RunCore::Cancel(RunWorld& world)
-{
-    for (uint32_t guid : expected)
-        if (runrules::Movable(world.FactsOf(guid)))
-            world.CancelMotion(guid);
-}
-
 void RunCore::SetMode(RunWorld& world, Generations& generations, Mode to, const std::string& why)
 {
-    // Every change of mode is a new generation, and stops what the old one started before anything of the new one moves.
+    // Every change of mode is a new generation, so every run move of the old one is stale, and the token cleanup
+    // (GuildRunStates::CleanMoves) stops it before the maps update.
+    (void)world;
     mode = to;
     reason = why;
     generation = generations.Next();
-    Cancel(world);
     Note("run_mode", std::string("mode=") + runrules::ModeName(to) + " reason=" + why);
 }
 
@@ -135,11 +129,11 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
         return true;
     }
 
-    // A new five: the old roster's moves stop first, the departed let go of their places, then the five are expected.
+    // A new five: the departed let go of their places, then the five are expected. The new generation makes every run
+    // move of the old roster stale, and the token cleanup stops it.
     const runrules::Roster roster = runrules::RosterChange(expected, members);
     if (roster == runrules::Roster::Replace)
     {
-        Cancel(world);
         for (auto it = held.begin(); it != held.end();)
             it = Contains(members, it->first) ? std::next(it) : held.erase(it);
         expected = members;
@@ -239,6 +233,155 @@ void RunCore::Settle(RunWorld& world, Generations& generations, const runrules::
         {
             choose = true;
             SetMode(world, generations, Mode::Lead, "handed_back");
+        }
+    }
+}
+
+uint32_t RunMoves::TokenOf(uint32_t guid) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = records.find(guid);
+    return it == records.end() ? 0 : it->second.token;
+}
+
+bool RunMoves::Find(uint32_t guid, MoveRecord& record) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = records.find(guid);
+    if (it == records.end())
+        return false;
+    record = it->second;
+    return true;
+}
+
+size_t RunMoves::Size() const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    return records.size();
+}
+
+void RunMoves::Retire(MoveWorld& world, uint32_t guid, uint32_t token)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = records.find(guid);
+    // A callback may have recorded a new move meanwhile: only this token's record, and only once it is gone.
+    if (it != records.end() && it->second.token == token && !world.HasMove(guid, token))
+        records.erase(it);
+}
+
+bool RunMoves::Start(MoveWorld& world, uint32_t guid, const runrules::Stamp& stamp, uint32_t leader,
+    const std::function<bool()>& current, const std::function<bool(uint32_t token)>& move)
+{
+    const MoveMember member = world.Member(guid);
+    if (!member.visible || !member.inWorld || member.teleporting)
+        return false;
+    const uint32_t previous = TokenOf(guid);
+    // A run move recorded since `previous` that is still in the stack: a removal's callback started it.
+    auto replaced = [&]()
+    {
+        const uint32_t now = TokenOf(guid);
+        return now && now != previous && world.HasMove(guid, now);
+    };
+    std::vector<runrules::Removal> removals;
+    if (previous)
+    {
+        removals.push_back(world.RemoveMove(guid, previous));
+        Retire(world, guid, previous);
+    }
+    if (replaced())
+        return false;
+    // Any run token no record holds, from a copy of the stack's ids: a removal and its callbacks change the stack.
+    const uint32_t kept = TokenOf(guid);
+    for (uint32_t id : world.MoveIds(guid))
+        if (runrules::IsRunToken(id) && id != previous && id != kept)
+            removals.push_back(world.RemoveMove(guid, id));
+    if (!runrules::MayIssue(removals) || replaced())
+        return false;
+    // The removals' callbacks may have moved the member or ended the plan this move was for.
+    const MoveMember before = world.Member(guid);
+    if (!before.inWorld || before.teleporting || !current())
+        return false;
+
+    uint32_t token = 0;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        token = runrules::NextToken(counter, [&](uint32_t candidate)
+        {
+            for (auto const& entry : records)
+                if (entry.second.token == candidate)
+                    return true;
+            return world.HasMove(guid, candidate);
+        });
+    }
+    if (!token)
+        return false;
+    const uint32_t issuedOver = TokenOf(guid);
+    const bool moved = move(token);
+    // A callback during the move started and recorded a run move of its own that is still in the stack: that one
+    // stands, and this one yields. Its removal may run further callbacks, whose records stand too; this call writes no
+    // record after a callback, so whatever they leave is the member's run move. A deferred removal goes at the end of the
+    // member's update, and its token was never recorded.
+    const uint32_t observed = TokenOf(guid);
+    if (observed != issuedOver && observed && world.HasMove(guid, observed))
+    {
+        if (world.HasMove(guid, token))
+            world.RemoveMove(guid, token);
+        return false;
+    }
+    // Started only with the token's move on top; a call that moved nothing, or teleported, records nothing.
+    const MoveMember after = world.Member(guid);
+    if (!moved || !after.inWorld || after.teleporting || world.TopMove(guid) != token)
+        return moved;
+    // Recorded only over the record this call saw last: nothing between that look and the lock runs a callback, so this
+    // only guards the rule.
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = records.find(guid);
+    if ((it == records.end() ? 0 : it->second.token) != observed)
+        return false;
+    records[guid] = { token, stamp, after.mapId, after.instanceId, leader };
+    return true;
+}
+
+void RunMoves::Clean(MoveWorld& world, const std::map<uint32_t, RunNow>& runs, uint32_t leader)
+{
+    std::vector<std::pair<uint32_t, MoveRecord>> snapshot;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        for (auto const& entry : records)
+            if (!leader || entry.second.leader == leader)
+                snapshot.push_back(entry);
+    }
+    for (auto const& [guid, record] : snapshot)
+    {
+        const MoveMember member = world.Member(guid);
+        if (!member.visible)
+            continue;
+        auto run = runs.find(record.leader);
+        runrules::RecordFacts facts;
+        facts.runExists = run != runs.end() && run->second.instanceId == record.instanceId
+            && run->second.mode != runrules::Mode::Ended;
+        facts.stampCurrent = facts.runExists && runrules::Accepts(run->second.mode, run->second.stamp, record.stamp, false);
+        facts.memberInRun = facts.runExists && std::find(run->second.expected.begin(), run->second.expected.end(), guid)
+            != run->second.expected.end();
+        facts.online = member.online;
+        facts.engine = member.engine;
+        facts.inWorld = member.inWorld;
+        facts.teleporting = member.teleporting;
+        facts.onRecordInstance = member.inWorld && member.mapId == record.mapId && member.instanceId == record.instanceId;
+        facts.tokenInStack = member.online && world.HasMove(guid, record.token);
+        facts.reachable = true;
+        switch (runrules::RecordStep(facts))
+        {
+            case runrules::RecordAction::Drop:
+            case runrules::RecordAction::Retire:
+                Retire(world, guid, record.token);
+                break;
+            case runrules::RecordAction::Remove:
+                if (world.RemoveMove(guid, record.token) != runrules::Removal::Deferred)
+                    Retire(world, guid, record.token);
+                break;
+            default:
+                break;
         }
     }
 }

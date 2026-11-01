@@ -3,7 +3,9 @@
 
 #include "GuildRunCore.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -238,7 +240,7 @@ namespace
         core.End(world, counter, "job_done");
         CHECK(core.mode == Mode::Ended);
         CHECK(core.generation != generation);
-        CHECK(world.cancelled.size() == 5);
+        CHECK(world.cancelled.empty());   // the run's moves are the token cleanup's, by the new generation
         CHECK(HasEvent(core, "run_mode", "mode=ended reason=job_done"));
         const int lookups = world.groupLookups;
         world.groupExists = false;
@@ -320,7 +322,7 @@ namespace
         core.Reconcile(world, counter, 380);
         CHECK(core.mode == Mode::Lead && core.choose && core.reason == "resume_waited");
         CHECK(core.held.empty());
-        CHECK(world.cancelled.size() == 5);
+        CHECK(world.cancelled.empty());
     }
 
     void ResumeNear()
@@ -388,7 +390,7 @@ namespace
             five = five || call == "cancel 5";
             six = six || call == "cancel 6";
         }
-        CHECK(five && !six);
+        CHECK(!five && !six);             // the old roster's run moves go stale with the generation, for the token cleanup
         CHECK(HasEvent(core, "run_members", "membership=1"));
     }
 
@@ -445,7 +447,7 @@ namespace
         uint32_t generation = core.generation;
         core.Settle(world, counter, step);
         CHECK(core.mode == Mode::Released && core.reason == "step_due");
-        CHECK(core.generation != generation && world.cancelled.size() == 5);
+        CHECK(core.generation != generation && world.cancelled.empty());
         CHECK(core.Control() == Control::Released);
         CHECK(!runrules::Accepts(core.mode, core.Stamp(), core.Stamp(), true));
 
@@ -460,7 +462,7 @@ namespace
         core.Prepare(world, counter, true);
         core.Settle(world, counter, inside);
         CHECK(core.mode == Mode::Lead && core.choose && core.reason == "handed_back");
-        CHECK(core.generation != generation && world.cancelled.size() == 5);
+        CHECK(core.generation != generation && world.cancelled.empty());
 
         // No living pack ahead: released.
         core.Prepare(world, counter, false);
@@ -714,6 +716,72 @@ namespace
         CHECK(place == 33);
     }
 
+    void Tokens()
+    {
+        uint32_t counter = 0;
+        std::set<uint32_t> used;
+        auto inUse = [&](uint32_t token) { return used.count(token) > 0; };
+        const uint32_t first = runrules::NextToken(counter, inUse);
+        CHECK(first == (runrules::RUN_TOKEN_BIT | 1u) && runrules::IsRunToken(first));
+        CHECK(!runrules::IsRunToken(36));                   // a map id, as MoveTo used
+        CHECK(!runrules::IsRunToken(runrules::RUN_TOKEN_BIT)); // never the bit alone
+        // Skips a token a record or a stack still holds.
+        used.insert(runrules::RUN_TOKEN_BIT | 2u);
+        CHECK(runrules::NextToken(counter, inUse) == (runrules::RUN_TOKEN_BIT | 3u));
+        // Wraps to 1, never to 0, and skips a surviving token there too.
+        counter = 0x7FFFFFFEu;
+        CHECK(runrules::NextToken(counter, inUse) == (runrules::RUN_TOKEN_BIT | 0x7FFFFFFFu));
+        used.insert(runrules::RUN_TOKEN_BIT | 1u);
+        // 1 and 2 are both held: the wrap lands on 3.
+        CHECK(runrules::NextToken(counter, inUse) == (runrules::RUN_TOKEN_BIT | 3u));
+        CHECK(counter == 3u);
+    }
+
+    void Records()
+    {
+        using runrules::RecordAction;
+        runrules::RecordFacts current;
+        current.runExists = current.stampCurrent = current.memberInRun = current.onRecordInstance = true;
+        current.online = current.engine = current.inWorld = current.tokenInStack = true;
+        CHECK(runrules::RecordStep(current) == RecordAction::Keep);
+        runrules::RecordFacts gone = current;
+        gone.tokenInStack = false;
+        CHECK(runrules::RecordStep(gone) == RecordAction::Retire);
+        runrules::RecordFacts stale = current;
+        stale.stampCurrent = false;
+        CHECK(runrules::RecordStep(stale) == RecordAction::Remove);
+        // Left the instance with no stamp changed: stale all the same.
+        runrules::RecordFacts left = current;
+        left.onRecordInstance = false;
+        CHECK(runrules::RecordStep(left) == RecordAction::Remove);
+        runrules::RecordFacts ended = current;
+        ended.runExists = false;
+        CHECK(runrules::RecordStep(ended) == RecordAction::Remove);
+        runrules::RecordFacts between = stale;
+        between.teleporting = true;
+        CHECK(runrules::RecordStep(between) == RecordAction::Wait);
+        runrules::RecordFacts player = stale;
+        player.engine = false;
+        CHECK(runrules::RecordStep(player) == RecordAction::Wait);
+        runrules::RecordFacts otherMap = stale;
+        otherMap.reachable = false;          // the map pass, the member on another map: the world pass's
+        CHECK(runrules::RecordStep(otherMap) == RecordAction::Wait);
+        runrules::RecordFacts offline;
+        CHECK(runrules::RecordStep(offline) == RecordAction::Drop);
+    }
+
+    void Replacement()
+    {
+        using runrules::Removal;
+        CHECK(runrules::MayIssue({}));
+        CHECK(runrules::MayIssue({ Removal::Removed, Removal::NotFound }));
+        CHECK(!runrules::MayIssue({ Removal::Removed, Removal::Deferred }));
+        // Placement in hold stops follow and moves not the run's; the run's own token alone is left to its record.
+        CHECK(!runrules::PlanCancel({ Motion::Idle, Motion::RunToken }, true).clear);
+        CHECK(runrules::PlanCancel({ Motion::Idle, Motion::RunToken, Motion::Follow }, true).clear);
+        CHECK(!runrules::PlanCancel({ Motion::Idle, Motion::RunToken, Motion::Chase }, true).clear);
+    }
+
     void Tags()
     {
         FakeWorld world = Party();
@@ -723,6 +791,336 @@ namespace
             CHECK(event.detail.rfind("gen=1730000000.", 0) == 0);
         core.Revise("gathered", "stop=3 pull=gather");
         CHECK(core.events.back().detail.rfind("gen=1730000000." + std::to_string(core.generation) + " rev=1 ", 0) == 0);
+    }
+
+    // The members' motion stacks for RunMoves, bottom first, with hooks on removal for the callbacks a Finalize runs.
+    struct FakeMoves : MoveWorld
+    {
+        std::map<uint32_t, MoveMember> members;
+        std::map<uint32_t, std::vector<uint32_t>> stacks;
+        std::map<uint32_t, std::function<void()>> onRemove;   // by token, run once as the move is removed
+        std::set<uint32_t> deferred;                          // tokens whose removal the core defers
+        std::vector<std::string> removed;                     // "guid:token", in order
+
+        MoveMember Member(uint32_t guid) override { return members[guid]; }
+        bool HasMove(uint32_t guid, uint32_t token) override
+        {
+            const std::vector<uint32_t>& stack = stacks[guid];
+            return members[guid].online && std::find(stack.begin(), stack.end(), token) != stack.end();
+        }
+        uint32_t TopMove(uint32_t guid) override { return stacks[guid].empty() ? 0 : stacks[guid].back(); }
+        std::vector<uint32_t> MoveIds(uint32_t guid) override { return stacks[guid]; }
+        runrules::Removal RemoveMove(uint32_t guid, uint32_t token) override
+        {
+            std::vector<uint32_t>& stack = stacks[guid];
+            auto it = std::find(stack.begin(), stack.end(), token);
+            if (it == stack.end())
+                return runrules::Removal::NotFound;
+            if (deferred.count(token))
+                return runrules::Removal::Deferred;
+            stack.erase(it);
+            removed.push_back(std::to_string(guid) + ":" + std::to_string(token));
+            auto hook = onRemove.find(token);
+            if (hook != onRemove.end())
+            {
+                std::function<void()> run = hook->second;
+                onRemove.erase(hook);
+                run();
+            }
+            return runrules::Removal::Removed;
+        }
+
+        // A member in the world on map 1, instance `instance`, played by the engine.
+        void Add(uint32_t guid, uint32_t instance = 7)
+        {
+            MoveMember member;
+            member.visible = member.online = member.engine = member.inWorld = true;
+            member.mapId = 1;
+            member.instanceId = instance;
+            members[guid] = member;
+            stacks[guid] = { 0 };   // the idle move at the bottom
+        }
+        // A move that pushes `token` on top, as MovePoint does.
+        std::function<bool(uint32_t)> Push(uint32_t guid)
+        {
+            return [this, guid](uint32_t token) { stacks[guid].push_back(token); return true; };
+        }
+    };
+
+    const std::function<bool()> Always = []() { return true; };
+
+    std::map<uint32_t, RunNow> RunOf(uint32_t leader, runrules::Stamp stamp, Mode mode = Mode::Lead,
+        std::vector<uint32_t> expected = { 1, 2, 3, 4, 5 })
+    {
+        RunNow run;
+        run.stamp = stamp;
+        run.mode = mode;
+        run.instanceId = 7;
+        run.expected = expected;
+        return { { leader, run } };
+    }
+
+    void RunMoveStart()
+    {
+        const runrules::Stamp stamp = { 3, 1 };
+        FakeMoves world;
+        world.Add(2);
+        RunMoves moves;
+        // Recorded with the token on top, where the member stands.
+        CHECK(moves.Start(world, 2, stamp, 1, Always, world.Push(2)));
+        MoveRecord first;
+        CHECK(moves.Find(2, first) && runrules::IsRunToken(first.token) && world.TopMove(2) == first.token);
+        CHECK(first.mapId == 1 && first.instanceId == 7 && first.leader == 1 && runrules::Same(first.stamp, stamp));
+        // The next replaces it: the previous token removed, one record.
+        CHECK(moves.Start(world, 2, stamp, 1, Always, world.Push(2)));
+        MoveRecord second;
+        CHECK(moves.Find(2, second) && second.token != first.token && !world.HasMove(2, first.token) && moves.Size() == 1);
+        // A run token no record holds is swept; an id outside the run's namespace stays.
+        const uint32_t leaked = runrules::RUN_TOKEN_BIT | 0x7FFFFF01u;
+        world.stacks[2].insert(world.stacks[2].begin() + 1, leaked);
+        world.stacks[2].insert(world.stacks[2].begin() + 1, 42u);
+        CHECK(moves.Start(world, 2, stamp, 1, Always, world.Push(2)));
+        CHECK(!world.HasMove(2, leaked) && world.HasMove(2, 42u) && !world.HasMove(2, second.token));
+        // A move that started nothing on top records nothing, and the old record is gone with its move.
+        MoveRecord third;
+        CHECK(moves.Find(2, third));
+        CHECK(moves.Start(world, 2, stamp, 1, Always, [](uint32_t) { return true; }));
+        CHECK(!moves.Find(2, third) && moves.Size() == 0);
+        // Between maps, or not visible to the pass: nothing.
+        world.members[2].teleporting = true;
+        CHECK(!moves.Start(world, 2, stamp, 1, Always, world.Push(2)) && moves.Size() == 0);
+        world.members[2].teleporting = false;
+        world.members[2].visible = false;
+        CHECK(!moves.Start(world, 2, stamp, 1, Always, world.Push(2)) && moves.Size() == 0);
+    }
+
+    void RunMoveDeferredAndStale()
+    {
+        const runrules::Stamp stamp = { 3, 1 };
+        FakeMoves world;
+        world.Add(2);
+        RunMoves moves;
+        moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+        MoveRecord first;
+        CHECK(moves.Find(2, first));
+        // The previous token's removal deferred: nothing issued, the record kept.
+        world.deferred.insert(first.token);
+        bool issued = false;
+        CHECK(!moves.Start(world, 2, stamp, 1, Always, [&](uint32_t) { issued = true; return true; }));
+        MoveRecord kept;
+        CHECK(!issued && moves.Find(2, kept) && kept.token == first.token);
+        world.deferred.clear();
+        // The plan moved on while the previous move was removed: nothing issued, and the old record retired.
+        bool current = true;
+        world.onRemove[first.token] = [&]() { current = false; };
+        CHECK(!moves.Start(world, 2, stamp, 1, [&]() { return current; }, [&](uint32_t) { issued = true; return true; }));
+        CHECK(!issued && moves.Size() == 0 && !world.HasMove(2, first.token));
+    }
+
+    void RunMoveCallbackReplacement()
+    {
+        const runrules::Stamp stamp = { 3, 1 };
+        FakeMoves world;
+        world.Add(2);
+        RunMoves moves;
+        moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+        MoveRecord first;
+        CHECK(moves.Find(2, first));
+        // The previous move's Finalize starts and records a run move of its own: it stands, and the outer call issues
+        // nothing and neither overwrites nor removes it.
+        bool inner = false;
+        world.onRemove[first.token] = [&]() { inner = moves.Start(world, 2, stamp, 1, Always, world.Push(2)); };
+        bool issued = false;
+        CHECK(!moves.Start(world, 2, stamp, 1, Always, [&](uint32_t) { issued = true; return true; }));
+        MoveRecord now;
+        CHECK(inner && !issued && moves.Find(2, now) && now.token != first.token && world.TopMove(2) == now.token);
+    }
+
+    void RunMoveIssueReentrancy()
+    {
+        const runrules::Stamp stamp = { 3, 1 };
+        MoveRecord record;
+        // A callback during the move starts a run move after this one: its sweep takes this one, its record stands.
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            uint32_t ours = 0;
+            bool inner = false;
+            const bool outer = moves.Start(world, 2, stamp, 1, Always, [&](uint32_t token)
+            {
+                ours = token;
+                world.stacks[2].push_back(token);
+                inner = moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+                return true;
+            });
+            CHECK(!outer && inner && moves.Find(2, record) && record.token != ours && world.TopMove(2) == record.token
+                && !world.HasMove(2, ours));
+        }
+        // A callback records its move first and this one lands on top: this one yields and is removed.
+        // With the removal deferred, the callback's record stands all the same.
+        for (bool deferred : { false, true })
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            uint32_t ours = 0;
+            bool inner = false;
+            const bool outer = moves.Start(world, 2, stamp, 1, Always, [&](uint32_t token)
+            {
+                ours = token;
+                inner = moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+                world.stacks[2].push_back(token);
+                if (deferred)
+                    world.deferred.insert(token);
+                return true;
+            });
+            CHECK(!outer && inner && moves.Find(2, record) && record.token != ours && world.HasMove(2, record.token));
+            CHECK(world.HasMove(2, ours) == deferred);
+        }
+        // The yielding removal's own callback replaces the callback's move again: the last record stands.
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            uint32_t first = 0, ours = 0;
+            bool second = false;
+            const bool outer = moves.Start(world, 2, stamp, 1, Always, [&](uint32_t token)
+            {
+                ours = token;
+                moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+                MoveRecord made;
+                moves.Find(2, made);
+                first = made.token;
+                world.stacks[2].push_back(token);
+                world.onRemove[token] = [&]() { second = moves.Start(world, 2, stamp, 1, Always, world.Push(2)); };
+                return true;
+            });
+            CHECK(!outer && second && moves.Find(2, record) && record.token != first && record.token != ours
+                && world.TopMove(2) == record.token && !world.HasMove(2, first) && !world.HasMove(2, ours) && moves.Size() == 1);
+        }
+        // A callback whose own run move cannot go out, its sweep of this one deferred: this one is recorded.
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            uint32_t ours = 0;
+            bool inner = true;
+            const bool outer = moves.Start(world, 2, stamp, 1, Always, [&](uint32_t token)
+            {
+                ours = token;
+                world.stacks[2].push_back(token);
+                world.deferred.insert(token);
+                inner = moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+                return true;
+            });
+            CHECK(outer && !inner && moves.Find(2, record) && record.token == ours && world.TopMove(2) == ours);
+        }
+    }
+
+    void RunMoveCleanup()
+    {
+        const runrules::Stamp stamp = { 3, 1 };
+        // A current record is kept, its move untouched.
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+            moves.Clean(world, RunOf(1, stamp));
+            CHECK(moves.Size() == 1 && world.removed.empty());
+        }
+        // After the run ended, and after it was removed: the move removed and the record retired.
+        for (bool removedRun : { false, true })
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+            MoveRecord record;
+            CHECK(moves.Find(2, record));
+            moves.Clean(world, removedRun ? std::map<uint32_t, RunNow>() : RunOf(1, { 4, 0 }, Mode::Ended));
+            CHECK(moves.Size() == 0 && !world.HasMove(2, record.token) && world.removed.size() == 1);
+        }
+        // A new generation or plan revision, or a member no longer expected: stale.
+        for (int which = 0; which < 3; ++which)
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+            std::map<uint32_t, RunNow> runs = which == 0 ? RunOf(1, { 4, 0 }) : which == 1 ? RunOf(1, { 3, 2 })
+                : RunOf(1, stamp, Mode::Lead, { 1, 3, 4, 5, 6 });
+            moves.Clean(world, runs);
+            CHECK(moves.Size() == 0 && world.removed.size() == 1);
+        }
+        // Off the record's instance: a map's pass, which cannot see the member, leaves it; the world pass removes it.
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+            world.members[2].instanceId = 8;
+            world.members[2].visible = false;
+            moves.Clean(world, RunOf(1, stamp), 1);
+            CHECK(moves.Size() == 1 && world.removed.empty());
+            world.members[2].visible = true;
+            moves.Clean(world, RunOf(1, stamp));
+            CHECK(moves.Size() == 0 && world.removed.size() == 1);
+        }
+        // Between maps, or a player's: left for later, the move untouched. Offline: dropped, the stack gone with it.
+        {
+            FakeMoves world;
+            world.Add(2);
+            world.Add(3);
+            world.Add(4);
+            RunMoves moves;
+            for (uint32_t guid : { 2u, 3u, 4u })
+                moves.Start(world, guid, stamp, 1, Always, world.Push(guid));
+            world.members[2].teleporting = true;
+            world.members[3].engine = false;
+            world.members[4].online = false;
+            moves.Clean(world, RunOf(1, { 4, 0 }));
+            MoveRecord record;
+            CHECK(moves.Find(2, record) && moves.Find(3, record) && !moves.Find(4, record) && world.removed.empty());
+        }
+        // A move gone from the stack without the run's removal: retired, nothing removed.
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+            world.stacks[2].pop_back();
+            moves.Clean(world, RunOf(1, stamp));
+            CHECK(moves.Size() == 0 && world.removed.empty());
+        }
+        // A removal whose callback records a replacement: the replacement's record stays.
+        {
+            FakeMoves world;
+            world.Add(2);
+            RunMoves moves;
+            moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+            MoveRecord stale;
+            CHECK(moves.Find(2, stale));
+            const runrules::Stamp next = { 4, 0 };
+            world.onRemove[stale.token] = [&]() { moves.Start(world, 2, next, 1, Always, world.Push(2)); };
+            moves.Clean(world, RunOf(1, next));
+            MoveRecord now;
+            CHECK(moves.Find(2, now) && now.token != stale.token && runrules::Same(now.stamp, next)
+                && world.HasMove(2, now.token));
+        }
+        // A map's pass sees its own run's records only.
+        {
+            FakeMoves world;
+            world.Add(2);
+            world.Add(12);
+            RunMoves moves;
+            moves.Start(world, 2, stamp, 1, Always, world.Push(2));
+            moves.Start(world, 12, stamp, 11, Always, world.Push(12));
+            moves.Clean(world, RunOf(1, { 4, 0 }), 1);
+            MoveRecord record;
+            CHECK(!moves.Find(2, record) && moves.Find(12, record) && world.removed.size() == 1);
+        }
     }
 }
 
@@ -753,7 +1151,15 @@ int main()
     NoRoute();
     NewlyHeldCancelled();
     CachedDestination();
+    Tokens();
+    Records();
+    Replacement();
     Tags();
+    RunMoveStart();
+    RunMoveDeferredAndStale();
+    RunMoveCallbackReplacement();
+    RunMoveIssueReentrancy();
+    RunMoveCleanup();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }
