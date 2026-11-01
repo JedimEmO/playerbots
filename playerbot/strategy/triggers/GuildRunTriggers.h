@@ -1,5 +1,6 @@
 #pragma once
 #include "playerbot/strategy/Trigger.h"
+#include "playerbot/GuildRunState.h"
 
 namespace ai
 {
@@ -150,6 +151,33 @@ namespace ai
     public:
         RunReachedTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run reached") {}
         bool IsActive() override;
+    };
+
+    // The leader, in lead, while its party fights or its pull comes: the run's tactics are to be decided again
+    // (GuildTactics::Look): no plan under the run's stamp, the plan stale, or a cast with nobody on it after a while.
+    // Its event carries the stamp and why.
+    class RunTacticsTrigger : public RunTrigger
+    {
+    public:
+        RunTacticsTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run tactics") {}
+        bool IsActive() override;
+        Event Check() override;
+
+    private:
+        std::string why;
+    };
+
+    // A member the engine plays, the leader among them, that the run's plan has interrupt a creature's summon or heal now,
+    // with an interrupt it can cast at it now (GuildTactics::InterruptDue). Its event carries the run's stamp as it is now.
+    class RunInterruptTrigger : public RunTrigger
+    {
+    public:
+        RunInterruptTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run interrupt") {}
+        bool IsActive() override;
+        Event Check() override;
+
+    private:
+        GuildRunStamp stamp;
     };
 
     // Waiting at the stop before, the leader finds the way to the pull spot, the spot and its stands out of every blocker's

@@ -4,6 +4,7 @@
 #include "GuildRunCore.h"
 #include "GuildRunPlayer.h"
 #include "GuildRunGuard.h"
+#include "GuildRunTactics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -3051,6 +3052,351 @@ namespace
             CHECK(HasEvent(core, "run_block", "result=fail stop=71 count=3/3 reasons=blocker:3600052"));
         }
     }
+
+    // Tactics (GuildRunTactics.h): fixtures by what creatures can do, never by entry.
+    using runtactics::Cc;
+    using runtactics::Foe;
+    using runtactics::Member;
+    using runtactics::Type;
+
+    Foe MakeFoe(uint32_t guid, Type type, bool elite, uint32_t health = 100)
+    {
+        Foe f;
+        f.guid = guid;
+        f.type = type;
+        f.elite = elite;
+        f.health = health;
+        return f;
+    }
+
+    // A warrior tank, a priest, a mage, a rogue and a hunter, as the lab's parties are.
+    std::vector<Member> Party5()
+    {
+        std::vector<Member> party(5);
+        for (uint32_t i = 0; i < 5; ++i)
+            party[i].guid = i + 1;
+        party[0].interrupt = true;                  // Shield Bash
+        party[1].cc = { Cc::Shackle };
+        party[2].cc = { Cc::Polymorph };
+        party[2].snare = true;                      // Frost Nova
+        party[3].cc = { Cc::Sap };
+        party[3].interrupt = party[3].snare = true; // Kick, Gouge
+        party[4].snare = true;                      // Concussive Shot
+        return party;
+    }
+
+    bool HasCc(const runtactics::Plan& plan, uint32_t member, uint32_t foe, Cc cc)
+    {
+        return std::any_of(plan.cc.begin(), plan.cc.end(), [&](const runtactics::Assignment& a)
+            { return a.member == member && a.foe == foe && a.cc == cc; });
+    }
+
+    void TacticsOrderAndCc()
+    {
+        // A foundry-like pack: two summoners and two that flee, humanoid elites, before the pull.
+        std::vector<Foe> pack = { MakeFoe(11, Type::Humanoid, true), MakeFoe(12, Type::Humanoid, true),
+            MakeFoe(13, Type::Humanoid, true, 90), MakeFoe(14, Type::Humanoid, true) };
+        pack[2].summons = pack[3].summons = true;
+        pack[0].flees = pack[1].flees = true;
+        runtactics::Plan plan = runtactics::Decide(pack, Party5());
+        CHECK(plan.skull == 13 && plan.cross == 14 && plan.tank == 13);
+        // Crowd control on the two that are last in the order, by whoever can: the mage's Polymorph, the rogue's Sap.
+        CHECK(plan.cc.size() == 2 && HasCc(plan, 3, 12, Cc::Polymorph) && HasCc(plan, 4, 11, Cc::Sap));
+        CHECK(plan.order == (std::vector<uint32_t>{ 13, 14 }));
+        // In a fight Sap no longer fits: only the Polymorph.
+        for (Foe& f : pack)
+            f.inFight = true;
+        plan = runtactics::Decide(pack, Party5());
+        CHECK(plan.cc.size() == 1 && HasCc(plan, 3, 12, Cc::Polymorph));
+        // The same facts on other creatures, beasts this time: the same order, and Polymorph still fits.
+        std::vector<Foe> beasts = pack;
+        for (Foe& f : beasts)
+        {
+            f.guid += 100;
+            f.type = Type::Beast;
+        }
+        plan = runtactics::Decide(beasts, Party5());
+        CHECK(plan.skull == 113 && plan.cross == 114 && HasCc(plan, 3, 112, Cc::Polymorph));
+        // An immune creature is skipped for that crowd control.
+        pack[1].immune = 1u << uint8_t(Cc::Polymorph);
+        plan = runtactics::Decide(pack, Party5());
+        CHECK(!HasCc(plan, 3, 12, Cc::Polymorph) && HasCc(plan, 3, 11, Cc::Polymorph));
+    }
+
+    void TacticsUndeadAndSmall()
+    {
+        // A gate-like pack of undead: the priest's Shackle, no Polymorph and no Sap.
+        std::vector<Foe> pack = { MakeFoe(21, Type::Undead, true), MakeFoe(22, Type::Undead, true, 60),
+            MakeFoe(23, Type::Undead, false), MakeFoe(24, Type::Undead, false, 80), MakeFoe(25, Type::Undead, false, 50) };
+        runtactics::Plan plan = runtactics::Decide(pack, Party5());
+        CHECK(plan.skull == 25 && plan.cross == 22);
+        CHECK(plan.cc.size() == 1 && plan.cc[0].member == 2 && plan.cc[0].cc == Cc::Shackle);
+        CHECK(plan.cc[0].foe != plan.skull && plan.cc[0].foe != plan.cross);
+        // Two non-elites: no crowd control at all.
+        std::vector<Foe> small = { MakeFoe(31, Type::Humanoid, false), MakeFoe(32, Type::Humanoid, false) };
+        CHECK(runtactics::Decide(small, Party5()).cc.empty());
+        CHECK(runtactics::BigPull({ MakeFoe(41, Type::Beast, true), MakeFoe(42, Type::Beast, true) }));
+        // A person's character is never assigned anything.
+        std::vector<Member> party = Party5();
+        party[2].engine = false;
+        party[1].engine = false;
+        plan = runtactics::Decide(pack, party);
+        CHECK(plan.cc.empty());
+    }
+
+    void TacticsInterruptsAndFlee()
+    {
+        std::vector<Foe> pack = { MakeFoe(51, Type::Humanoid, true), MakeFoe(52, Type::Humanoid, true, 24),
+            MakeFoe(53, Type::Humanoid, true, 30) };
+        pack[0].summons = pack[0].casting = pack[0].interruptible = true;
+        pack[1].flees = pack[2].flees = true;
+        pack[1].inFight = pack[2].inFight = pack[0].inFight = true;
+        runtactics::Plan plan = runtactics::Decide(pack, Party5());
+        // The summon is interrupted, by a free member that has one.
+        CHECK(plan.interrupts.size() == 1 && plan.interrupts[0].foe == 51);
+        // The one at 24% is snared before it runs; the one at 30% is not.
+        CHECK(plan.snares.size() == 1 && plan.snares[0].foe == 52);
+        // An uninterruptible cast gets no interrupt.
+        pack[0].interruptible = false;
+        CHECK(runtactics::Decide(pack, Party5()).interrupts.empty());
+        // One on the healer is the tank's target, ahead of its own skull.
+        pack[2].onHealer = true;
+        plan = runtactics::Decide(pack, Party5());
+        CHECK(plan.skull == 51 && plan.tank == 53);
+    }
+
+    void TacticsStale()
+    {
+        std::vector<Foe> pack = { MakeFoe(61, Type::Humanoid, true), MakeFoe(62, Type::Humanoid, true),
+            MakeFoe(63, Type::Humanoid, true) };
+        pack[0].summons = true;
+        runtactics::Plan plan = runtactics::Decide(pack, Party5());
+        const std::vector<uint32_t> planned = { 61, 62, 63 };
+        CHECK(!runtactics::Stale(plan, pack, planned, false));
+        // A summon joins: stale.
+        std::vector<Foe> withGolem = pack;
+        withGolem.push_back(MakeFoe(64, Type::Mechanical, true));
+        CHECK(runtactics::Stale(plan, withGolem, planned, false));
+        // The skull dies: stale.
+        std::vector<Foe> skullDead = { pack[1], pack[2] };
+        CHECK(runtactics::Stale(plan, skullDead, planned, false));
+        // A crowd control failed, or a new cast to interrupt: stale.
+        CHECK(runtactics::Stale(plan, pack, planned, true));
+        std::vector<Foe> casting = pack;
+        casting[0].casting = casting[0].interruptible = true;
+        CHECK(runtactics::Stale(plan, casting, planned, false));
+        // A failed crowd control is retried twice, then let go.
+        CHECK(runtactics::KeepAssignment(false, 1) && !runtactics::KeepAssignment(false, 2) && runtactics::KeepAssignment(true, 5));
+    }
+
+    // Interrupts as the adapter uses them (item 5, first experiment): only a member whose interrupt reaches the caster, the
+    // members in the order given, a cast nobody can take not deciding again on every look, and a retry for it.
+    void TacticsInterruptReach()
+    {
+        std::vector<Foe> pack = { MakeFoe(71, Type::Humanoid, true), MakeFoe(72, Type::Humanoid, true) };
+        pack[0].summons = pack[0].casting = pack[0].interruptible = true;
+        for (Foe& f : pack)
+            f.inFight = true;
+        std::vector<Member> party = Party5();
+        // The rogue first, as the adapter asks those that deal damage first; out of its Kick's reach, the warrior's.
+        std::swap(party[0], party[3]);
+        party[0].beyond = { 71 };
+        runtactics::Plan plan = runtactics::Decide(pack, party);
+        CHECK(plan.interrupts.size() == 1 && plan.interrupts[0].member == 1 && plan.interrupts[0].foe == 71);
+        CHECK(runtactics::InterrupterOf(plan, 71) == 1 && runtactics::InterruptFor(plan, 1) == 71 && runtactics::InterruptFor(plan, 4) == 0);
+        // Nobody reaches it: no pair, and still not stale on the next look, so the plan is not decided on every tick.
+        party[3].beyond = { 71 };
+        plan = runtactics::Decide(pack, party);
+        plan.at = 1000;
+        const std::vector<uint32_t> planned = { 71, 72 };
+        CHECK(plan.interrupts.empty() && plan.casts == (std::vector<uint32_t>{ 71 }));
+        CHECK(!runtactics::Stale(plan, pack, planned, false));
+        // Due again only after the retry time, while the cast goes on.
+        CHECK(!runtactics::Due(plan, pack, planned, 1000 + runtactics::RETRY_MS - 1));
+        CHECK(runtactics::Due(plan, pack, planned, 1000 + runtactics::RETRY_MS));
+        std::vector<Foe> stopped = pack;
+        stopped[0].casting = false;
+        CHECK(!runtactics::Due(plan, stopped, planned, 1000 + runtactics::RETRY_MS));
+        // A person's character is never asked, even with the only interrupt in reach.
+        party = Party5();
+        for (Member& m : party)
+            if (m.guid != 1)
+                m.interrupt = false;
+        party[0].engine = false;
+        CHECK(runtactics::Decide(pack, party).interrupts.empty());
+    }
+
+    void TacticsSpentAndEnded()
+    {
+        std::vector<Foe> pack = { MakeFoe(81, Type::Humanoid, true), MakeFoe(82, Type::Humanoid, true) };
+        pack[0].summons = pack[0].casting = pack[0].interruptible = true;
+        runtactics::Plan plan = runtactics::Decide(pack, Party5());
+        plan.at = 0;
+        const std::vector<uint32_t> planned = { 81, 82 };
+        const uint32_t first = runtactics::InterrupterOf(plan, 81);
+        CHECK(first != 0 && !runtactics::Due(plan, pack, planned, 10000));
+        // The interrupt tried and the cast goes on (a dodge): the pair is spent, and the retry asks the others.
+        runtactics::Spent(plan, first, 81);
+        CHECK(runtactics::InterrupterOf(plan, 81) == 0 && runtactics::Due(plan, pack, planned, 10000));
+        std::vector<Member> party = Party5();
+        for (Member& m : party)
+            if (m.guid == first)
+                m.interrupt = false;      // its interrupt is on cooldown now
+        runtactics::Plan again = runtactics::Decide(pack, party);
+        CHECK(runtactics::InterrupterOf(again, 81) != 0 && runtactics::InterrupterOf(again, 81) != first);
+        // The cast ended: its next cast is a new one, and the plan is stale for it.
+        runtactics::Ended(again, 81);
+        CHECK(again.casts.empty() && again.interrupts.empty() && runtactics::Stale(again, pack, planned, false));
+        std::vector<Foe> quiet = pack;
+        quiet[0].casting = false;
+        CHECK(!runtactics::Stale(again, quiet, planned, false));
+    }
+
+    void TacticsNoLoops()
+    {
+        // About to flee with nobody to snare it (no snares in the first experiment): stale once, then not again.
+        std::vector<Foe> pack = { MakeFoe(91, Type::Humanoid, true, 20), MakeFoe(92, Type::Humanoid, true) };
+        pack[0].flees = true;
+        std::vector<Member> party = Party5();
+        for (Member& m : party)
+            m.snare = false;
+        const std::vector<uint32_t> planned = { 91, 92 };
+        runtactics::Plan plan = runtactics::Decide({ MakeFoe(91, Type::Humanoid, true), pack[1] }, party);
+        CHECK(runtactics::Stale(plan, pack, planned, false));
+        plan = runtactics::Decide(pack, party);
+        CHECK(plan.snares.empty() && plan.fleeing == (std::vector<uint32_t>{ 91 }) && !runtactics::Stale(plan, pack, planned, false));
+        // A creature newly on the healer: stale, and the tank's target; still on the healer after, not stale again. A
+        // healer of their own stays the skull, ahead of it.
+        std::vector<Foe> onHealer = pack;
+        onHealer[1].onHealer = true;
+        CHECK(runtactics::Stale(plan, onHealer, planned, false));
+        plan = runtactics::Decide(onHealer, party);
+        CHECK(plan.tank == 92 && plan.skull == 92 && !runtactics::Stale(plan, onHealer, planned, false));
+        onHealer[0].heals = true;
+        plan = runtactics::Decide(onHealer, party);
+        CHECK(plan.tank == 92 && plan.skull == 91 && !runtactics::Stale(plan, onHealer, planned, false));
+        // Two on the healer: the tank takes the first of the order, and the other does not make it stale on every look.
+        std::vector<Foe> both = onHealer;
+        both[0].onHealer = true;
+        plan = runtactics::Decide(both, party);
+        CHECK(plan.tank == 91 && !runtactics::Stale(plan, both, planned, false));
+    }
+
+    void TacticsSpellKinds()
+    {
+        namespace fx = runtactics::effect;
+        // From effects alone: summons of creatures and totems, heals direct and over time; not a critter, an object or
+        // an item, nor a damaging spell.
+        CHECK(runtactics::EffectKind(fx::SUMMON_GUARDIAN, 0) == runtactics::KIND_SUMMON);
+        CHECK(runtactics::EffectKind(fx::SUMMON, 0) == runtactics::KIND_SUMMON && runtactics::EffectKind(fx::SUMMON_WILD, 0) == runtactics::KIND_SUMMON);
+        CHECK(runtactics::EffectKind(88, 0) == runtactics::KIND_SUMMON && runtactics::EffectKind(fx::SUMMON_DEMON, 0) == runtactics::KIND_SUMMON);
+        CHECK(runtactics::EffectKind(fx::HEAL, 0) == runtactics::KIND_HEAL && runtactics::EffectKind(fx::HEAL_MAX_HEALTH, 0) == runtactics::KIND_HEAL);
+        CHECK(runtactics::EffectKind(fx::APPLY_AURA, fx::AURA_PERIODIC_HEAL) == runtactics::KIND_HEAL);
+        CHECK(runtactics::EffectKind(fx::APPLY_AURA, 3) == runtactics::KIND_NONE);   // periodic damage
+        CHECK(runtactics::EffectKind(97, 0) == runtactics::KIND_NONE);               // a critter
+        CHECK(runtactics::EffectKind(76, 0) == runtactics::KIND_NONE);               // an object
+        CHECK(runtactics::EffectKind(2, 0) == runtactics::KIND_NONE);                // school damage
+        CHECK(runtactics::Triggers(fx::TRIGGER_SPELL) && runtactics::Triggers(fx::TRIGGER_MISSILE) && !runtactics::Triggers(fx::SUMMON));
+        // The same rules on two creatures that do the same things, whatever they are: the same order.
+        std::vector<Foe> a = { MakeFoe(101, Type::Humanoid, true), MakeFoe(102, Type::Humanoid, true, 50) };
+        a[0].heals = true;
+        std::vector<Foe> b = { MakeFoe(201, Type::Elemental, false), MakeFoe(202, Type::Dragonkin, false, 50) };
+        b[0].heals = true;
+        CHECK(runtactics::KillOrder(a) == (std::vector<uint32_t>{ 101, 102 }) && runtactics::KillOrder(b) == (std::vector<uint32_t>{ 201, 202 }));
+    }
+
+    void TacticsOutcomesAndStamps()
+    {
+        CHECK(runtactics::Judge(true, false) == runtactics::Outcome::Interrupted);
+        CHECK(runtactics::Judge(true, true) == runtactics::Outcome::Missed);
+        CHECK(runtactics::Judge(false, true) == runtactics::Outcome::NotCast && runtactics::Judge(false, false) == runtactics::Outcome::NotCast);
+        CHECK(std::string(runtactics::OutcomeName(runtactics::Outcome::Interrupted)) == "interrupted");
+        // A plan acts only under the run's stamp now and the action's: an older revision or generation does nothing.
+        CHECK(runtactics::PlanCurrent(7, 40, 7, 40, 7, 40));
+        CHECK(!runtactics::PlanCurrent(7, 39, 7, 40, 7, 40) && !runtactics::PlanCurrent(6, 40, 7, 40, 7, 40));
+        CHECK(!runtactics::PlanCurrent(7, 40, 7, 40, 7, 39) && !runtactics::PlanCurrent(0, 0, 0, 0, 0, 0));
+        CHECK(runtactics::RoleRank(runtactics::Role::Dps) < runtactics::RoleRank(runtactics::Role::Tank)
+            && runtactics::RoleRank(runtactics::Role::Tank) < runtactics::RoleRank(runtactics::Role::Healer));
+    }
+
+    // The tank's pick (runtactics::TankPick): the first of the kill order on the healer; else the last pick while it is
+    // still in the order on the tank or a member; else the first on a member who is not a tank, the skull left out; else
+    // none; never a creature left out of the order.
+    void TacticsTankPick()
+    {
+        using runtactics::Victim;
+        using Victims = std::vector<std::pair<uint32_t, Victim>>;
+        const std::vector<uint32_t> order = { 1, 2, 3 };
+        // No skull and no last pick.
+        // The healer first, whatever the order.
+        CHECK(runtactics::TankPick(order, Victims{ { 2, Victim::Member }, { 3, Victim::Healer } }, 0, 0) == 3);
+        // One on the tank is not picked; the one on a member is.
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Tank }, { 2, Victim::Member } }, 0, 0) == 2);
+        // Two on members: the kill order first.
+        CHECK(runtactics::TankPick(order, Victims{ { 3, Victim::Member }, { 2, Victim::Member } }, 0, 0) == 2);
+        // Every creature on the tank, or on none: nothing.
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Tank }, { 2, Victim::Tank }, { 3, Victim::Tank } }, 0, 0) == 0);
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::None }, { 2, Victim::None }, { 3, Victim::None } }, 0, 0) == 0);
+        CHECK(runtactics::TankPick(order, Victims{}, 0, 0) == 0);
+        // A creature on the healer left out of the order, crowd-controlled, is never picked; the next on a member is.
+        CHECK(runtactics::TankPick({ 1, 3 }, Victims{ { 2, Victim::Healer }, { 3, Victim::Member } }, 0, 0) == 3);
+        CHECK(runtactics::TankPick({ 1, 3 }, Victims{ { 2, Victim::Healer } }, 0, 0) == 0);
+        // An empty order: nothing, whoever is on whom.
+        CHECK(runtactics::TankPick({}, Victims{ { 1, Victim::Healer }, { 2, Victim::Member } }, 0, 0) == 0);
+        // A victim for a creature not in the order, and a creature in the order with no victim: no effect.
+        CHECK(runtactics::TankPick(order, Victims{ { 9, Victim::Healer }, { 2, Victim::Member } }, 0, 0) == 2);
+        CHECK(runtactics::TankPick(order, Victims{ { 9, Victim::Healer } }, 0, 0) == 0);
+
+        // The skull, first in the order (a summoner), is never picked off a member: the tank goes to it through the mark.
+        // The summoner on a member from range and a golem on a member: the golem.
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Member }, { 2, Victim::Member } }, 1, 0) == 2);
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Member }, { 3, Victim::Member }, { 2, Victim::Tank } }, 1, 0) == 3);
+        // The summoner alone on a member: nothing, the mark.
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Member }, { 2, Victim::Tank } }, 1, 0) == 0);
+        // The summoner on the healer: the summoner, whatever is on a member.
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Healer }, { 2, Victim::Member } }, 1, 0) == 1);
+        // The skull on a member is skipped only as the skull: not first in the order, the same.
+        CHECK(runtactics::TankPick(order, Victims{ { 2, Victim::Member }, { 3, Victim::Member } }, 2, 0) == 3);
+
+        // The last pick is kept while it lives in the order on the tank or a member.
+        // On the tank now, another on a member: the last, kept.
+        CHECK(runtactics::TankPick(order, Victims{ { 2, Victim::Member }, { 3, Victim::Tank } }, 1, 3) == 3);
+        // On the tank now, alone: kept, not let go back to the mark.
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Member }, { 3, Victim::Tank } }, 1, 3) == 3);
+        // Still on a member: kept over one before it in the order.
+        CHECK(runtactics::TankPick(order, Victims{ { 2, Victim::Member }, { 3, Victim::Member } }, 1, 3) == 3);
+        // On the tank, with another on the healer: the healer's.
+        CHECK(runtactics::TankPick(order, Victims{ { 2, Victim::Healer }, { 3, Victim::Tank } }, 1, 3) == 2);
+        // On nobody now (crowd-controlled, or let go): dropped, the next on a member.
+        CHECK(runtactics::TankPick(order, Victims{ { 2, Victim::Member }, { 3, Victim::None } }, 1, 3) == 2);
+        // Dead or gone (no victim given), or left out of the order: dropped.
+        CHECK(runtactics::TankPick(order, Victims{ { 2, Victim::Member } }, 1, 3) == 2);
+        CHECK(runtactics::TankPick({ 1, 2 }, Victims{ { 2, Victim::Member }, { 3, Victim::Tank } }, 1, 3) == 2);
+        CHECK(runtactics::TankPick({ 1, 2 }, Victims{ { 3, Victim::Tank } }, 1, 3) == 0);
+        // The skull as the last pick, taken off the healer, is not kept once on the tank: the mark has it.
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Tank }, { 2, Victim::Tank } }, 1, 1) == 0);
+        CHECK(runtactics::TankPick(order, Victims{ { 1, Victim::Tank }, { 2, Victim::Member } }, 1, 1) == 2);
+
+        // Decide's own tank target on a pack with one on the healer: the same creature.
+        std::vector<Foe> pack = { MakeFoe(51, Type::Humanoid, true), MakeFoe(52, Type::Humanoid, true, 24),
+            MakeFoe(53, Type::Humanoid, true, 30) };
+        pack[0].summons = true;
+        pack[1].flees = pack[2].flees = true;
+        pack[0].inFight = pack[1].inFight = pack[2].inFight = true;
+        pack[2].onHealer = true;
+        const runtactics::Plan plan = runtactics::Decide(pack, Party5());
+        Victims victims;
+        for (const Foe& foe : pack)
+            victims.push_back({ foe.guid, foe.onHealer ? Victim::Healer : Victim::Tank });
+        CHECK(plan.tank == 53 && runtactics::TankPick(plan.order, victims, plan.skull, 0) == plan.tank);
+        // The summoner skull there, first in the order, and every creature of the order on a member: the next in the order,
+        // not the skull.
+        Victims onMembers;
+        for (uint32_t foe : plan.order)
+            onMembers.push_back({ foe, Victim::Member });
+        CHECK(plan.order.size() >= 2 && plan.order[0] == plan.skull && plan.skull == 51
+            && runtactics::TankPick(plan.order, onMembers, plan.skull, 0) == plan.order[1]);
+    }
 }
 
 int main()
@@ -3133,6 +3479,16 @@ int main()
     GuardedKeepersCarriedOver();
     WaitHasNoTimer();
     BlockerBlocksAndRecovers();
+    TacticsOrderAndCc();
+    TacticsUndeadAndSmall();
+    TacticsInterruptsAndFlee();
+    TacticsStale();
+    TacticsInterruptReach();
+    TacticsSpentAndEnded();
+    TacticsNoLoops();
+    TacticsSpellKinds();
+    TacticsOutcomesAndStamps();
+    TacticsTankPick();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

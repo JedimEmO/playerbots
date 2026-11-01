@@ -118,6 +118,24 @@ namespace ai
         bool Execute(Event& event) override;
     };
 
+    // The leader decides the run's tactics again, on a fresh view and only under the trigger's stamp: the kill order and its
+    // marks, the tank's target and the interrupts (GuildTactics::Decide).
+    class RunTacticsAction : public Action
+    {
+    public:
+        RunTacticsAction(PlayerbotAI* ai) : Action(ai, "run tactics") {}
+        bool Execute(Event& event) override;
+    };
+
+    // A member interrupts the caster the run's plan gave it, under the trigger's stamp only (GuildTactics::Interrupt).
+    class RunInterruptAction : public Action
+    {
+    public:
+        RunInterruptAction(PlayerbotAI* ai) : Action(ai, "run interrupt") {}
+        bool Execute(Event& event) override;
+        bool isUseful() override;
+    };
+
     // No blocker reaches the way, the spot or its stands, so the guard lets the walk: on to the spot.
     class RunGoAction : public Action
     {
