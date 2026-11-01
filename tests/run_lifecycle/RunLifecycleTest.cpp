@@ -1537,6 +1537,21 @@ namespace
         CHECK(!runrules::LeavesParty(false, false, true, false));
     }
 
+    // A rogue frozen by `stealthed` held every run action: inside a run, no `stealth`, and the class multiplier that
+    // suspends the rest lets only the run's rebuild through, which drops it.
+    void RunStrategiesOff()
+    {
+        const std::vector<std::string>& off = runrules::OffInRun();
+        auto has = [&](const char* name) { return std::find(off.begin(), off.end(), name) != off.end(); };
+        CHECK(has("stealth"));
+        for (const char* kept : { "run lead", "run party", "run holding", "wait for attack", "threat", "dps assist",
+                                  "behind", "close", "poisons", "buff", "boost" })
+            CHECK(!has(kept));
+        CHECK(runrules::LiftsSuspension("guild run strategies"));
+        for (const char* other : { "move to run spot", "move to run walk", "run interrupt", "follow", "unstealth", "" })
+            CHECK(!runrules::LiftsSuspension(other));
+    }
+
     // Copy a's retest: clearroute killed Sneed's Shredder, whose death summoned Sneed by the lumber mill. He has no spawn,
     // so the route's model never had him; the reach test takes him as a live creature, and no walk goes past him.
     void SummonInTheWay()
@@ -3454,6 +3469,7 @@ int main()
     PersonReadiness();
     PersonLines();
     FailedPartyKeepsGroup();
+    RunStrategiesOff();
     SummonInTheWay();
     ReadinessReasons();
     ReadinessSupplies();

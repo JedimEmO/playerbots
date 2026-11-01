@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/AiFactory.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildRunRules.h"
 #include "playerbot/GuildRunState.h"
 #include "strategy/AiObjectContext.h"
 #include "strategy/ReactionEngine.h"
@@ -644,11 +645,16 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
         // Inside a run's dungeon with a living pack ahead, the run controller has the party: the leader holds a pull at
         // its spot, and a member keeps near its place in the fight (GuildRunStates). Not a member apart from the party,
         // whose place is not there.
+        // While its group has a run state, no strategy whose `stealthed` would hold the run's moves and its rebuild: the
+        // rogue's and the cat druid's `stealth` (runrules::OffInRun). After every class strategy is in, so it stays out.
         if (sGuildBotMgr.IsGuildBot(player))
         {
             const GuildRunView run = sGuildRunStates.View(player);
             if (run.valid && run.controls && !run.apart)
                 combatEngine->addStrategy(run.lead ? "run lead" : "run party");
+            if (run.valid)
+                for (const std::string& name : runrules::OffInRun())
+                    combatEngine->removeStrategy(name);
         }
     }
     else

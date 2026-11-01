@@ -773,6 +773,20 @@ namespace runrules
         return joined && (!working || !partyJob) && !keepsGroup;
     }
 
+    // The class strategies a bot has none of while its group has a run state on its map. Each, once its spell is up, adds
+    // `stealthed`, whose multiplier zeroes every action not on its own list: the run's moves and its rebuild among them.
+    inline const std::vector<std::string>& OffInRun()
+    {
+        static const std::vector<std::string> names = { "stealth" };
+        return names;
+    }
+
+    // The one action a suspending class multiplier lets through for the run: the rebuild of the strategies, which drops it.
+    inline bool LiftsSuspension(const std::string& action)
+    {
+        return action == "guild run strategies";
+    }
+
     // A walk's planning: done, not possible from here (with why), or waiting for the next tick's path searches.
     enum class PlanResult : uint8_t { Planned, Blocked, Pending };
 

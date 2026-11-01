@@ -1085,6 +1085,11 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     // travel, grind, rpg, free or follow, which pick moves of their own (GuildRunStates). While the run holds, a living
     // member inside stays where the run placed it, and the party job's follow stays off.
     const GuildRunView run = sGuildRunStates.View(player);
+    // No strategy whose `stealthed` would hold the run's moves and its rebuild while the group has a run state
+    // (runrules::OffInRun): the class strategies are in before this, so the remove holds.
+    if (run.valid)
+        for (const std::string& name : runrules::OffInRun())
+            engine->removeStrategy(name);
     if (run.valid && (run.apart || (run.mode == GuildRunMode::Hold && run.holds)))
     {
         engine->addStrategy("run holding");

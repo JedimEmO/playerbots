@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "DruidMultipliers.h"
 #include "DpsFeralDruidStrategy.h"
+#include "playerbot/GuildRunRules.h"
 
 using namespace ai;
 
@@ -1576,6 +1577,10 @@ public:
     {
         // Only allow stealth actions
         const std::string& actionName = action->getName();
+        // And a guild run's rebuild of the strategies, which drops `stealthed` and `stealth` inside a run.
+        if (runrules::LiftsSuspension(actionName))
+            return 1.0f;
+
         if ((actionName == "unstealth") ||
             (actionName == "check stealth") ||
             (actionName == "feral charge - cat") ||
