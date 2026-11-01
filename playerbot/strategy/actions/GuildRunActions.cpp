@@ -54,7 +54,8 @@ bool MoveToRunSpotAction::Execute(Event& event)
     // cached apart. Fired under a run state that has since moved on, or ended: nothing.
     const GuildRunView view = sGuildRunStates.View(bot);
     WorldPosition spot;
-    if (!view.valid || !runrules::ValidatedPlace(view.mode, view.stamp, StampOf(event), view.lead && view.mode == GuildRunMode::Lead,
+    // Stand and hold places are the controller's, never while the job has the party.
+    if (!view.valid || view.mode == GuildRunMode::Released || !runrules::ValidatedPlace(view.mode, view.stamp, StampOf(event), view.lead && view.mode == GuildRunMode::Lead,
         view, [this](const GuildRunView& at) { return GuildRunStates::PlaceOf(at, bot); }, spot))
     {
         sGuildRunStates.Refused(bot);
@@ -68,6 +69,48 @@ bool MoveToRunSpotAction::Execute(Event& event)
     return sGuildRunStates.StartRunMove(bot, view, [&](uint32 token)
     {
         return MoveTo(spot.getMapId(), spot.getX(), spot.getY(), spot.getZ(), false, false, false, false, token);
+    });
+}
+
+bool MoveToRunWalkAction::Execute(Event& event)
+{
+    if (!Settled(bot) || !bot->IsAlive())
+        return false;
+    // The walk as it is now, under the stamp of the trigger that fired: its current part, from where the bot stands.
+    const GuildRunView view = sGuildRunStates.View(bot);
+    if (!view.valid || !view.walking || view.walkPoints.size() < 2
+        || !runrules::Accepts(view.mode, view.stamp, StampOf(event), false))
+    {
+        sGuildRunStates.Refused(bot);
+        return false;
+    }
+    const WorldPosition& start = view.walkPoints.front();
+    if (start.getMapId() != bot->GetMapId() || bot->GetDistance(start.getX(), start.getY(), start.getZ()) > runrules::CHUNK_START)
+        return false;
+    // A creature found dead near the walk when it was checked that is alive again, or one the route's model does not
+    // have, as a summon, now within reach of this part: no step, and the tick plans again.
+    Map* map = bot->GetMap();
+    for (uint32 spawn : view.deadNear)
+        if (Creature* creature = map->GetCreature(spawn))
+            if (creature->IsAlive())
+                return false;
+    std::vector<runrules::Vec> part;
+    for (const WorldPosition& point : view.walkPoints)
+        part.push_back({ point.getX(), point.getY(), point.getZ() });
+    if (view.packs && !sGuildPacks.Unmodelled(*view.packs, map, part, runrules::THREAT_MARGIN).empty())
+        return false;
+    std::vector<G3D::Vector3> points;
+    points.emplace_back(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
+    for (size_t i = 1; i < view.walkPoints.size(); ++i)
+        points.emplace_back(view.walkPoints[i].getX(), view.walkPoints[i].getY(), view.walkPoints[i].getZ());
+    if (bot->IsSitState())
+        bot->SetStandState(UNIT_STAND_STATE_STAND);
+    return sGuildRunStates.StartRunMove(bot, view, [&](uint32 token)
+    {
+        if (!Settled(bot))
+            return false;
+        bot->GetMotionMaster()->MovePath(token, points, FORCED_MOVEMENT_RUN);
+        return true;
     });
 }
 
@@ -156,9 +199,9 @@ bool RunPullAction::Execute(Event& event)
         return true;
     }
 
-    // The party, checked again right before the pull: a member can die or leave after the trigger fired, with the stamp
-    // unchanged.
-    if (!GuildRunStates::Present(bot, view))
+    // The party, checked again right before the pull: a member can die, leave or come back apart after the trigger fired,
+    // with the stamp unchanged.
+    if (!sGuildRunStates.PullAllowed(bot))
         return false;
     bool started = ai->DoSpecificAction("pull my target", Event("attack anything", target->GetObjectGuid()), true);
     if (!started && !fromBefore)

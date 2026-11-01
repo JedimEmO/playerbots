@@ -82,9 +82,19 @@ struct GuildRunView
     bool choose = false;       // the leader is to choose its stop again from where it stands
     uint32 instanceId = 0;
     std::vector<uint32> expected; // the members the run waits for, the leader among them
-    // In hold: where this bot holds, when it is a living member the engine plays inside the instance.
+    // In hold: where this bot holds, when it is a living member the engine plays inside the instance and not walking.
     bool holds = false;
     ai::WorldPosition holdAt;
+    // Apart from its party (docs/run-contract.md, "Rejoining"), in any mode; walking back to it over the route's checked
+    // way, the next part of the walk as points and the creatures near it that were dead when it was checked.
+    bool apart = false;
+    bool walking = false;
+    uint32 walkId = 0;
+    size_t walkPart = 0;
+    std::vector<ai::WorldPosition> walkPoints;
+    std::vector<uint32> deadNear;
+    // Whether the party may start a fight, as of the last reconcile; the live check is GuildRunStates::PullAllowed.
+    bool permit = false;
 };
 
 // The shared state of a guild party's run inside one dungeon instance, which the party's AI plays by: the route of
@@ -125,7 +135,20 @@ public:
     // at the first stop with a living pack whose pull spot is not behind the party (FirstLiveStop by position). While the
     // job has the party, the stop follows the packs it kills. A leader outside its instance leaves the run as it is.
     // Returns what the job is told: no run, or the run's mode (GuildRunRules' Job table says what the job may do by it).
-    GuildRunControl Prepare(Player* leader, const std::string& dungeon, std::vector<std::pair<std::string, std::string>>& events);
+    // `order` is the leader's job order: a run that failed for it (Failure) is not made again for it.
+    GuildRunControl Prepare(Player* leader, const std::string& dungeon, uint32 order,
+        std::vector<std::pair<std::string, std::string>>& events);
+    // Whether the leader's party may start a fight (runrules::PullPermit): true with no run. Before the job's tick, which
+    // takes it as a parameter, so the job never asks for it under its own lock.
+    bool Permit(uint32 leaderGuid) const;
+    // A run that ended failed, as cannot_rejoin, for the leader's job order: kept, past the run's removal, until the guild
+    // manager has failed the party's jobs and says so (Acknowledge).
+    bool Failure(uint32 leaderGuid, uint32 order, std::string& reason) const;
+    void Acknowledge(uint32 leaderGuid, uint32 order);
+    // `bench clearroute`: kills every creature of the route's stops before `stop` (1 on), their pulls' extras and their
+    // reachers, in the leader's instance only, then the creatures the model does not have along the cleared way, and again
+    // on the tick for SWEEP_SECONDS for summons that come late. World thread. The lines to print.
+    std::list<std::string> ClearRoute(Player* leader, uint32 stop);
     // After it: the job's report. Events for the job: a new pull, and a leader the controller holds still for a minute.
     std::vector<std::pair<std::string, std::string>> Settle(Player* leader, const runrules::JobReport& report);
     // The job ended, changed or failed: the leader's run ends in order, and is removed two ticks on.
@@ -150,6 +173,9 @@ public:
     // Whether every expected member of the leader's run is there for a pull (GuildRunRules' Present), looked up through
     // the leader's own map, which is the run's instance. On the leader's map thread.
     static bool Present(Player* leader, const GuildRunView& view);
+    // Whether the bot's party may start a fight now: no run, or the run's permit and every expected member alive inside
+    // through the bot's own map. On the bot's map thread, right before a pull, a kill step's attack or an event start.
+    bool PullAllowed(Player* bot) const;
 
     // A member's run move, on its own map thread with no lock held (move to run spot), by runcore::RunMoves::Start. Its
     // previous run move and any run token no record holds are removed from its motion stack first; a removal deferred by
@@ -234,6 +260,9 @@ private:
         time_t changedAt = 0;      // the stop or the pull last changed
         time_t reportedPullAt = 0; // the pull the tick last reported as an event
         time_t stallReportedAt = 0;
+        uint32 order = 0;          // the leader's job order the run was made for
+        bool failureKept = false;  // its failure is in `failures`
+        std::map<size_t, bool> wayChecked; // the route's way, by its first point, WAY_CHECK_POINTS at a time: on the navmesh
     };
 
     std::shared_ptr<State> Find(uint32 instanceId) const;
@@ -263,6 +292,29 @@ private:
     std::map<uint32, std::shared_ptr<State>> byInstance;
     // Leaders and instances whose dungeon has no route, told once: the job has the party alone there, as before.
     std::set<std::pair<uint32, uint32>> unrouted;
+    // Failed runs, until the manager acknowledges them.
+    runcore::Failures failures;
+    // Path searches left in this tick for every run's walks (runrules::PLAN_BUDGET).
+    int planBudget = 0;
+    // bench clearroute's sweep of the creatures the route's model does not have, along the cleared way, kept for
+    // SWEEP_SECONDS so that a summon a script brings late is taken too. Under the registry's lock.
+    static constexpr time_t SWEEP_SECONDS = 10;
+    struct Sweep
+    {
+        uint32 leader = 0;
+        uint32 mapId = 0;
+        uint32 instanceId = 0;
+        std::shared_ptr<const GuildPacks::Route> packs;
+        std::vector<runrules::Vec> way;
+        time_t until = 0;
+        uint32 killed = 0;
+    };
+    std::vector<Sweep> sweeps;
+    // Kills the living hostile creatures the model does not have within reach of the way; their names in `names`.
+    static uint32 SweepUnmodelled(Map* map, const GuildPacks::Route& packs, const std::vector<runrules::Vec>& way,
+        std::string& names);
+    // On the world thread, each tick: every pending sweep once more, its kills as bench_clear_route events.
+    void RunSweeps(std::vector<std::tuple<uint32, std::string, std::string>>& events);
     // The generations of every run, never reused while the server runs, told with its start.
     struct Counter : runcore::Generations
     {

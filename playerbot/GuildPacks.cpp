@@ -9,6 +9,7 @@
 #include "Maps/MapManager.h"
 #include "Maps/MapPersistentStateMgr.h"
 #include "Maps/SpawnGroupDefines.h"
+#include "Movement/MoveSpline.h"
 #include "MotionGenerators/MoveMap.h"
 #include "MotionGenerators/PathFinder.h"
 #include "MotionGenerators/WaypointManager.h"
@@ -1563,16 +1564,23 @@ namespace
     }
 }
 
-int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at)
+int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at, float progress)
 {
     if (!map || route.points.empty())
         return -1;
-    // The party's place along the way: its nearest point of it.
+    // The party's place along the way: its nearest point of it, or, with the run's progress, the point near it that is
+    // nearest that progress.
     size_t nearest = 0;
-    for (size_t i = 1; i < route.points.size(); ++i)
+    std::vector<size_t> near;
+    for (size_t i = 0; i < route.points.size(); ++i)
+    {
         if ((route.points[i] - at).squaredLength() < (route.points[nearest] - at).squaredLength())
             nearest = i;
-    const float along = float(nearest) * ROUTE_STEP;
+        if ((route.points[i] - at).length() <= runrules::WAY_NEAR)
+            near.push_back(i);
+    }
+    const size_t place = runrules::PlaceAlong(near, nearest, progress >= 0.0f, progress >= 0.0f ? size_t(progress / ROUTE_STEP) : 0);
+    const float along = float(place) * ROUTE_STEP;
     // The living stop whose pull spot is at or ahead of that place, nearest along the way, judged by the spot's place,
     // not the pack's. Then the clearing stops just before it in the list, living and ahead too: they open its spot and
     // are pulled first. A clearing stop whose spot lies behind the party is passed over.
@@ -1604,6 +1612,141 @@ int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, size_t from)
     for (size_t k = from; k < route.stops.size(); ++k)
         if (StopLives(route.stops[k], map, state, now))
             return int32(k);
+    return -1;
+}
+
+std::vector<runrules::Threat> GuildPacks::Threats(const Route& route, Map* map, const std::vector<runrules::Vec>& line,
+    float margin, std::vector<uint32>& dead)
+{
+    std::vector<runrules::Threat> threats;
+    if (!map || line.empty())
+        return threats;
+    std::lock_guard<std::mutex> guard(lock);
+    const MapModel& model = Model(route.mapId);
+    MapPersistentState* state = map->GetPersistentState();
+    const time_t now = time(nullptr);
+    // The line's box, to pass over creatures far from it before the exact test.
+    float x0 = line[0].x, x1 = x0, y0 = line[0].y, y1 = y0;
+    for (const runrules::Vec& point : line)
+    {
+        x0 = std::min(x0, point.x);
+        x1 = std::max(x1, point.x);
+        y0 = std::min(y0, point.y);
+        y1 = std::max(y1, point.y);
+    }
+    auto near = [&](const G3D::Vector3& at, float reach)
+    {
+        return at.x >= x0 - reach && at.x <= x1 + reach && at.y >= y0 - reach && at.y <= y1 + reach;
+    };
+    auto vec = [](const G3D::Vector3& at) { return runrules::Vec{ at.x, at.y, at.z }; };
+    for (const Node& node : model.nodes)
+    {
+        if (!node.aggroes)
+            continue;
+        const float reach = Reach(node, route.level) + margin + (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f);
+        bool close = near(node.at, reach + 10.0f);
+        for (auto const& point : node.patrol)
+            close = close || near(point.first, reach + 10.0f);
+        if (!close)
+            continue;
+        // Dead: waiting to respawn, or found dead. Not up: missing from a grid that is loaded. Else it may be alive.
+        Creature* creature = nullptr;
+        bool alive = true;
+        if (state && state->GetCreatureRespawnTime(node.spawn) > now)
+            alive = false;
+        else if ((creature = map->GetCreature(node.spawn)))
+            alive = creature->IsAlive();
+        else if (map->IsLoaded(node.at.x, node.at.y))
+            continue;
+        if (!alive)
+        {
+            dead.push_back(node.spawn);
+            continue;
+        }
+        runrules::Threat threat;
+        threat.spawn = node.spawn;
+        threat.reach = reach;
+        if (!node.patrol.empty())
+        {
+            for (auto const& point : node.patrol)
+                threat.where.push_back(vec(point.first));
+            threat.where.push_back(vec(node.patrol.front().first));
+        }
+        else
+            threat.where.push_back(vec(node.at));
+        threats.push_back(threat);
+        // Where it is now, when that is elsewhere: drawn off by a fight, or on its way back.
+        if (creature && creature->IsInWorld())
+        {
+            const G3D::Vector3 at(creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ());
+            threat.where = { vec(at) };
+            threat.reach = Reach(node, route.level) + margin;
+            threats.push_back(threat);
+        }
+    }
+    for (const runrules::Threat& threat : UnmodelledLocked(model, route, map, line, margin))
+        threats.push_back(threat);
+    return threats;
+}
+
+std::vector<runrules::Threat> GuildPacks::Unmodelled(const Route& route, Map* map, const std::vector<runrules::Vec>& line,
+    float margin, std::vector<ObjectGuid>* found)
+{
+    if (!map || line.empty())
+        return {};
+    std::lock_guard<std::mutex> guard(lock);
+    return UnmodelledLocked(Model(route.mapId), route, map, line, margin, found);
+}
+
+std::vector<runrules::Threat> GuildPacks::UnmodelledLocked(const MapModel& model, const Route& route, Map* map,
+    const std::vector<runrules::Vec>& line, float margin, std::vector<ObjectGuid>* found) const
+{
+    std::vector<runrules::Threat> threats;
+    auto& store = map->GetObjectsStore();
+    for (auto it = store.begin<Creature>(); it != store.end<Creature>(); ++it)
+    {
+        Creature* creature = it->second;
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || creature->IsClientControlled()
+            || creature->IsPet() || creature->IsTotem() || creature->IsCivilian())
+            continue;
+        if (creature->GetMasterGuid().IsPlayer())
+            continue;
+        FactionTemplateEntry const* faction = creature->GetFactionTemplateEntry();
+        if (!faction || !faction->IsHostileToPlayers())
+            continue;
+        if (creature->GetDbGuid() && model.bySpawn.count(creature->GetDbGuid()))
+            continue;
+        // Its reach as a modelled creature's, from its own detection range and level, and more when it moves.
+        const float level = float(creature->GetLevel());
+        float reach = std::max(5.0f, float(creature->GetDetectionRange()) - (float(route.level) - level))
+            + creature->GetObjectBoundingRadius() + PLAYER_BOUNDING + margin;
+        if (!creature->movespline->Finalized() || creature->IsInCombat())
+            reach += runrules::TRAVEL_MARGIN;
+        runrules::Threat threat;
+        threat.spawn = creature->GetDbGuid();
+        threat.entry = creature->GetEntry();
+        threat.where = { { creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ() } };
+        threat.reach = reach;
+        const float d = runrules::LinesDistance(threat.where, line);
+        if (d >= 0.0f && d <= reach)
+        {
+            threats.push_back(threat);
+            if (found)
+                found->push_back(creature->GetObjectGuid());
+        }
+    }
+    return threats;
+}
+
+int32 GuildPacks::StopOf(const Route& route, uint32 spawn)
+{
+    for (size_t k = 0; k < route.stops.size(); ++k)
+    {
+        const Stop& stop = route.stops[k];
+        if (std::find(stop.spawns.begin(), stop.spawns.end(), spawn) != stop.spawns.end()
+            || std::find(stop.extras.begin(), stop.extras.end(), spawn) != stop.extras.end())
+            return int32(k);
+    }
     return -1;
 }
 

@@ -35,12 +35,67 @@ namespace
         return !dtStatusFailed(query->findNearestPoly(point, box, &filter, &ref, nearest)) && ref;
     }
 
+    G3D::Vector3 V3(const runrules::Vec& at)
+    {
+        return G3D::Vector3(at.x, at.y, at.z);
+    }
+
+    runrules::Vec VecOf(const G3D::Vector3& at)
+    {
+        return { at.x, at.y, at.z };
+    }
+
+    // The navmesh's way from one point to another, as its corners: false when there is none, or it ends short of `to`.
+    bool NavLeg(Map* map, const G3D::Vector3& from, const G3D::Vector3& to, std::vector<runrules::Vec>& path)
+    {
+        dtNavMeshQuery const* query = map ? MMAP::MMapFactory::createOrGetMMapManager()->GetNavMeshQuery(map->GetId(), map->GetInstanceId())
+            : nullptr;
+        if (!query)
+            return false;
+        dtQueryFilter filter;
+        filter.setIncludeFlags(NAV_GROUND | NAV_WATER);
+        filter.setExcludeFlags(NAV_MAGMA_SLIME);
+        // Detour's points are (y, z, x).
+        const float start[3] = { from.y, from.z, from.x }, end[3] = { to.y, to.z, to.x }, box[3] = { 3.0f, 5.0f, 3.0f };
+        dtPolyRef startRef = 0, endRef = 0;
+        float startAt[3], endAt[3];
+        if (dtStatusFailed(query->findNearestPoly(start, box, &filter, &startRef, startAt)) || !startRef
+            || dtStatusFailed(query->findNearestPoly(end, box, &filter, &endRef, endAt)) || !endRef)
+            return false;
+        dtPolyRef polys[256];
+        int count = 0;
+        if (dtStatusFailed(query->findPath(startRef, endRef, startAt, endAt, &filter, polys, &count, 256)) || !count
+            || polys[count - 1] != endRef)
+            return false;
+        float corners[64 * 3];
+        int cornerCount = 0;
+        if (dtStatusFailed(query->findStraightPath(startAt, endAt, polys, count, corners, nullptr, nullptr, &cornerCount, 64))
+            || cornerCount < 2)
+            return false;
+        path.clear();
+        for (int i = 0; i < cornerCount; ++i)
+            path.push_back({ corners[i * 3 + 2], corners[i * 3], corners[i * 3 + 1] });
+        return runrules::Distance(path.back(), VecOf(to)) <= 1.5f;
+    }
+
+    // What a run's walks are planned on: its route, the stop it is at and the last one the leader saw cleared, the way's
+    // legs already checked, and the tick's path searches left for every run.
+    struct Ground
+    {
+        std::shared_ptr<const GuildPacks::Route> packs;
+        int32 lastCleared = -1;
+        size_t index = 0;
+        std::map<size_t, bool>* wayChecked = nullptr;
+        int* budget = nullptr;
+    };
+
     // The world as one run sees it, on the world thread between map updates: its group by id, and its members through its
     // own instance's map, so that a member of the group in another instance is never looked up as if it were in this one.
     class ServerRunWorld : public runcore::RunWorld
     {
     public:
-        ServerRunWorld(uint32 mapId, uint32 instanceId) : map(sMapMgr.FindMap(mapId, instanceId)) {}
+        ServerRunWorld(uint32 mapId, uint32 instanceId, const Ground& ground = Ground())
+            : map(sMapMgr.FindMap(mapId, instanceId)), ground(ground) {}
 
         bool Group(uint32_t groupId, std::vector<uint32_t>& members, uint32_t& leader) override
         {
@@ -136,6 +191,196 @@ namespace
                 motion->MoveChase(target, offset, angle);
         }
 
+        bool HoldPlace(runcore::Held& place) override
+        {
+            const GuildPacks::Route* packs = ground.packs.get();
+            if (!map || !packs || ground.lastCleared < 0 || size_t(ground.lastCleared) >= packs->stops.size())
+                return false;
+            const GuildPacks::Stop& stop = packs->stops[ground.lastCleared];
+            // Every stop up to the cleared one dead, the route's rest spot found clear when it was made, and clear now.
+            const int32 living = GuildPacks::FirstLiveStop(*packs, map, size_t(0));
+            if (!stop.restClear || (living >= 0 && living <= ground.lastCleared))
+                return false;
+            place = { stop.restSpot.x, stop.restSpot.y, stop.restSpot.z };
+            size_t onWay = 0;
+            return WayIndex(place, onWay) && PlaceClear(place);
+        }
+
+        bool PlaceClear(const runcore::Held& at) override
+        {
+            if (!map || !ground.packs)
+                return false;
+            std::vector<uint32> dead;
+            const std::vector<runrules::Vec> point = { runcore::VecOf(at) };
+            return runrules::FirstThreat(sGuildPacks.Threats(*ground.packs, map, point, runrules::THREAT_MARGIN, dead), point) < 0;
+        }
+
+        bool StopWayPoint(runcore::Held& at) override
+        {
+            const GuildPacks::Route* packs = ground.packs.get();
+            if (!packs || packs->points.empty() || ground.index >= packs->stops.size())
+                return false;
+            const size_t i = std::min(packs->points.size() - 1, size_t(packs->stops[ground.index].pullAlong / 2.0f));
+            at = { packs->points[i].x, packs->points[i].y, packs->points[i].z };
+            return true;
+        }
+
+        bool WayPointNear(const runcore::Held& at, runcore::Held& point) override
+        {
+            size_t index = 0;
+            if (!WayIndex(at, index))
+                return false;
+            const G3D::Vector3& way = ground.packs->points[index];
+            point = { way.x, way.y, way.z };
+            return true;
+        }
+
+        runrules::PlanResult PlanWalk(uint32_t guid, const runcore::Held& to, runcore::Walk& walk, std::string& why) override
+        {
+            Player* member = Here(guid);
+            const GuildPacks::Route* packs = ground.packs.get();
+            if (!member || !packs || !ground.budget || !ground.wayChecked)
+            {
+                why = "no_route";
+                return runrules::PlanResult::Blocked;
+            }
+            const runcore::Held from = { member->GetPositionX(), member->GetPositionY(), member->GetPositionZ() };
+            // Near the party already, as a member a few yards from the anchor: one short navmesh path, checked the same way.
+            if (runrules::Distance(runcore::VecOf(from), runcore::VecOf(to)) <= runrules::SHORT_WALK)
+            {
+                if (*ground.budget < 1)
+                    return runrules::PlanResult::Pending;
+                --*ground.budget;
+                std::vector<runrules::Vec> path;
+                std::vector<uint32> dead;
+                if (!Connector(V3(runcore::VecOf(from)), V3(runcore::VecOf(to)), path))
+                    why = "no_short_path";
+                else if (!Blocked(path, why, &dead))
+                {
+                    walk.chunks = runrules::Chunks(path, runrules::WALK_CHUNK_YARDS);
+                    walk.to = to;
+                    walk.deadNear = dead;
+                    if (!walk.chunks.empty())
+                        return runrules::PlanResult::Planned;
+                    why = "nothing_to_walk";
+                }
+                return runrules::PlanResult::Blocked;
+            }
+            // The stretch of the way between the two, the short way along it where the way passes either place twice.
+            std::vector<runrules::Vec> wayPoints;
+            wayPoints.reserve(packs->points.size());
+            for (const G3D::Vector3& point : packs->points)
+                wayPoints.push_back(VecOf(point));
+            const std::vector<size_t> starts = runrules::WayNear(wayPoints, runcore::VecOf(from), runrules::WAY_NEAR);
+            const std::vector<size_t> ends = runrules::WayNear(wayPoints, runcore::VecOf(to), runrules::WAY_NEAR);
+            size_t a = 0, b = 0;
+            if (starts.empty())
+            {
+                why = "off_way";
+                return runrules::PlanResult::Blocked;
+            }
+            if (!runrules::WaySpan(starts, ends, a, b))
+            {
+                why = "target_off_way";
+                return runrules::PlanResult::Blocked;
+            }
+            // The way between, in the walk's direction.
+            std::vector<runrules::Vec> way;
+            for (size_t i = a;; i = a < b ? i + 1 : i - 1)
+            {
+                way.push_back(VecOf(packs->points[i]));
+                if (i == b)
+                    break;
+            }
+            // First the creatures, which costs no path search: the straight line is near enough to tell a blocked way.
+            std::vector<runrules::Vec> rough = way;
+            rough.insert(rough.begin(), runcore::VecOf(from));
+            rough.push_back(runcore::VecOf(to));
+            if (Blocked(rough, why))
+                return runrules::PlanResult::Blocked;
+            // Then the way's own legs, WAY_CHECK_POINTS at a time, each kept for the run, and the two connectors, never kept.
+            const size_t lo = std::min(a, b), hi = std::max(a, b);
+            for (size_t first = lo - lo % runrules::WAY_CHECK_POINTS; first < hi; first += runrules::WAY_CHECK_POINTS)
+            {
+                auto checked = ground.wayChecked->find(first);
+                if (checked == ground.wayChecked->end())
+                {
+                    if (*ground.budget <= 0)
+                        return runrules::PlanResult::Pending;
+                    --*ground.budget;
+                    const size_t last = std::min(first + runrules::WAY_CHECK_POINTS, packs->points.size() - 1);
+                    std::vector<runrules::Vec> leg, along;
+                    for (size_t i = first; i <= last; ++i)
+                        along.push_back(VecOf(packs->points[i]));
+                    const bool ok = NavLeg(map, packs->points[first], packs->points[last], leg)
+                        && runrules::Along(leg, along, runrules::WAY_CHECK_OFF);
+                    checked = ground.wayChecked->emplace(first, ok).first;
+                }
+                if (!checked->second)
+                {
+                    why = "way_off_mesh_at_" + std::to_string(first * 2) + "yd";
+                    return runrules::PlanResult::Blocked;
+                }
+            }
+            if (*ground.budget < 2)
+                return runrules::PlanResult::Pending;
+            *ground.budget -= 2;
+            std::vector<runrules::Vec> in, out;
+            if (!Connector(V3(runcore::VecOf(from)), packs->points[a], in))
+            {
+                why = "no_path_onto_way";
+                return runrules::PlanResult::Blocked;
+            }
+            if (!Connector(packs->points[b], V3(runcore::VecOf(to)), out))
+            {
+                why = "no_path_off_way";
+                return runrules::PlanResult::Blocked;
+            }
+            // The line walked: from where the member stands onto the way, along it, and off it to the party.
+            std::vector<runrules::Vec> line = in;
+            line.insert(line.end(), way.begin() + 1, way.end());
+            line.insert(line.end(), out.begin() + 1, out.end());
+            std::vector<uint32> dead;
+            if (Blocked(line, why, &dead))
+                return runrules::PlanResult::Blocked;
+            walk.chunks = runrules::Chunks(line, runrules::WALK_CHUNK_YARDS);
+            if (walk.chunks.empty())
+            {
+                why = "nothing_to_walk";
+                return runrules::PlanResult::Blocked;
+            }
+            walk.to = to;
+            walk.deadNear = dead;
+            return runrules::PlanResult::Planned;
+        }
+
+        bool Respawned(const std::vector<uint32_t>& spawns) override
+        {
+            if (!map)
+                return false;
+            for (uint32 spawn : spawns)
+                if (Creature* creature = map->GetCreature(spawn))
+                    if (creature->IsAlive())
+                        return true;
+            return false;
+        }
+
+        bool CreatureNear(const std::vector<runrules::Vec>& part) override
+        {
+            return map && ground.packs && !sGuildPacks.Unmodelled(*ground.packs, map, part, runrules::THREAT_MARGIN).empty();
+        }
+
+        bool Walking(uint32_t guid) override
+        {
+            Player* member = Here(guid);
+            if (!member)
+                return false;
+            for (MovementGenerator const* generator : *member->GetMotionMaster())
+                if (runrules::IsRunToken(generator->GetMoveId()) && generator->GetMovementGeneratorType() == PATH_MOTION_TYPE)
+                    return true;
+            return false;
+        }
+
     private:
         // The member on this run's own instance's map, in the world and not between maps; none otherwise.
         Player* Here(uint32_t guid)
@@ -144,6 +389,122 @@ namespace
                 return nullptr;
             Player* player = map->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid));
             return player && player->IsInWorld() && !player->IsBeingTeleported() ? player : nullptr;
+        }
+
+        // The route's way point nearest a place, within WAY_NEAR.
+        bool WayIndex(const runcore::Held& at, size_t& index) const
+        {
+            const GuildPacks::Route* packs = ground.packs.get();
+            if (!packs)
+                return false;
+            float nearest = -1.0f;
+            const runrules::Vec point = runcore::VecOf(at);
+            for (size_t i = 0; i < packs->points.size(); ++i)
+            {
+                const float d = runrules::Distance(point, VecOf(packs->points[i]));
+                if (d <= runrules::WAY_NEAR && (nearest < 0.0f || d < nearest))
+                {
+                    nearest = d;
+                    index = i;
+                }
+            }
+            return nearest >= 0.0f;
+        }
+
+        // A short way on or off the route's way: a whole navmesh path, not much longer than the straight line.
+        bool Connector(const G3D::Vector3& from, const G3D::Vector3& to, std::vector<runrules::Vec>& path) const
+        {
+            const float straight = (to - from).length();
+            if (straight < 0.5f)
+            {
+                path = { VecOf(from), VecOf(to) };
+                return true;
+            }
+            if (!NavLeg(map, from, to, path))
+                return false;
+            path.front() = VecOf(from);
+            return runrules::Length(path) <= straight * runrules::CONNECTOR_DETOUR + 2.0f;
+        }
+
+        // Whether a creature that may be alive reaches the line; the dead ones near it in `deadNear`.
+        bool Blocked(const std::vector<runrules::Vec>& line, std::string& why, std::vector<uint32>* deadNear = nullptr) const
+        {
+            std::vector<uint32> dead;
+            const std::vector<runrules::Threat> threats = sGuildPacks.Threats(*ground.packs, map, line, runrules::THREAT_MARGIN, dead);
+            const int first = runrules::FirstThreat(threats, line);
+            if (deadNear)
+                *deadNear = dead;
+            if (first < 0)
+                return false;
+            why = runrules::ThreatName(threats[first], GuildPacks::StopOf(*ground.packs, threats[first].spawn));
+            return true;
+        }
+
+        Map* map;
+        Ground ground;
+    };
+
+    runrules::Removal Removal(MotionMaster::RemoveResult result)
+    {
+        switch (result)
+        {
+            case MotionMaster::RemoveResult::Removed: return runrules::Removal::Removed;
+            case MotionMaster::RemoveResult::Deferred: return runrules::Removal::Deferred;
+            default: return runrules::Removal::NotFound;
+        }
+    }
+
+    // The members' motion, for the run moves: any member in the world on the world pass, or only those on `map` on a map's
+    // pass, which runs on that map's thread.
+    class ServerMoveWorld : public runcore::MoveWorld
+    {
+    public:
+        explicit ServerMoveWorld(Map* map = nullptr) : map(map) {}
+
+        runcore::MoveMember Member(uint32_t guid) override
+        {
+            runcore::MoveMember member;
+            Player* player = Find(guid);
+            member.visible = !map || player;
+            if (!player)
+                return member;
+            member.online = true;
+            member.engine = sGuildBotMgr.GetPlayerBot(guid) == player;
+            member.inWorld = player->IsInWorld();
+            member.teleporting = player->IsBeingTeleported();
+            member.mapId = player->GetMapId();
+            member.instanceId = player->GetInstanceId();
+            return member;
+        }
+        bool HasMove(uint32_t guid, uint32_t token) override
+        {
+            Player* player = Find(guid);
+            return player && player->GetMotionMaster()->HasMove(token);
+        }
+        uint32_t TopMove(uint32_t guid) override
+        {
+            Player* player = Find(guid);
+            return player && !player->GetMotionMaster()->empty() ? player->GetMotionMaster()->GetCurrent()->GetMoveId() : 0;
+        }
+        std::vector<uint32_t> MoveIds(uint32_t guid) override
+        {
+            std::vector<uint32_t> ids;
+            if (Player* player = Find(guid))
+                for (MovementGenerator const* generator : *player->GetMotionMaster())
+                    ids.push_back(generator->GetMoveId());
+            return ids;
+        }
+        runrules::Removal RemoveMove(uint32_t guid, uint32_t token) override
+        {
+            Player* player = Find(guid);
+            return player ? Removal(player->GetMotionMaster()->RemoveMove(token)) : runrules::Removal::NotFound;
+        }
+
+    private:
+        Player* Find(uint32_t guid) const
+        {
+            const ObjectGuid object(HIGHGUID_PLAYER, guid);
+            return map ? map->GetPlayer(object) : sObjectMgr.GetPlayer(object, false);
         }
 
         Map* map;
@@ -215,10 +576,14 @@ size_t GuildRunStates::NextStop(const GuildPacks::Route* packs, const std::vecto
     return next;
 }
 
-GuildRunControl GuildRunStates::Prepare(Player* leader, const std::string& dungeon,
+GuildRunControl GuildRunStates::Prepare(Player* leader, const std::string& dungeon, uint32 order,
     std::vector<std::pair<std::string, std::string>>& events)
 {
     if (!leader)
+        return GuildRunControl::None;
+    // A run that failed for this order is not made again: the manager fails the party's jobs first.
+    std::string failure;
+    if (Failure(leader->GetGUIDLow(), order, failure))
         return GuildRunControl::None;
     Group* group = leader->GetGroup();
     Map* map = leader->IsInWorld() && !leader->IsBeingTeleported() ? leader->GetMap() : nullptr;
@@ -254,6 +619,7 @@ GuildRunControl GuildRunStates::Prepare(Player* leader, const std::string& dunge
         state->mapId = map->GetId();
         state->instanceId = map->GetInstanceId();
         state->dungeon = dungeon;
+        state->order = order;
         std::string error;
         state->route = BuildRoute(leader, dungeon, state->packs, error);
         // No route, no controller: the job has the party alone, as it did before the controller, and no lifecycle starts.
@@ -338,7 +704,8 @@ std::vector<std::pair<std::string, std::string>> GuildRunStates::Settle(Player* 
     std::string tag;
     {
         std::lock_guard<std::mutex> guard(state->lock);
-        ServerRunWorld world(state->mapId, state->instanceId);
+        ServerRunWorld world(state->mapId, state->instanceId,
+            Ground{ state->packs, state->lastCleared, state->index, &state->wayChecked, &planBudget });
         state->core.Settle(world, generations, report);
         index = state->index;
         tag = "gen=" + std::to_string(state->core.start) + "." + std::to_string(state->core.generation)
@@ -401,12 +768,23 @@ std::vector<std::tuple<uint32, std::string, std::string>> GuildRunStates::Reconc
     }
     const time_t now = time(nullptr);
     std::vector<std::shared_ptr<State>> gone;
+    planBudget = runrules::PLAN_BUDGET;
+    std::vector<uint32> cancels;
     for (const std::shared_ptr<State>& state : states)
     {
         std::lock_guard<std::mutex> guard(state->lock);
-        ServerRunWorld world(state->mapId, state->instanceId);
+        ServerRunWorld world(state->mapId, state->instanceId,
+            Ground{ state->packs, state->lastCleared, state->index, &state->wayChecked, &planBudget });
         if (!state->core.Reconcile(world, generations, now))
             gone.push_back(state);
+        cancels.insert(cancels.end(), state->core.cancels.begin(), state->core.cancels.end());
+        state->core.cancels.clear();
+        // A failed run's failure outlives it, until the manager fails the party's jobs.
+        if (state->core.failed && !state->failureKept)
+        {
+            state->failureKept = true;
+            failures.Record(state->leader, state->order, state->core.reason);
+        }
         for (const runcore::Event& event : state->core.events)
             events.emplace_back(state->leader, event.kind, event.detail);
         state->core.events.clear();
@@ -421,7 +799,165 @@ std::vector<std::tuple<uint32, std::string, std::string>> GuildRunStates::Reconc
                 byInstance.erase(it);
         }
     }
+    // bench clearroute's sweeps for summons that come late.
+    RunSweeps(events);
+    // Walks planned again or given up: their run moves go now, with no lock held, before the maps update.
+    if (!cancels.empty())
+    {
+        ServerMoveWorld world;
+        for (uint32 guid : cancels)
+            moves.Cancel(world, guid);
+    }
     return events;
+}
+
+bool GuildRunStates::Permit(uint32 leaderGuid) const
+{
+    std::shared_ptr<State> state = FindLeader(leaderGuid);
+    if (!state)
+        return true;
+    std::lock_guard<std::mutex> guard(state->lock);
+    return state->core.mode == GuildRunMode::Ended ? !state->core.failed : state->core.Permit();
+}
+
+bool GuildRunStates::Failure(uint32 leaderGuid, uint32 order, std::string& reason) const
+{
+    return failures.Find(leaderGuid, order, reason);
+}
+
+void GuildRunStates::Acknowledge(uint32 leaderGuid, uint32 order)
+{
+    failures.Acknowledge(leaderGuid, order);
+}
+
+bool GuildRunStates::PullAllowed(Player* bot) const
+{
+    if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
+        return false;
+    const GuildRunView view = View(bot);
+    if (!view.valid)
+        return true;
+    return view.permit && Present(bot, view);
+}
+
+std::list<std::string> GuildRunStates::ClearRoute(Player* leader, uint32 stop)
+{
+    std::shared_ptr<State> state = leader ? FindLeader(leader->GetGUIDLow()) : nullptr;
+    if (!state)
+        return { "no run for that leader" };
+    std::shared_ptr<const GuildPacks::Route> packs;
+    uint32 mapId = 0, instanceId = 0;
+    {
+        std::lock_guard<std::mutex> guard(state->lock);
+        packs = state->packs;
+        mapId = state->mapId;
+        instanceId = state->instanceId;
+    }
+    Map* map = sMapMgr.FindMap(mapId, instanceId);
+    if (!packs || !map)
+        return { "the run has no route or no instance" };
+    if (!stop || stop > packs->stops.size() + 1)
+        return { "stop must be 1 to " + std::to_string(packs->stops.size() + 1) };
+    std::set<uint32> spawns;
+    for (size_t k = 0; k + 1 < stop; ++k)
+    {
+        const GuildPacks::Stop& clear = packs->stops[k];
+        spawns.insert(clear.spawns.begin(), clear.spawns.end());
+        spawns.insert(clear.extras.begin(), clear.extras.end());
+        for (const GuildPacks::Reacher& reacher : clear.reachers)
+            spawns.insert(reacher.spawn);
+    }
+    uint32 killed = 0, missing = 0, unmodelled = 0;
+    for (uint32 spawn : spawns)
+    {
+        Creature* creature = map->GetCreature(spawn);
+        if (!creature || !creature->IsInWorld())
+        {
+            ++missing;
+            continue;
+        }
+        if (!creature->IsAlive())
+            continue;
+        Unit::DealDamage(creature, creature, creature->GetHealth(), nullptr, DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
+        ++killed;
+    }
+    // Then what the model does not have, within reach of the cleared stops' way: summons, those the kills just brought
+    // among them (Sneed, from his Shredder's death). A second pass for what those deaths summon in turn.
+    if (stop > 1 && !packs->points.empty())
+    {
+        const size_t last = std::min(packs->points.size() - 1,
+            size_t(packs->stops[stop - 2].pullAlong / 2.0f) + size_t(runrules::WAY_CHECK_POINTS));
+        std::vector<runrules::Vec> way;
+        for (size_t i = 0; i <= last; ++i)
+            way.push_back({ packs->points[i].x, packs->points[i].y, packs->points[i].z });
+        std::string names;
+        for (int pass = 0; pass < 2; ++pass)
+            unmodelled += SweepUnmodelled(map, *packs, way, names);
+        // A script summons some a few seconds after the death that calls them, as the Shredder's does Sneed: the same
+        // sweep runs again on the tick for SWEEP_SECONDS, and says what it killed with a bench_clear_route event.
+        Sweep sweep;
+        sweep.leader = leader->GetGUIDLow();
+        sweep.mapId = mapId;
+        sweep.instanceId = instanceId;
+        sweep.packs = packs;
+        sweep.way = way;
+        sweep.until = time(nullptr) + SWEEP_SECONDS;
+        std::lock_guard<std::mutex> guard(registryLock);
+        sweeps.push_back(sweep);
+    }
+    return { "cleared stops 1 to " + std::to_string(stop - 1) + " of " + std::to_string(packs->stops.size()) + ": killed "
+        + std::to_string(killed) + ", not loaded " + std::to_string(missing) + ", of " + std::to_string(spawns.size())
+        + "; and " + std::to_string(unmodelled) + " not in the route's model" };
+}
+
+uint32 GuildRunStates::SweepUnmodelled(Map* map, const GuildPacks::Route& packs, const std::vector<runrules::Vec>& way,
+    std::string& names)
+{
+    uint32 killed = 0;
+    std::vector<ObjectGuid> found;
+    sGuildPacks.Unmodelled(packs, map, way, runrules::THREAT_MARGIN, &found);
+    for (ObjectGuid guid : found)
+        if (Creature* creature = map->GetCreature(guid))
+            if (creature->IsAlive())
+            {
+                names += (names.empty() ? "" : ",") + std::string(creature->GetName());
+                Unit::DealDamage(creature, creature, creature->GetHealth(), nullptr, DIRECT_DAMAGE,
+                    SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
+                ++killed;
+            }
+    return killed;
+}
+
+void GuildRunStates::RunSweeps(std::vector<std::tuple<uint32, std::string, std::string>>& events)
+{
+    std::vector<Sweep> pending;
+    {
+        std::lock_guard<std::mutex> guard(registryLock);
+        pending.swap(sweeps);
+    }
+    if (pending.empty())
+        return;
+    const time_t now = time(nullptr);
+    std::vector<Sweep> keep;
+    for (Sweep& sweep : pending)
+    {
+        Map* map = sMapMgr.FindMap(sweep.mapId, sweep.instanceId);
+        if (!map || !sweep.packs)
+            continue;
+        std::string names;
+        const uint32 killed = SweepUnmodelled(map, *sweep.packs, sweep.way, names);
+        if (killed)
+        {
+            sweep.killed += killed;
+            events.emplace_back(sweep.leader, "bench_clear_route", "killed=" + std::to_string(killed) + " not_in_model=" + names);
+        }
+        if (now < sweep.until)
+            keep.push_back(sweep);
+        else
+            events.emplace_back(sweep.leader, "bench_clear_route", "sweep_done killed=" + std::to_string(sweep.killed));
+    }
+    std::lock_guard<std::mutex> guard(registryLock);
+    sweeps.insert(sweeps.end(), keep.begin(), keep.end());
 }
 
 std::list<std::string> GuildRunStates::Describe(const std::string& leaderName) const
@@ -479,8 +1015,11 @@ std::list<std::string> GuildRunStates::Describe(const std::string& leaderName) c
              << " since_pull=" << (state->pullAt ? now - state->pullAt : 0)
              << " since_wait=" << (state->waitSince ? now - state->waitSince : 0)
              << " last_cleared=" << (state->lastCleared < 0 ? 0 : state->lastCleared + 1);
+        line << " permit=" << (core.Permit() ? 1 : 0) << " failed=" << (core.failed ? 1 : 0)
+             << " apart_for=" << (core.apartSince ? now - core.apartSince : 0);
         if (core.mode == GuildRunMode::Hold)
-            line << " leader_back=" << (core.leaderBackAt ? now - core.leaderBackAt : 0);
+            line << " anchor=" << (core.hasAnchor ? core.anchorKind + "@" + std::to_string(int32(core.anchor.x)) + ","
+                + std::to_string(int32(core.anchor.y)) + "," + std::to_string(int32(core.anchor.z)) : std::string("none"));
         out.push_back(line.str());
         for (uint32 guid : core.expected)
         {
@@ -489,6 +1028,17 @@ std::list<std::string> GuildRunStates::Describe(const std::string& leaderName) c
             auto held = core.held.find(guid);
             if (held != core.held.end())
                 line << " holds_at=" << held->second.x << "," << held->second.y << "," << held->second.z;
+            auto away = core.apart.find(guid);
+            if (away != core.apart.end())
+            {
+                line << " apart=" << (away->second.missing ? "missing" : away->second.cohort ? "cohort" : "returner")
+                     << " for=" << now - away->second.since;
+                if (away->second.walking)
+                    line << " walk=" << away->second.walk.id << " part=" << away->second.walk.chunk + 1 << "/"
+                         << away->second.walk.chunks.size();
+                if (!away->second.blocked.empty())
+                    line << " blocked=" << away->second.blocked;
+            }
             auto refused = state->refused.find(guid);
             if (refused != state->refused.end())
                 line << " refused=" << refused->second;
@@ -557,7 +1107,23 @@ GuildRunView GuildRunStates::View(Player* bot) const
     view.ownSpot = state->ownSpot;
     view.gatherSince = state->gatherSince;
     view.pullTries = state->pullTries;
-    if (core.mode == GuildRunMode::Hold)
+    view.permit = core.Permit();
+    auto away = core.apart.find(bot->GetGUIDLow());
+    if (away != core.apart.end())
+    {
+        view.apart = true;
+        const runcore::Walk& walk = away->second.walk;
+        if (away->second.walking && walk.chunk < walk.chunks.size())
+        {
+            view.walking = true;
+            view.walkId = walk.id;
+            view.walkPart = walk.chunk;
+            for (const runrules::Vec& point : walk.chunks[walk.chunk])
+                view.walkPoints.emplace_back(state->mapId, point.x, point.y, point.z);
+            view.deadNear = walk.deadNear;
+        }
+    }
+    if (core.mode == GuildRunMode::Hold && !view.walking)
     {
         auto held = core.held.find(bot->GetGUIDLow());
         if (held != core.held.end())
@@ -659,75 +1225,6 @@ ai::WorldPosition GuildRunStates::PlaceOf(const GuildRunView& view, Player* bot)
     const std::vector<size_t>& mineAt = places[mine];
     const size_t index = std::min(mineAt[rank % mineAt.size()], stands.size() - 1);
     return stands[index];
-}
-
-namespace
-{
-    runrules::Removal Removal(MotionMaster::RemoveResult result)
-    {
-        switch (result)
-        {
-            case MotionMaster::RemoveResult::Removed: return runrules::Removal::Removed;
-            case MotionMaster::RemoveResult::Deferred: return runrules::Removal::Deferred;
-            default: return runrules::Removal::NotFound;
-        }
-    }
-
-    // The members' motion, for the run moves: any member in the world on the world pass, or only those on `map` on a map's
-    // pass, which runs on that map's thread.
-    class ServerMoveWorld : public runcore::MoveWorld
-    {
-    public:
-        explicit ServerMoveWorld(Map* map = nullptr) : map(map) {}
-
-        runcore::MoveMember Member(uint32_t guid) override
-        {
-            runcore::MoveMember member;
-            Player* player = Find(guid);
-            member.visible = !map || player;
-            if (!player)
-                return member;
-            member.online = true;
-            member.engine = sGuildBotMgr.GetPlayerBot(guid) == player;
-            member.inWorld = player->IsInWorld();
-            member.teleporting = player->IsBeingTeleported();
-            member.mapId = player->GetMapId();
-            member.instanceId = player->GetInstanceId();
-            return member;
-        }
-        bool HasMove(uint32_t guid, uint32_t token) override
-        {
-            Player* player = Find(guid);
-            return player && player->GetMotionMaster()->HasMove(token);
-        }
-        uint32_t TopMove(uint32_t guid) override
-        {
-            Player* player = Find(guid);
-            return player && !player->GetMotionMaster()->empty() ? player->GetMotionMaster()->GetCurrent()->GetMoveId() : 0;
-        }
-        std::vector<uint32_t> MoveIds(uint32_t guid) override
-        {
-            std::vector<uint32_t> ids;
-            if (Player* player = Find(guid))
-                for (MovementGenerator const* generator : *player->GetMotionMaster())
-                    ids.push_back(generator->GetMoveId());
-            return ids;
-        }
-        runrules::Removal RemoveMove(uint32_t guid, uint32_t token) override
-        {
-            Player* player = Find(guid);
-            return player ? Removal(player->GetMotionMaster()->RemoveMove(token)) : runrules::Removal::NotFound;
-        }
-
-    private:
-        Player* Find(uint32_t guid) const
-        {
-            const ObjectGuid object(HIGHGUID_PLAYER, guid);
-            return map ? map->GetPlayer(object) : sObjectMgr.GetPlayer(object, false);
-        }
-
-        Map* map;
-    };
 }
 
 bool GuildRunStates::StartRunMove(Player* bot, const GuildRunView& view, const std::function<bool(uint32 token)>& move)
@@ -951,8 +1448,15 @@ void GuildRunStates::Choose(Player* leader, const GuildRunStamp& stamp)
         size_t start = state.route.size();
         if (state.packs)
         {
+            // The run's progress, the stop it was at, reads the leader's place where the way passes it twice: in the
+            // Deadmines the upper mine, early and again after the ship.
+            float progress = -1.0f;
+            if (state.index < state.packs->stops.size())
+                progress = state.packs->stops[state.index].pullAlong;
+            else if (state.lastCleared >= 0 && size_t(state.lastCleared) < state.packs->stops.size())
+                progress = state.packs->stops[state.lastCleared].pullAlong;
             const int32 first = GuildPacks::FirstLiveStop(*state.packs, map,
-                G3D::Vector3(leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ()));
+                G3D::Vector3(leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ()), progress);
             start = NextStop(state.packs.get(), state.route, map, first < 0 ? state.route.size() : size_t(first));
         }
         Reset(state, start);

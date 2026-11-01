@@ -53,7 +53,10 @@ public:
     // (GuildRunStates::Prepare): none, lead, hold or released. What the job may do under each is GuildRunRules' Job table:
     // under lead and hold its own pulls, rest, regroup, via places and boss travel stand down, and a table step or a
     // change of phase only asks for a release; under released it does the step or the trip, and hands the party back.
-    Update Tick(Player* leader, const std::string& name, runrules::Control control = runrules::Control::None);
+    // `permit` is the run's pull permit (GuildRunStates::Permit), worked out before this takes its lock: without it, the
+    // job starts no fight, neither its own pulls, a kill step's pull or attack, nor a talk or use that starts an event.
+    Update Tick(Player* leader, const std::string& name, runrules::Control control = runrules::Control::None,
+        bool permit = true);
     // The job ended or changed: forget the run.
     void Stop(uint32 leaderGuid);
 
@@ -256,6 +259,7 @@ private:
         ObjectGuid killPullGuid;       // the creature to kill first that the job's pull takes back to the party, or empty
         bool controlled = false;       // the run controller leads or holds the party, and the pull and rest steps stand down
         runrules::Control control = runrules::Control::None; // what the run controller has, this tick
+        bool permit = true;        // the run's pull permit, this tick
         bool stepWaiting = false;      // a table step waits for the run's release, its guard having returned
         std::set<int32> passed;        // bosses passed over as out of reach on this map
         int32 headwayBoss = 0;         // the boss the leader's headway is measured to
@@ -340,6 +344,8 @@ private:
     // A table step's guard, just before its first move or effect: under lead the step only asks for the run's release,
     // and the tick returns with the step waiting; true then. Under released or with no run, false: the step goes on.
     static bool StepWaits(Run& run, Update& update, const std::string& what);
+    // The same for a step that starts a fight, which also waits without the run's permit, unless the party already fights.
+    static bool StartWaits(Run& run, Update& update, const std::string& what, bool fighting);
     // The finish step: out, then the reset.
     void TickLeave(Player* leader, Run& run, Update& update);
     void TickRepair(Player* leader, Run& run, Update& update);

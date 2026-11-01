@@ -32,5 +32,6 @@ private:
     static std::list<std::string> Keys(Player* bot, const std::string& dungeonName = "");
     // For the lab's recovery scenarios: a death, as the core's .die gives one, and a mana pool set low.
     static std::list<std::string> Kill(Player* bot, const std::string& name);
+    static std::list<std::string> ClearRoute(Player* leader, const std::string& stop);
     static std::list<std::string> Mana(Player* bot, const std::string& name, const std::string& percent);
 };

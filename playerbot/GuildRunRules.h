@@ -4,6 +4,7 @@
 // tests/run_lifecycle builds them without the server.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -137,23 +138,14 @@ namespace runrules
         return expected == members ? Roster::Same : Roster::Replace;
     }
 
-    // A held run resumes, its reasons gone, once the leader is within RESUME_NEAR yards of a member's hold place, or
-    // RESUME_SECONDS after every reason went. nearest < 0: no member holds.
-    constexpr float RESUME_NEAR = 40.0f;
-    constexpr int64_t RESUME_SECONDS = 180;
-
-    inline bool Resumes(bool reasonsGone, float nearest, int64_t secondsBack)
-    {
-        return reasonsGone && ((nearest >= 0.0f && nearest <= RESUME_NEAR) || secondsBack >= RESUME_SECONDS);
-    }
-
     // Whether a run action fired under a stamp may act now: the state's mode and stamp. A leader's write only in lead; a
-    // member's run move in lead, or in hold toward its hold place. Never in released or ended, never under another stamp.
+    // member's run move in lead, in hold, or in released for a member walking back to its party. Never in ended, never
+    // under another stamp.
     inline bool Accepts(Mode mode, const Stamp& state, const Stamp& action, bool leaderWrite)
     {
         if (!action.generation || !Same(state, action))
             return false;
-        return mode == Mode::Lead || (mode == Mode::Hold && !leaderWrite);
+        return mode == Mode::Lead || ((mode == Mode::Hold || mode == Mode::Released) && !leaderWrite);
     }
 
     // What the dungeon job does on its tick, by what the run tells it.
@@ -382,6 +374,278 @@ namespace runrules
     {
         return std::none_of(removals.begin(), removals.end(), [](Removal removal) { return removal == Removal::Deferred; });
     }
+
+    // Rejoining (docs/run-contract.md, "Rejoining"): a member apart from its party walks back to it over the route's
+    // cleared way, and the party pulls nothing until every member is back.
+    constexpr float WAY_NEAR = 10.0f;            // a place this near the route's way is on it
+    constexpr float ARRIVE_NEAR = 5.0f;          // a member this near its walk's end has arrived
+    constexpr float DISPLACED = 60.0f;           // in lead or released, a member this far from its leader is apart
+    constexpr float WALK_DRIFT = 4.0f;           // a walking member this far off its walk is planned again
+    constexpr float SHORT_WALK = 20.0f;          // a member this near where it walks to goes by one short path, not the way
+    constexpr float CHUNK_START = 2.0f;          // a walk's next part starts only this near its first point
+    constexpr float WALK_CHUNK_YARDS = 40.0f;    // one run move walks at most this far
+    constexpr size_t WAY_CHECK_POINTS = 10;      // the way's own legs are checked this many points (20 yards) at a time
+    constexpr float WAY_CHECK_OFF = 2.0f;        // and a leg's path keeps this near the way
+    constexpr float CONNECTOR_DETOUR = 1.5f;     // a connector's path is at most this many times its straight length
+    constexpr float THREAT_MARGIN = 3.0f;        // the margin on a creature's reach, as GuildPacks measures a pull spot's
+    constexpr int64_t COHORT_DEAD_SECONDS = 30;  // a member seen dead this recently is not of a hold's cohort
+    constexpr int64_t HOLD_TRAVEL_SECONDS = 60;  // a cohort member not at the hold place this long after its walk began stands
+    constexpr int64_t REPLAN_SECONDS = 10;       // a walk that could not be planned is tried again this often
+    constexpr int64_t WALK_STALL_SECONDS = 30;   // a walk that gains no part of its way this long is planned again
+    constexpr int64_t REJOIN_SECONDS = 600;      // a run apart this long, nothing else holding it, ends: cannot_rejoin
+    constexpr int PLAN_BUDGET = 16;              // path searches a tick, across every run
+
+    struct Vec
+    {
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+    };
+
+    inline float Distance(const Vec& a, const Vec& b)
+    {
+        const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    inline float Length(const std::vector<Vec>& line)
+    {
+        float length = 0.0f;
+        for (size_t i = 1; i < line.size(); ++i)
+            length += Distance(line[i - 1], line[i]);
+        return length;
+    }
+
+    // The distance between two segments, ab and cd, either of which may be a point (Ericson, Real-Time Collision
+    // Detection, 5.1.9).
+    inline float SegmentDistance(const Vec& a, const Vec& b, const Vec& c, const Vec& d)
+    {
+        const Vec d1 = { b.x - a.x, b.y - a.y, b.z - a.z }, d2 = { d.x - c.x, d.y - c.y, d.z - c.z };
+        const Vec r = { a.x - c.x, a.y - c.y, a.z - c.z };
+        auto dot = [](const Vec& u, const Vec& v) { return u.x * v.x + u.y * v.y + u.z * v.z; };
+        const float aa = dot(d1, d1), ee = dot(d2, d2), ff = dot(d2, r);
+        const float eps = 1e-6f;
+        float s = 0.0f, t = 0.0f;
+        if (aa <= eps && ee <= eps)
+            return Distance(a, c);
+        if (aa <= eps)
+            t = std::clamp(ff / ee, 0.0f, 1.0f);
+        else
+        {
+            const float cc = dot(d1, r);
+            if (ee <= eps)
+                s = std::clamp(-cc / aa, 0.0f, 1.0f);
+            else
+            {
+                const float bb = dot(d1, d2), denom = aa * ee - bb * bb;
+                s = denom > eps ? std::clamp((bb * ff - cc * ee) / denom, 0.0f, 1.0f) : 0.0f;
+                t = (bb * s + ff) / ee;
+                if (t < 0.0f)
+                {
+                    t = 0.0f;
+                    s = std::clamp(-cc / aa, 0.0f, 1.0f);
+                }
+                else if (t > 1.0f)
+                {
+                    t = 1.0f;
+                    s = std::clamp((bb - cc) / aa, 0.0f, 1.0f);
+                }
+            }
+        }
+        const Vec p = { a.x + d1.x * s, a.y + d1.y * s, a.z + d1.z * s }, q = { c.x + d2.x * t, c.y + d2.y * t, c.z + d2.z * t };
+        return Distance(p, q);
+    }
+
+    // The least distance between two polylines, either of one point or more. -1 when either is empty.
+    inline float LinesDistance(const std::vector<Vec>& a, const std::vector<Vec>& b)
+    {
+        if (a.empty() || b.empty())
+            return -1.0f;
+        float least = -1.0f;
+        for (size_t i = 0; i < std::max<size_t>(a.size() - 1, 1); ++i)
+            for (size_t j = 0; j < std::max<size_t>(b.size() - 1, 1); ++j)
+            {
+                const Vec& a1 = a[i];
+                const Vec& a2 = a.size() > 1 ? a[i + 1] : a[i];
+                const Vec& b1 = b[j];
+                const Vec& b2 = b.size() > 1 ? b[j + 1] : b[j];
+                const float d = SegmentDistance(a1, a2, b1, b2);
+                if (least < 0.0f || d < least)
+                    least = d;
+            }
+        return least;
+    }
+
+    // A creature that may stand in a walk's way: where it may be (one point, or a patrol's path, closed when it loops)
+    // and how far it reaches from there.
+    struct Threat
+    {
+        uint32_t spawn = 0;            // 0 for a creature the route's model does not have, as a summon
+        uint32_t entry = 0;            // set for a creature the model does not have, to name it
+        std::vector<Vec> where;
+        float reach = 0.0f;
+    };
+
+    // A living creature the route's model does not have, a summon or a script's spawn, reaches this far from where it
+    // stands: its aggro reach, the margin, and TRAVEL_MARGIN more when it moves.
+    constexpr float TRAVEL_MARGIN = 10.0f;
+
+    // A creature as a blocked walk names it: by its spawn and its stop (0 for none), or one the model does not have by its
+    // entry, with its spawn when it has one.
+    inline std::string ThreatName(const Threat& threat, int stop)
+    {
+        if (threat.entry)
+            return "creature_" + std::to_string(threat.entry)
+                + (threat.spawn ? "_spawn_" + std::to_string(threat.spawn) : std::string()) + "_unmodelled";
+        return "spawn_" + std::to_string(threat.spawn) + "_stop_" + std::to_string(stop + 1);
+    }
+
+    // The first creature whose reach comes to the line anywhere along it, between its points too, or -1.
+    inline int FirstThreat(const std::vector<Threat>& threats, const std::vector<Vec>& line)
+    {
+        for (size_t i = 0; i < threats.size(); ++i)
+        {
+            const float d = LinesDistance(threats[i].where, line);
+            if (d >= 0.0f && d <= threats[i].reach)
+                return int(i);
+        }
+        return -1;
+    }
+
+    // The route's way points within `near` yards of a place, in the way's order.
+    inline std::vector<size_t> WayNear(const std::vector<Vec>& way, const Vec& at, float near)
+    {
+        std::vector<size_t> found;
+        for (size_t i = 0; i < way.size(); ++i)
+            if (Distance(way[i], at) <= near)
+                found.push_back(i);
+        return found;
+    }
+
+    // Of the way's points near a walk's start and near its end, the pair nearest each other along the way. A way that
+    // passes a place twice, as a route coming back past rooms it went through early, is walked the short way between
+    // them, not through everything it met between its two passes. False when either list is empty.
+    inline bool WaySpan(const std::vector<size_t>& starts, const std::vector<size_t>& ends, size_t& a, size_t& b)
+    {
+        if (starts.empty() || ends.empty())
+            return false;
+        size_t i = 0, j = 0, best = SIZE_MAX;
+        while (i < starts.size() && j < ends.size())
+        {
+            const size_t gap = starts[i] > ends[j] ? starts[i] - ends[j] : ends[j] - starts[i];
+            if (gap < best)
+            {
+                best = gap;
+                a = starts[i];
+                b = ends[j];
+            }
+            if (starts[i] < ends[j])
+                ++i;
+            else
+                ++j;
+        }
+        return true;
+    }
+
+    // Where a party stands along the route's way, as a way index. Set down fresh, with no progress: its nearest way point.
+    // Choosing again after a hold, a hand-back or a new five, with the run's progress as a way index: of the way points
+    // within WAY_NEAR of it, the one nearest that progress along the way, so that a way passing the place twice is read
+    // by where the run was, not by which pass happens to be nearer. With none that near, the nearest point.
+    inline size_t PlaceAlong(const std::vector<size_t>& near, size_t nearest, bool hasProgress, size_t progress)
+    {
+        if (!hasProgress || near.empty())
+            return nearest;
+        size_t best = near[0];
+        for (size_t i : near)
+        {
+            const size_t gap = i > progress ? i - progress : progress - i;
+            const size_t bestGap = best > progress ? best - progress : progress - best;
+            if (gap < bestGap)
+                best = i;
+        }
+        return best;
+    }
+
+    // Whether every point of a path keeps within `off` yards of a polyline.
+    inline bool Along(const std::vector<Vec>& path, const std::vector<Vec>& line, float off)
+    {
+        return std::all_of(path.begin(), path.end(), [&](const Vec& point)
+        {
+            const float d = LinesDistance({ point }, line);
+            return d >= 0.0f && d <= off;
+        });
+    }
+
+    // A walk's line cut into run moves of at most `yards` each, every part starting where the one before ends. A single
+    // segment longer than `yards` stays whole.
+    inline std::vector<std::vector<Vec>> Chunks(const std::vector<Vec>& line, float yards)
+    {
+        std::vector<std::vector<Vec>> chunks;
+        if (line.size() < 2)
+            return chunks;
+        std::vector<Vec> chunk = { line[0] };
+        float length = 0.0f;
+        for (size_t i = 1; i < line.size(); ++i)
+        {
+            const float step = Distance(line[i - 1], line[i]);
+            if (chunk.size() > 1 && length + step > yards)
+            {
+                chunks.push_back(chunk);
+                chunk = { line[i - 1] };
+                length = 0.0f;
+            }
+            chunk.push_back(line[i]);
+            length += step;
+        }
+        if (chunk.size() > 1)
+            chunks.push_back(chunk);
+        return chunks;
+    }
+
+    // Of a hold's cohort: a member the run may move, not seen dead in the last COHORT_DEAD_SECONDS. lastDead 0: never.
+    inline bool InCohort(const Facts& facts, int64_t lastDead, int64_t now)
+    {
+        return Movable(facts) && (lastDead == 0 || now - lastDead > COHORT_DEAD_SECONDS);
+    }
+
+    // Whether the party may start a fight: a pull, a kill step's pull, or an event start. Only in lead, or in released
+    // while the job is not taking the party out, with nobody apart and the run not failed. The live part, every expected
+    // member alive inside now, is checked where the pull is made (GuildRunStates::PullAllowed).
+    struct PermitFacts
+    {
+        Mode mode = Mode::Ended;
+        bool leaving = false;
+        bool apart = false;
+        bool failed = false;
+    };
+
+    inline bool PullPermit(const PermitFacts& facts)
+    {
+        if (facts.apart || facts.failed)
+            return false;
+        return facts.mode == Mode::Lead || (facts.mode == Mode::Released && !facts.leaving);
+    }
+
+    // A run with a member apart since `apartSince`, nothing else holding it, for REJOIN_SECONDS: it cannot regroup.
+    inline bool Overdue(int64_t apartSince, int64_t now)
+    {
+        return apartSince != 0 && now - apartSince >= REJOIN_SECONDS;
+    }
+
+    // A party whose run failed as cannot_rejoin keeps its group until the agent's next order, so the instance stays valid
+    // for its members and they stand where they are: the order it failed for is its job order still. 0 never keeps it.
+    inline bool KeepsGroup(uint32_t keepGroupOrder, uint32_t jobOrder)
+    {
+        return keepGroupOrder != 0 && keepGroupOrder == jobOrder;
+    }
+
+    // Whether a member that joined a party for its party job leaves the group: its job ended or changed, unless it keeps
+    // the group after a failed run.
+    inline bool LeavesParty(bool joined, bool working, bool partyJob, bool keepsGroup)
+    {
+        return joined && (!working || !partyJob) && !keepsGroup;
+    }
+
+    // A walk's planning: done, not possible from here (with why), or waiting for the next tick's path searches.
+    enum class PlanResult : uint8_t { Planned, Blocked, Pending };
 
     // Joins words with commas, for a key=value field.
     inline std::string Join(const std::vector<std::string>& words)

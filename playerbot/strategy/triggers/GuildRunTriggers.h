@@ -53,6 +53,14 @@ namespace ai
         bool IsActive() override;
     };
 
+    // A member apart from its party, with a walk back to it: at the start of its next part, and not already walking one.
+    class RunWalkTrigger : public RunTrigger
+    {
+    public:
+        RunWalkTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run walk") {}
+        bool IsActive() override;
+    };
+
     // The leader has come to the pull spot.
     class RunGatherTrigger : public RunTrigger
     {

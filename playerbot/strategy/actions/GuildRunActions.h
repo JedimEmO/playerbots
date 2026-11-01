@@ -23,6 +23,15 @@ namespace ai
         bool isUseful() override;
     };
 
+    // A member apart from its party walks the next part of its walk back, exactly along the points the tick checked, as one
+    // run move (GuildRunStates::StartRunMove, MotionMaster::MovePath with the token).
+    class MoveToRunWalkAction : public Action
+    {
+    public:
+        MoveToRunWalkAction(PlayerbotAI* ai) : Action(ai, "move to run walk") {}
+        bool Execute(Event& event) override;
+    };
+
     // After a hold, a hand-back or a change of members: the leader chooses its stop again from where it stands.
     class RunChooseAction : public Action
     {

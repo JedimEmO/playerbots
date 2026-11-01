@@ -4,6 +4,7 @@
 #include "GuildRunCore.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -73,6 +74,71 @@ namespace
             cancelled.push_back(guid);
             calls.push_back("cancel " + std::to_string(guid));
         }
+
+        // The route, as the rejoin rules see it: a hold place or none, which places are clear, the current stop's way
+        // point, every place on the way, and how each member's walk plans.
+        bool hasHoldPlace = false;
+        Held holdPlace;
+        std::function<bool(const Held&)> clear = [](const Held&) { return true; };
+        Held stopPoint;
+        bool onWay = true;
+        std::map<uint32_t, runrules::PlanResult> plans;   // Planned when not given
+        std::map<uint32_t, int> planCalls;
+        bool respawned = false;
+        bool walkingMoves = true;
+
+        bool HoldPlace(Held& place) override
+        {
+            place = holdPlace;
+            return hasHoldPlace;
+        }
+        bool PlaceClear(const Held& at) override { return clear(at); }
+        bool StopWayPoint(Held& at) override
+        {
+            at = stopPoint;
+            return true;
+        }
+        bool WayPointNear(const Held& at, Held& point) override
+        {
+            point = at;
+            return onWay;
+        }
+        runrules::PlanResult PlanWalk(uint32_t guid, const Held& to, Walk& walk, std::string& why) override
+        {
+            ++planCalls[guid];
+            const runrules::PlanResult result = plans.count(guid) ? plans[guid] : runrules::PlanResult::Planned;
+            if (result == runrules::PlanResult::Blocked)
+                why = "spawn_99_stop_3";
+            if (result != runrules::PlanResult::Planned)
+                return result;
+            // A straight way, a point every 2 yards, as the route's way has them.
+            const std::vector<float>& at = places[guid];
+            const runrules::Vec from = { at[0], at[1], at[2] }, end = { to.x, to.y, to.z };
+            const int steps = std::max(1, int(runrules::Distance(from, end) / 2.0f));
+            std::vector<runrules::Vec> line;
+            for (int i = 0; i <= steps; ++i)
+            {
+                const float t = float(i) / float(steps);
+                line.push_back({ from.x + (end.x - from.x) * t, from.y + (end.y - from.y) * t, from.z + (end.z - from.z) * t });
+            }
+            // A summon in reach of the line blocks it, as the server's reach test does.
+            if (summon.reach > 0.0f && runrules::FirstThreat({ summon }, line) >= 0)
+            {
+                why = runrules::ThreatName(summon, -1);
+                return runrules::PlanResult::Blocked;
+            }
+            walk.chunks = runrules::Chunks(line, runrules::WALK_CHUNK_YARDS);
+            walk.to = to;
+            return runrules::PlanResult::Planned;
+        }
+        bool Respawned(const std::vector<uint32_t>&) override { return respawned; }
+        // A summon standing in the way, as Sneed by the lumber mill, at this place with this reach; none when reach is 0.
+        runrules::Threat summon;
+        bool CreatureNear(const std::vector<runrules::Vec>& part) override
+        {
+            return summon.reach > 0.0f && runrules::FirstThreat({ summon }, part) >= 0;
+        }
+        bool Walking(uint32_t) override { return walkingMoves; }
     };
 
     runrules::Facts Inside()
@@ -127,7 +193,7 @@ namespace
         CHECK(!runrules::Accepts(Mode::Lead, state, { 0, 0 }, false));
         CHECK(runrules::Accepts(Mode::Hold, state, { 3, 7 }, false));
         CHECK(!runrules::Accepts(Mode::Hold, state, { 3, 7 }, true));
-        CHECK(!runrules::Accepts(Mode::Released, state, { 3, 7 }, false));
+        CHECK(runrules::Accepts(Mode::Released, state, { 3, 7 }, false));    // a member walking back to its party
         CHECK(!runrules::Accepts(Mode::Released, state, { 3, 7 }, true));
         CHECK(!runrules::Accepts(Mode::Ended, state, { 3, 7 }, false));
     }
@@ -177,13 +243,155 @@ namespace
 
     void Resume()
     {
-        CHECK(runrules::Resumes(true, 39.0f, 0));
-        CHECK(!runrules::Resumes(true, 41.0f, 0));
-        CHECK(!runrules::Resumes(true, 41.0f, 179));
-        CHECK(runrules::Resumes(true, 41.0f, 180));
-        CHECK(runrules::Resumes(true, -1.0f, 180));
-        CHECK(!runrules::Resumes(true, -1.0f, 179));
-        CHECK(!runrules::Resumes(false, 1.0f, 1000));
+        // The pull permit: lead, or released not leaving; nobody apart; not failed.
+        runrules::PermitFacts permit;
+        permit.mode = Mode::Lead;
+        CHECK(runrules::PullPermit(permit));
+        permit.apart = true;
+        CHECK(!runrules::PullPermit(permit));
+        permit.apart = false;
+        permit.failed = true;
+        CHECK(!runrules::PullPermit(permit));
+        permit.failed = false;
+        permit.mode = Mode::Released;
+        CHECK(runrules::PullPermit(permit));
+        permit.leaving = true;
+        CHECK(!runrules::PullPermit(permit));
+        permit.leaving = false;
+        permit.mode = Mode::Hold;
+        CHECK(!runrules::PullPermit(permit));
+        // The deadline: ten minutes apart, nothing else holding; never without a start.
+        CHECK(!runrules::Overdue(0, 100000));
+        CHECK(!runrules::Overdue(100, 100 + runrules::REJOIN_SECONDS - 1));
+        CHECK(runrules::Overdue(100, 100 + runrules::REJOIN_SECONDS));
+        // The cohort: alive inside and not seen dead in the last 30 seconds.
+        CHECK(runrules::InCohort(Inside(), 0, 1000));
+        CHECK(!runrules::InCohort(Inside(), 990, 1000));
+        CHECK(runrules::InCohort(Inside(), 969, 1000));
+        Facts dead = Inside();
+        dead.alive = false;
+        CHECK(!runrules::InCohort(dead, 0, 1000));
+        // Members walk back in released too; the leader writes only in lead.
+        CHECK(runrules::Accepts(Mode::Released, { 3, 1 }, { 3, 1 }, false));
+        CHECK(!runrules::Accepts(Mode::Released, { 3, 1 }, { 3, 1 }, true));
+    }
+
+    // The Deadmines' way passes the upper mine twice: early, and again near the end after the ship. A walk from the
+    // entrance to an anchor in the upper mine goes the short way, not through the ship's cove, where a pack still lives.
+    void WayPassedTwice()
+    {
+        using runrules::Vec;
+        std::vector<Vec> way;
+        auto leg = [&](const Vec& from, const Vec& to)
+        {
+            const int steps = std::max(1, int(runrules::Distance(from, to) / 2.0f));
+            for (int i = way.empty() ? 0 : 1; i <= steps; ++i)
+            {
+                const float t = float(i) / float(steps);
+                way.push_back({ from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, from.z + (to.z - from.z) * t });
+            }
+        };
+        const Vec entrance = { -14.6f, -385.5f, 62.5f }, anchor = { -215.0f, -555.0f, 52.0f };
+        const Vec firstPass = { -219.0f, -559.0f, 52.0f }, cove = { -19.0f, -818.0f, 20.0f }, end = { -120.0f, -640.0f, 14.0f };
+        leg(entrance, firstPass);
+        leg(firstPass, cove);
+        leg(cove, anchor);          // the second pass goes right over the anchor, nearer than the first
+        leg(anchor, end);
+        runrules::Threat pirate;    // spawn 3600174, stop 104: still alive, unloaded
+        pirate.spawn = 3600174;
+        pirate.where = { { -19.2f, -830.0f, 19.7f } };
+        pirate.reach = 25.0f;
+        const std::vector<size_t> starts = runrules::WayNear(way, entrance, runrules::WAY_NEAR);
+        const std::vector<size_t> ends = runrules::WayNear(way, anchor, runrules::WAY_NEAR);
+        CHECK(!starts.empty() && ends.size() > 2);
+        size_t a = 0, b = 0;
+        CHECK(runrules::WaySpan(starts, ends, a, b));
+        auto stretch = [&](size_t from, size_t to)
+        {
+            std::vector<Vec> line;
+            for (size_t i = from;; i = from < to ? i + 1 : i - 1)
+            {
+                line.push_back(way[i]);
+                if (i == to)
+                    break;
+            }
+            return line;
+        };
+        CHECK(b < way.size() / 3 && runrules::FirstThreat({ pirate }, stretch(a, b)) < 0);
+        // The nearest point to the anchor alone is the second pass, through the cove: the walk the live test blocked.
+        size_t nearest = 0;
+        for (size_t i = 0; i < way.size(); ++i)
+            if (runrules::Distance(way[i], anchor) < runrules::Distance(way[nearest], anchor))
+                nearest = i;
+        CHECK(nearest > way.size() / 2 && runrules::FirstThreat({ pirate }, stretch(a, nearest)) == 0);
+        // Either list empty: no stretch.
+        CHECK(!runrules::WaySpan({}, ends, a, b) && !runrules::WaySpan(starts, {}, a, b));
+
+        // The leader chooses its stop again at the anchor after the hold. Copy a's third run: the run was at stop 68,
+        // on the first pass; the second pass is the nearer, by Miner Johnson, and the stop after it was 142.
+        const Vec atAnchor = { -207.0f, -558.0f, 52.0f };
+        const std::vector<size_t> nearAnchor = runrules::WayNear(way, atAnchor, runrules::WAY_NEAR);
+        size_t closest = 0;
+        for (size_t i = 0; i < way.size(); ++i)
+            if (runrules::Distance(way[i], atAnchor) < runrules::Distance(way[closest], atAnchor))
+                closest = i;
+        const size_t firstIndex = ends.front();
+        // Stop 68 a little past the first pass, stop 142 a little past the second; a stop is chosen at or ahead of the
+        // place, as GuildPacks::FirstLiveStop does with START_SLACK.
+        const float stop68 = float(firstIndex + 5) * 2.0f, stop142 = float(closest + 15) * 2.0f;
+        auto chosen = [&](size_t place)
+        {
+            const float along = float(place) * 2.0f;
+            return stop68 + 10.0f >= along ? 68 : stop142 + 10.0f >= along ? 142 : 0;
+        };
+        CHECK(closest > way.size() / 2 && chosen(closest) == 142);
+        // Without progress, a party set down fresh: the nearest point, as before.
+        CHECK(runrules::PlaceAlong(nearAnchor, closest, false, 0) == closest);
+        // With the run's progress, stop 68's place: the first pass, and stop 68.
+        const size_t place = runrules::PlaceAlong(nearAnchor, closest, true, size_t(stop68 / 2.0f));
+        CHECK(place < way.size() / 3 && chosen(place) == 68);
+        // Nothing within reach of the way: the nearest point whatever the progress.
+        CHECK(runrules::PlaceAlong({}, closest, true, 3) == closest);
+    }
+
+    void Geometry()
+    {
+        using runrules::Vec;
+        // Point and segment, segment and segment, crossing between vertices.
+        CHECK(std::fabs(runrules::SegmentDistance({ 0, 5, 0 }, { 0, 5, 0 }, { -10, 0, 0 }, { 10, 0, 0 }) - 5.0f) < 0.01f);
+        CHECK(std::fabs(runrules::SegmentDistance({ 0, -5, 0 }, { 0, 5, 0 }, { -10, 0, 0 }, { 10, 0, 0 })) < 0.01f);
+        CHECK(std::fabs(runrules::SegmentDistance({ 12, 0, 0 }, { 12, 0, 0 }, { -10, 0, 0 }, { 10, 0, 0 }) - 2.0f) < 0.01f);
+        CHECK(std::fabs(runrules::SegmentDistance({ 0, 3, 4 }, { 1, 3, 4 }, { 0, 0, 0 }, { 1, 0, 0 }) - 5.0f) < 0.01f);
+        // A line two waypoints wide: a creature between its vertices is seen, one beside its reach is not.
+        const std::vector<Vec> line = { { 0, 0, 0 }, { 100, 0, 0 } };
+        runrules::Threat still;
+        still.spawn = 1;
+        still.where = { { 50, 20, 0 } };
+        still.reach = 19.0f;
+        CHECK(runrules::FirstThreat({ still }, line) < 0);
+        still.reach = 21.0f;
+        CHECK(runrules::FirstThreat({ still }, line) == 0);
+        // A patrol whose path crosses the line between both lines' vertices, with its points far from it.
+        runrules::Threat patrol;
+        patrol.spawn = 2;
+        patrol.where = { { 40, -60, 0 }, { 60, 60, 0 } };
+        patrol.reach = 5.0f;
+        CHECK(runrules::FirstThreat({ patrol }, line) == 0);
+        patrol.where = { { 40, 30, 0 }, { 60, 60, 0 } };
+        CHECK(runrules::FirstThreat({ patrol }, line) < 0);
+        // A path kept near the way, and one that leaves it.
+        CHECK(runrules::Along({ { 10, 1, 0 }, { 50, -1.5f, 0 } }, line, 2.0f));
+        CHECK(!runrules::Along({ { 10, 1, 0 }, { 50, 3.0f, 0 } }, line, 2.0f));
+        // Parts of at most 40 yards, each from the last one's end.
+        std::vector<Vec> way;
+        for (int i = 0; i <= 50; ++i)
+            way.push_back({ float(i * 2), 0, 0 });
+        const std::vector<std::vector<Vec>> chunks = runrules::Chunks(way, runrules::WALK_CHUNK_YARDS);
+        CHECK(chunks.size() == 3);
+        CHECK(std::fabs(runrules::Length(chunks[0]) - 40.0f) < 0.01f);
+        CHECK(std::fabs(chunks[1].front().x - chunks[0].back().x) < 0.01f);
+        CHECK(std::fabs(chunks.back().back().x - 100.0f) < 0.01f);
+        CHECK(runrules::Chunks({ { 0, 0, 0 } }, 40.0f).empty());
     }
 
     void JobTable()
@@ -311,31 +519,38 @@ namespace
         core.Reconcile(world, counter, 110);
         CHECK(core.mode == Mode::Hold && core.reason == "leader_ghost" && core.generation == held);
 
-        // Back alive inside, far from every member: no resume before 180 s; then it resumes, the leader to choose its stop.
+        // Back alive inside, far from the party: a returner, walking to the anchor; no resume by time, however long.
         world.facts[1] = Inside();
         world.places[1] = { 500.0f, 0.0f, 0.0f };
         core.Reconcile(world, counter, 200);
-        CHECK(core.mode == Mode::Hold);
-        core.Reconcile(world, counter, 379);
-        CHECK(core.mode == Mode::Hold);
-        world.cancelled.clear();
+        CHECK(core.mode == Mode::Hold && core.apart.count(1) && core.apart[1].walking);
+        CHECK(HasEvent(core, "run_rejoin", "member=m1 result=walking"));
         core.Reconcile(world, counter, 380);
-        CHECK(core.mode == Mode::Lead && core.choose && core.reason == "resume_waited");
-        CHECK(core.held.empty());
+        CHECK(core.mode == Mode::Hold);
+        // At the anchor: every member with the party, the run resumes and the leader chooses its stop from there.
+        world.places[1] = { 2.0f, 1.0f, 0.0f };
+        world.cancelled.clear();
+        core.Reconcile(world, counter, 390);
+        CHECK(core.mode == Mode::Lead && core.choose && core.reason == "resume_rejoined");
+        CHECK(core.held.empty() && core.apart.empty());
         CHECK(world.cancelled.empty());
     }
 
     void ResumeNear()
     {
+        // 39 yards from the party is not with it: arrival is at the anchor.
         FakeWorld world = Party();
         Counter counter;
         RunCore core = Started(world, counter);
         world.facts[1].alive = false;
         core.Reconcile(world, counter, 100);
         world.facts[1] = Inside();
-        world.places[1] = { 2.0f, 39.0f, 0.0f };   // 39 yd from m2's place
+        world.places[1] = { 2.0f, 39.0f, 0.0f };
         core.Reconcile(world, counter, 120);
-        CHECK(core.mode == Mode::Lead && core.reason == "resume_near");
+        CHECK(core.mode == Mode::Hold && core.apart.count(1));
+        world.places[1] = { 2.0f, 4.0f, 0.0f };
+        core.Reconcile(world, counter, 130);
+        CHECK(core.mode == Mode::Lead && core.reason == "resume_rejoined");
     }
 
     void AnotherInstance()
@@ -495,13 +710,13 @@ namespace
         CHECK(core.mode == Mode::Hold && core.reason == "leader_offline" && core.heldFrom == Mode::Released);
         CHECK(core.held.empty());
 
-        // Back: no member holds a place inside, so the hold resumes 180 s later, to released, the trip going on.
+        // Back: the hold began on the way out, so it resumes to released at once, the trip going on, with nobody walking
+        // back in.
         world.facts[1] = Inside();
         world.facts[1].inInstance = false;
         core.Reconcile(world, counter, 200);
-        CHECK(core.mode == Mode::Hold);
-        core.Reconcile(world, counter, 380);
-        CHECK(core.mode == Mode::Released && !core.choose);
+        CHECK(core.mode == Mode::Released && !core.choose && core.reason == "resume_leaving" && core.apart.empty());
+        CHECK(!core.Permit());
 
         // A dead leader during the trip holds.
         world.facts[1].alive = false;
@@ -707,13 +922,14 @@ namespace
         View other{ Mode::Lead, { 4, 9 }, 22 };
         CHECK(runrules::ValidatedPlace(fresh.mode, fresh.stamp, runrules::Stamp{ 4, 9 }, false, fresh, placeOf, place));
         CHECK(asked == 1 && place == 11 && place != other.place);
-        // In hold, a member's move to its place is accepted, a leader's write is not; released never.
+        // In hold, a member's move to its place is accepted, a leader's write is not; in released only a member's.
         View held{ Mode::Hold, { 5, 1 }, 33 };
         CHECK(runrules::ValidatedPlace(held.mode, held.stamp, runrules::Stamp{ 5, 1 }, false, held, placeOf, place) && place == 33);
         CHECK(!runrules::ValidatedPlace(held.mode, held.stamp, runrules::Stamp{ 5, 1 }, true, held, placeOf, place));
         View released{ Mode::Released, { 6, 2 }, 44 };
-        CHECK(!runrules::ValidatedPlace(released.mode, released.stamp, runrules::Stamp{ 6, 2 }, false, released, placeOf, place));
-        CHECK(place == 33);
+        CHECK(runrules::ValidatedPlace(released.mode, released.stamp, runrules::Stamp{ 6, 2 }, false, released, placeOf, place));
+        CHECK(place == 44);
+        CHECK(!runrules::ValidatedPlace(released.mode, released.stamp, runrules::Stamp{ 6, 2 }, true, released, placeOf, place));
     }
 
     void Tokens()
@@ -1018,6 +1234,337 @@ namespace
         }
     }
 
+    // Copy a's hand test: the healer dies, comes back at the entrance, then the leader dies. The healer just back is not
+    // of the cohort; the party's place is the cohort's, nearest the stop; both walk back, and only then the run resumes.
+    void CopyA()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        world.facts[5].alive = false;
+        core.Reconcile(world, counter, 90);
+        CHECK(core.mode == Mode::Lead && core.apart.count(5) && core.apart[5].missing && !core.Permit());
+        world.facts[5] = Inside();
+        world.places[5] = { 300.0f, 0.0f, 0.0f };   // the entrance
+        world.facts[1].alive = false;
+        core.Reconcile(world, counter, 100);
+        CHECK(core.mode == Mode::Hold && core.reason == "leader_dead");
+        CHECK(core.hasAnchor && core.anchorKind == "cohort_m2");
+        CHECK(core.apart.count(5) && !core.apart[5].cohort && core.apart[5].walking);
+        CHECK(!core.apart.count(2) && !core.apart.count(3) && !core.apart.count(4));   // within 5 yd of the anchor
+        CHECK(HasEvent(core, "run_anchor", "kind=cohort_m2") && HasEvent(core, "run_anchor", "cohort=m2,m3,m4"));
+        // The leader back at the entrance walks too; the leader at the party with the healer still away: no resume.
+        world.facts[1] = Inside();
+        world.places[1] = { 300.0f, 2.0f, 0.0f };
+        core.Reconcile(world, counter, 150);
+        CHECK(core.mode == Mode::Hold && core.apart.count(1) && core.apart[1].walking);
+        world.places[1] = { 2.0f, 2.0f, 0.0f };
+        core.Reconcile(world, counter, 200);
+        CHECK(core.mode == Mode::Hold && !core.apart.count(1) && core.apart.count(5));
+        // Every reason gone, the healer still away: the hold's reason says the party regroups.
+        CHECK(core.reason == "regrouping" && HasEvent(core, "run_mode", "mode=hold reason=regrouping"));
+        world.places[5] = { 3.0f, -2.0f, 0.0f };
+        core.Reconcile(world, counter, 210);
+        CHECK(core.mode == Mode::Lead && core.reason == "resume_rejoined" && core.choose && core.Permit());
+    }
+
+    void HoldPlaceAndMinute()
+    {
+        FakeWorld world = Party();
+        world.hasHoldPlace = true;
+        world.holdPlace = { 50.0f, 0.0f, 0.0f };
+        Counter counter;
+        RunCore core = Started(world, counter);
+        world.facts[1].alive = false;
+        core.Reconcile(world, counter, 100);
+        CHECK(core.anchorKind == "hold_place");
+        for (uint32_t guid : { 2u, 3u, 4u, 5u })
+            CHECK(core.apart.count(guid) && core.apart[guid].cohort && core.apart[guid].walking);
+        // Three get there; one does not within its minute: it stands where it is, its run move goes, and it is a
+        // returner, tried again after REPLAN_SECONDS.
+        for (uint32_t guid : { 2u, 3u, 4u })
+            world.places[guid] = { 50.0f, float(guid) - 3.0f, 0.0f };
+        world.places[5] = { 10.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 120);
+        CHECK(!core.apart.count(2) && core.apart.count(5));
+        core.cancels.clear();
+        core.Reconcile(world, counter, 160);
+        CHECK(core.apart.count(5) && !core.apart[5].cohort && !core.apart[5].walking);
+        CHECK(core.cancels == std::vector<uint32_t>{ 5 });
+        CHECK(HasEvent(core, "run_hold_at", "member=m5 result=gave_up"));
+        CHECK(core.held.count(5) && core.held[5].x == 10.0f);
+        const int calls = world.planCalls[5];
+        core.Reconcile(world, counter, 165);
+        CHECK(world.planCalls[5] == calls && !core.apart[5].walking);
+        core.Reconcile(world, counter, 171);
+        CHECK(world.planCalls[5] == calls + 1 && core.apart[5].walking);
+    }
+
+    void BlockedEndsTheRun()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        world.facts[1].alive = false;
+        world.facts[5].alive = false;
+        core.Reconcile(world, counter, 100);
+        world.facts[1] = Inside();
+        world.facts[5] = Inside();
+        world.places[5] = { 300.0f, 0.0f, 0.0f };
+        world.plans[5] = runrules::PlanResult::Blocked;
+        core.Reconcile(world, counter, 110);
+        CHECK(core.apart.count(5) && core.apart[5].blocked == "spawn_99_stop_3" && !core.apart[5].walking);
+        CHECK(HasEvent(core, "run_rejoin", "member=m5 result=blocked why=spawn_99_stop_3"));
+        CHECK(core.apartSince == 110);
+        // Tried again every REPLAN_SECONDS, not every tick.
+        const int calls = world.planCalls[5];
+        core.Reconcile(world, counter, 115);
+        CHECK(world.planCalls[5] == calls);
+        core.Reconcile(world, counter, 120);
+        CHECK(world.planCalls[5] == calls + 1);
+        // A hold reason back stops the clock; gone again, it starts over.
+        world.facts[1].alive = false;
+        core.Reconcile(world, counter, 300);
+        CHECK(core.apartSince == 0);
+        world.facts[1] = Inside();
+        core.Reconcile(world, counter, 310);
+        CHECK(core.apartSince == 310 && core.mode == Mode::Hold);
+        core.Reconcile(world, counter, 310 + runrules::REJOIN_SECONDS - 1);
+        CHECK(core.mode == Mode::Hold && !core.failed);
+        core.Reconcile(world, counter, 310 + runrules::REJOIN_SECONDS);
+        CHECK(core.mode == Mode::Ended && core.reason == "cannot_rejoin" && core.failed && !core.Permit());
+        CHECK(HasEvent(core, "run_rejoin", "result=cannot_rejoin apart=m5:spawn_99_stop_3"));
+    }
+
+    void ApartInLead()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        CHECK(core.Permit() && core.settled.size() == 5);
+        // A member dead in lead is apart, and the party may start no fight: the job's pulls and steps wait too.
+        world.facts[3].alive = false;
+        core.Reconcile(world, counter, 110);
+        CHECK(core.mode == Mode::Lead && core.apart.count(3) && !core.Permit() && core.settled.size() == 4);
+        // A step of the tables releases the party: still apart, still no fight.
+        JobReport step;
+        step.inside = true;
+        step.stepDue = true;
+        core.Settle(world, counter, step);
+        CHECK(core.mode == Mode::Released && core.apart.count(3) && !core.Permit());
+        // Back alive at the entrance: it walks to the leader's way point, and arrives.
+        world.facts[3] = Inside();
+        world.places[3] = { 300.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 120);
+        CHECK(core.apart.count(3) && core.apart[3].walking && core.apart[3].walk.to.x == 1.0f);
+        CHECK(HasEvent(core, "run_rejoin", "member=m3 result=back"));
+        world.places[3] = { 3.0f, 1.0f, 0.0f };
+        core.Reconcile(world, counter, 130);
+        CHECK(core.apart.empty() && core.Permit());
+        // Far from the leader in lead: displaced, and apart.
+        JobReport back;
+        back.inside = true;
+        core.Settle(world, counter, back);
+        CHECK(core.mode == Mode::Lead);
+        world.places[4] = { 100.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 140);
+        CHECK(core.apart.count(4) && HasEvent(core, "run_rejoin", "member=m4 result=displaced") && !core.Permit());
+        // The leader leaving the party behind is no reason for the leader to be apart.
+        CHECK(!core.apart.count(1));
+    }
+
+    void WalksPlannedAgain()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        world.facts[1].alive = false;
+        world.facts[5].alive = false;
+        core.Reconcile(world, counter, 100);
+        world.facts[5] = Inside();
+        world.places[5] = { 100.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 110);
+        CHECK(core.apart[5].walking && core.apart[5].walk.chunks.size() == 3);
+        const uint32_t first = core.apart[5].walk.id;
+        core.cancels.clear();
+        // A part's end reached: on to the next.
+        world.places[5] = { core.apart[5].walk.chunks[0].back().x + 1.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 115);
+        CHECK(core.apart[5].walking && core.apart[5].walk.chunk == 1 && core.apart[5].walk.id == first);
+        // Knocked off the walk: planned again from where it stands, its old run move removed.
+        world.places[5][1] = 10.0f;
+        core.Reconcile(world, counter, 116);
+        CHECK(core.cancels == std::vector<uint32_t>{ 5 } && core.apart[5].walking && core.apart[5].walk.id != first);
+        CHECK(HasEvent(core, "run_rejoin", "member=m5 result=replan why=drift"));
+        // A creature near it alive again; a part not gained in WALK_STALL_SECONDS; its move gone mid-part.
+        core.cancels.clear();
+        world.respawned = true;
+        core.Reconcile(world, counter, 117);
+        CHECK(core.cancels.size() == 1 && HasEvent(core, "run_rejoin", "why=respawn"));
+        world.respawned = false;
+        core.Reconcile(world, counter, 117 + runrules::WALK_STALL_SECONDS);
+        CHECK(HasEvent(core, "run_rejoin", "why=stalled"));
+        const runrules::Vec start = core.apart[5].walk.chunks[0].front();
+        world.places[5] = { start.x - 3.0f, start.y, start.z };
+        world.walkingMoves = false;
+        core.Reconcile(world, counter, 150);
+        CHECK(HasEvent(core, "run_rejoin", "why=stopped"));
+        // No path search left this tick: no walk yet, and none lost; the next tick tries again.
+        world.walkingMoves = true;
+        world.plans[5] = runrules::PlanResult::Pending;
+        world.respawned = true;
+        core.Reconcile(world, counter, 160);
+        CHECK(!core.apart[5].walking && core.apart[5].blocked.empty());
+        world.respawned = false;
+        world.plans.erase(5);
+        core.Reconcile(world, counter, 161);
+        CHECK(core.apart[5].walking);
+    }
+
+    void NoAnchor()
+    {
+        // No hold place, and no cohort member stands clear: no anchor until the leader is back alive inside, clear.
+        FakeWorld world = Party();
+        world.clear = [](const Held& at) { return at.x > 100.0f; };
+        Counter counter;
+        RunCore core = Started(world, counter);
+        world.facts[1].alive = false;
+        core.Reconcile(world, counter, 100);
+        CHECK(!core.hasAnchor && HasEvent(core, "run_anchor", "kind=none"));
+        for (uint32_t guid : { 2u, 3u, 4u, 5u })
+            CHECK(core.apart.count(guid) && !core.apart[guid].walking);
+        world.facts[1] = Inside();
+        world.places[1] = { 200.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 110);
+        CHECK(core.hasAnchor && core.anchorKind == "leader" && !core.apart.count(1));
+        CHECK(core.apart[2].walking && core.apart[2].walk.to.x == 200.0f);
+
+        // Off the route's way, no place is the party's: a member coming back could not walk to it.
+        FakeWorld offWay = Party();
+        offWay.onWay = false;
+        RunCore held = Started(offWay, counter);
+        offWay.facts[1].alive = false;
+        held.Reconcile(offWay, counter, 100);
+        CHECK(!held.hasAnchor);
+        offWay.facts[1] = Inside();
+        held.Reconcile(offWay, counter, 110);
+        CHECK(!held.hasAnchor && held.mode == Mode::Hold);
+    }
+
+    void FailureOutlivesTheRun()
+    {
+        Failures kept;
+        std::string why;
+        CHECK(!kept.Find(1, 7, why));
+        kept.Record(1, 7, "cannot_rejoin");
+        // The run state can be gone; the failure stands for its order only, until acknowledged for that order.
+        CHECK(kept.Find(1, 7, why) && why == "cannot_rejoin");
+        CHECK(!kept.Find(1, 8, why));
+        kept.Acknowledge(1, 8);
+        CHECK(kept.Find(1, 7, why));
+        kept.Acknowledge(1, 7);
+        CHECK(!kept.Find(1, 7, why));
+    }
+
+    // A party failed by cannot_rejoin keeps its group for the order it failed, so the instance stays valid and nobody is
+    // sent home; the agent's next order lets it go as any party job's end does.
+    void FailedPartyKeepsGroup()
+    {
+        CHECK(!runrules::KeepsGroup(0, 0));
+        CHECK(runrules::KeepsGroup(41, 41));
+        CHECK(!runrules::KeepsGroup(41, 42));
+        // The failed order: joined, not working, a party job, kept: it stays.
+        CHECK(!runrules::LeavesParty(true, false, true, runrules::KeepsGroup(41, 41)));
+        // The next order, another job or the party job again, ends the keeping: a job not working leaves, as before.
+        CHECK(runrules::LeavesParty(true, false, true, runrules::KeepsGroup(41, 42)));
+        CHECK(runrules::LeavesParty(true, true, false, runrules::KeepsGroup(41, 42)));
+        CHECK(!runrules::LeavesParty(true, true, true, runrules::KeepsGroup(41, 42)));
+        // A failure for any other reason, as before: it leaves.
+        CHECK(runrules::LeavesParty(true, false, true, runrules::KeepsGroup(0, 41)));
+        CHECK(!runrules::LeavesParty(false, false, true, false));
+    }
+
+    // Copy a's retest: clearroute killed Sneed's Shredder, whose death summoned Sneed by the lumber mill. He has no spawn,
+    // so the route's model never had him; the reach test takes him as a live creature, and no walk goes past him.
+    void SummonInTheWay()
+    {
+        using runrules::Vec;
+        runrules::Threat sneed;
+        sneed.entry = 643;
+        sneed.where = { { -306.0f, -513.0f, 56.0f } };
+        sneed.reach = 20.0f + runrules::THREAT_MARGIN;
+        CHECK(runrules::ThreatName(sneed, -1) == "creature_643_unmodelled");
+        sneed.spawn = 79000;
+        CHECK(runrules::ThreatName(sneed, -1) == "creature_643_spawn_79000_unmodelled");
+        sneed.spawn = 0;
+        runrules::Threat modelled;
+        modelled.spawn = 3600174;
+        CHECK(runrules::ThreatName(modelled, 103) == "spawn_3600174_stop_104");
+        // The way from the entrance to the foundry passes the mill: blocked while he lives.
+        const std::vector<Vec> way = { { -14.6f, -385.5f, 62.5f }, { -180.0f, -470.0f, 55.0f }, { -300.0f, -505.0f, 56.0f },
+            { -215.0f, -555.0f, 52.0f } };
+        CHECK(runrules::FirstThreat({ sneed }, way) == 0);
+        // A way that keeps out of his reach is clear.
+        const std::vector<Vec> clear = { { -14.6f, -385.5f, 62.5f }, { -180.0f, -470.0f, 55.0f }, { -215.0f, -555.0f, 52.0f } };
+        CHECK(runrules::FirstThreat({ sneed }, clear) < 0);
+
+        // The run: the healer back at the entrance, a summon in its way. No walk while he lives; one once he is dead.
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        world.facts[1].alive = false;
+        world.facts[5].alive = false;
+        core.Reconcile(world, counter, 100);
+        world.facts[1] = Inside();
+        world.places[1] = { 2.0f, 1.0f, 0.0f };
+        world.facts[5] = Inside();
+        world.places[5] = { 300.0f, 0.0f, 0.0f };
+        world.summon.entry = 643;
+        world.summon.where = { { 150.0f, 6.0f, 0.0f } };
+        world.summon.reach = 20.0f;
+        core.Reconcile(world, counter, 110);
+        CHECK(core.apart.count(5) && !core.apart[5].walking && core.apart[5].blocked == "creature_643_unmodelled");
+        CHECK(HasEvent(core, "run_rejoin", "member=m5 result=blocked why=creature_643_unmodelled"));
+        world.summon.reach = 0.0f;
+        core.Reconcile(world, counter, 120);
+        CHECK(core.apart[5].walking);
+        // Summoned again into the part being walked: the walk stops and is planned again, and blocked.
+        world.summon.reach = 20.0f;
+        world.summon.where = { { core.apart[5].walk.chunks[0].back().x, 3.0f, 0.0f } };
+        core.cancels.clear();
+        core.Reconcile(world, counter, 121);
+        CHECK(HasEvent(core, "run_rejoin", "member=m5 result=replan why=creature_near"));
+        CHECK(core.cancels == std::vector<uint32_t>{ 5 } && !core.apart[5].walking
+            && core.apart[5].blocked == "creature_643_unmodelled");
+        CHECK(core.mode == Mode::Hold);
+    }
+
+    void PullPermitLost()
+    {
+        // A pull fired while the party was together, run after a member died: the permit is gone, whatever the stamp.
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        const runrules::Stamp fired = core.Stamp();
+        CHECK(core.Permit());
+        world.facts[2].alive = false;
+        core.Reconcile(world, counter, 101);
+        CHECK(runrules::Same(core.Stamp(), fired) && !core.Permit());
+        // Alive again where it fell, by a resurrection: apart until the tick sees it with the party.
+        world.facts[2] = Inside();
+        CHECK(!core.Permit());
+        core.Reconcile(world, counter, 102);
+        CHECK(core.apart.empty() && core.Permit());
+        // Released while the job takes the party out: no fight, and nobody walks back in.
+        JobReport leave;
+        leave.leaving = true;
+        core.Settle(world, counter, leave);
+        core.Reconcile(world, counter, 103);
+        CHECK(core.mode == Mode::Released && !core.Permit() && core.apart.empty());
+    }
+
     void RunMoveCleanup()
     {
         const runrules::Stamp stamp = { 3, 1 };
@@ -1129,6 +1676,8 @@ int main()
     Stamps();
     HoldReasons();
     Resume();
+    Geometry();
+    WayPassedTwice();
     JobTable();
     CancelBeneathChase();
     EndAndRetention();
@@ -1160,6 +1709,16 @@ int main()
     RunMoveCallbackReplacement();
     RunMoveIssueReentrancy();
     RunMoveCleanup();
+    CopyA();
+    HoldPlaceAndMinute();
+    BlockedEndsTheRun();
+    ApartInLead();
+    WalksPlannedAgain();
+    NoAnchor();
+    FailureOutlivesTheRun();
+    PullPermitLost();
+    FailedPartyKeepsGroup();
+    SummonInTheWay();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

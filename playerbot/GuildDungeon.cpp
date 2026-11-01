@@ -1365,7 +1365,17 @@ bool GuildDungeon::StepWaits(Run& run, Update& update, const std::string& what)
     return true;
 }
 
-GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name, runrules::Control control)
+bool GuildDungeon::StartWaits(Run& run, Update& update, const std::string& what, bool fighting)
+{
+    if (StepWaits(run, update, what))
+        return true;
+    if (run.permit || fighting)
+        return false;
+    update.reason = what + ", waiting for the party to regroup";
+    return true;
+}
+
+GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name, runrules::Control control, bool permit)
 {
     Update update;
     std::lock_guard<std::mutex> guard(lock);
@@ -1375,6 +1385,13 @@ GuildDungeon::Update GuildDungeon::Tick(Player* leader, const std::string& name,
     bool phasedOut = false;
     run.control = control;
     run.controlled = control == runrules::Control::Lead || control == runrules::Control::Hold;
+    // Without the run's permit a pull the job asked for is let go: the party is not together.
+    run.permit = permit;
+    if (!permit)
+    {
+        run.pullGuid.Clear();
+        run.pullAt = 0;
+    }
     const bool inBosses = run.resolved && run.phase == Phase::Bosses && leader->GetMapId() == run.dungeon.mapId;
     MarkRestDecided(leader, inBosses);
     if (!inBosses)
@@ -2138,7 +2155,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                 && (spoken == run.talkedAt.end() || now - spoken->second >= TALK_RETRY_SECONDS))
             {
                 // As a player picks the option in its gossip: the script does the rest, such as an escort to a door.
-                if (StepWaits(run, update, "speaking to " + BossName(entry)))
+                if (StartWaits(run, update, "speaking to " + BossName(entry), leader->IsInCombat()))
                     return;
                 sScriptDevAIMgr.OnGossipSelect(leader, creature, GOSSIP_SENDER_MAIN, talk->second, nullptr);
                 run.talkedAt[entry] = now;
@@ -2338,14 +2355,14 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
         {
             // A step of the tables like any kill: recorded, so that it asks for the release and keeps it until it is done.
             run.killPullGuid = nearest->GetObjectGuid();
-            if (StepWaits(run, update, "pulling " + BossName(kill.entry) + " first"))
+            if (StartWaits(run, update, "pulling " + BossName(kill.entry) + " first", false))
                 return;
             killPull = static_cast<Creature*>(nearest);
             break;
         }
         run.killGuid = nearest->GetObjectGuid();
         killing = BossName(kill.entry);
-        if (StepWaits(run, update, "killing " + killing))
+        if (StartWaits(run, update, "killing " + killing, leader->IsInCombat()))
             return;
         // One the pull step could take, farther than its reach: the leader goes until it is within reach, and no nearer.
         const bool pullable = kill.nearBoss > 0.0f && kill.before && nearest->GetTypeId() == TYPEID_UNIT && !nearest->IsInCombat()
@@ -2421,7 +2438,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
     // Not while the run controller has the party: it pulls from the dungeon model's pull spots.
     // Under released only the kill step's own pull, of a creature the step names.
     if ((ownMoves || (run.control == runrules::Control::Released && killPull)) && killing.empty() && talkWait.empty()
-        && !run.holding && leader->IsAlive() && leader->IsInWorld() && !leader->IsBeingTeleported())
+        && run.permit && !run.holding && leader->IsAlive() && leader->IsInWorld() && !leader->IsBeingTeleported())
     {
         PlayerbotAI* pullAi = leader->GetPlayerbotAI();
         Creature* pullTarget = !run.pullGuid.IsEmpty() ? map->GetCreature(run.pullGuid) : nullptr;
@@ -2664,7 +2681,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
             continue;
 
         run.useSpawn = use.spawn;
-        if (StepWaits(run, update, "using the " + itemName + " on the " + objectName))
+        if (StartWaits(run, update, "using the " + itemName + " on the " + objectName, leader->IsInCombat()))
             return;
         if (leader->GetDistance(object) > USE_DISTANCE)
         {
@@ -2755,7 +2772,7 @@ void GuildDungeon::TickBosses(Player* leader, Run& run, Update& update)
                     continue;
                 }
                 run.killGuid = brought->GetObjectGuid();
-                if (StepWaits(run, update, "killing " + BossName(use.brings) + " at the " + name))
+                if (StartWaits(run, update, "killing " + BossName(use.brings) + " at the " + name, leader->IsInCombat()))
                     return;
                 run.headwaySince = now;
                 update.reason = "killing " + BossName(use.brings) + " at the " + name + " in " + dungeon.name + ", " + count;

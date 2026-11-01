@@ -2,6 +2,8 @@
 
 #include "Common.h"
 #include "G3D/Vector3.h"
+#include "Entities/ObjectGuid.h"
+#include "playerbot/GuildRunRules.h"
 
 #include <functional>
 #include <list>
@@ -122,9 +124,28 @@ public:
     // nearest along it, judged by pullAlong; then the living clearing stops just before it whose spots are ahead too,
     // which are pulled first. A clearing stop whose spot is behind the point is passed over. -1 when none lives.
     // A creature not loaded and not waiting to respawn counts as living. World thread, or the instance's own map thread.
-    static int32 FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at);
+    // `progress`, when not negative, is the run's place along the way in yards, as its stop before a hold: the party's
+    // place is then read by it where the way passes `at` more than once (runrules::PlaceAlong).
+    static int32 FirstLiveStop(const Route& route, Map* map, const G3D::Vector3& at, float progress = -1.0f);
     // The same from a stop's index on: the first stop at or after it whose pack still has a living creature, or -1.
     static int32 FirstLiveStop(const Route& route, Map* map, size_t from);
+
+    // The creatures of the route's map that may stand in a line's way: each that attacks on sight and may be alive in the
+    // instance, at its spawn and where it is now, a patrol along its path, each with its reach at the route's level, a
+    // wanderer's range and `margin` added. One not loaded counts as alive; one missing from a loaded grid is not up.
+    // The living creatures the model does not have that reach the line come last (Unmodelled).
+    // Those near the line that are dead go in `dead`, with their spawns. World thread, outside map updates.
+    std::vector<runrules::Threat> Threats(const Route& route, Map* map, const std::vector<runrules::Vec>& line, float margin,
+        std::vector<uint32>& dead);
+    // The living creatures hostile to players on the instance's map that the route's model does not have, as a summon or a
+    // script's spawn, that reach the line: where each stands now, its aggro reach at the route's level with `margin`, and
+    // runrules::TRAVEL_MARGIN more when it moves. Their spawn is 0, or their unmodelled spawn; `entry` names them. On the
+    // world thread outside map updates, or on the instance's own map thread.
+    // `found`, when given, gets each one's guid, in the same order.
+    std::vector<runrules::Threat> Unmodelled(const Route& route, Map* map, const std::vector<runrules::Vec>& line, float margin,
+        std::vector<ObjectGuid>* found = nullptr);
+    // The stop whose pack, or whose pull's extras, a creature is of, or -1.
+    static int32 StopOf(const Route& route, uint32 spawn);
 
 private:
     GuildPacks() = default;
@@ -212,6 +233,8 @@ private:
     };
 
     MapModel& Model(uint32 mapId);
+    std::vector<runrules::Threat> UnmodelledLocked(const MapModel& model, const Route& route, Map* map,
+        const std::vector<runrules::Vec>& line, float margin, std::vector<ObjectGuid>* found = nullptr) const;
     void Build(MapModel& model);
     void LinkAndGroup(MapModel& model);
     std::vector<uint32> Near(const MapModel& model, const G3D::Vector3& at, float radius) const;

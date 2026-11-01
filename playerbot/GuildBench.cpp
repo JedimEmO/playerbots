@@ -3,6 +3,7 @@
 #include "Accounts/AccountMgr.h"
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildRunState.h"
 #include "playerbot/PlayerbotFactory.h"
 #include "playerbot/Talentspec.h"
 #include "playerbot/strategy/actions/ChangeTalentsAction.h"
@@ -57,6 +58,8 @@ std::list<std::string> GuildBench::Help()
         "  bench setup <name> <level> [quality] [dungeon]  all of the above, in that order",
         "  bench kill <name>                          kill it, for the lab to see a run recover; lab and bench accounts only",
         "  bench mana <name> <percent>                set its mana to a share of its most; lab and bench accounts only",
+        "  bench clearroute <leader> <stop>           kill the packs of its run's stops before that one, with their pulls' extras",
+        "                                             and the creatures that reach them, in its instance; lab and bench accounts only",
         "All but level need the character online and played by the engine; level works offline as a level change only.",
     };
 }
@@ -118,16 +121,18 @@ std::list<std::string> GuildBench::HandleCommand(const std::string& args)
     if (!bot->GetPlayerbotAI())
         return { "a player is playing " + name + "; the bench works only while the engine plays it" };
 
-    if (sub == "kill" || sub == "mana")
+    if (sub == "kill" || sub == "mana" || sub == "clearroute")
     {
         // Only for the lab's and the benches' own accounts: the lab causes a death or a low pool on purpose,
         // to see a run recover from it, and a player's character is never its subject.
         std::string account;
         if (!sAccountMgr.GetName(sObjectMgr.GetPlayerAccountIdByGUID(guid), account)
             || !(account.rfind("LAB", 0) == 0 || account.rfind("GBENCH", 0) == 0) || account == "LABGM")
-            return { name + " is not on a lab or bench account; kill and mana are for those only" };
+            return { name + " is not on a lab or bench account; kill, mana and clearroute are for those only" };
         if (sub == "kill")
             return Kill(bot, name);
+        if (sub == "clearroute")
+            return ClearRoute(bot, first);
         return Mana(bot, name, first);
     }
 
@@ -372,6 +377,14 @@ std::list<std::string> GuildBench::Kill(Player* bot, const std::string& name)
     // As the core's .die does: damage enough to kill, so the death goes the usual way.
     Unit::DealDamage(bot, bot, bot->GetHealth(), nullptr, DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
     return { name + (bot->IsAlive() ? " survived" : " is dead") };
+}
+
+std::list<std::string> GuildBench::ClearRoute(Player* leader, const std::string& stop)
+{
+    const int number = atoi(stop.c_str());
+    if (stop.empty() || number < 1)
+        return { "usage: guildbot bench clearroute <leader> <stop, 1 on>" };
+    return sGuildRunStates.ClearRoute(leader, uint32(number));
 }
 
 std::list<std::string> GuildBench::Mana(Player* bot, const std::string& name, const std::string& percent)

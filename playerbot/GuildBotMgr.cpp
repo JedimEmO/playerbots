@@ -1079,7 +1079,7 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     // travel, grind, rpg, free or follow, which pick moves of their own (GuildRunStates). While the run holds, a living
     // member inside stays where the run placed it, and the party job's follow stays off.
     const GuildRunView run = sGuildRunStates.View(player);
-    if (run.valid && run.mode == GuildRunMode::Hold && run.holds)
+    if (run.valid && (run.apart || (run.mode == GuildRunMode::Hold && run.holds)))
     {
         engine->addStrategy("run holding");
         return;
@@ -1087,6 +1087,14 @@ void GuildBotMgr::AddNonCombatStrategies(Player* player, ai::Engine* engine) con
     if (run.valid && run.controls)
     {
         engine->addStrategy(run.lead ? "run lead" : "run party");
+        return;
+    }
+
+    // A party whose run could not regroup stays where it is, in its group, until the agent's next order.
+    auto self = characters.find(player->GetGUIDLow());
+    if (self != characters.end() && runrules::KeepsGroup(self->second.keepGroupSeq, self->second.jobSeq))
+    {
+        engine->addStrategy("stay");
         return;
     }
 
@@ -1841,7 +1849,8 @@ void GuildBotMgr::CheckJobs()
             }
         }
 
-        if (!c.partyLeader.empty() && (c.status != "working" || c.job != "party"))
+        if (runrules::LeavesParty(!c.partyLeader.empty(), c.status == "working", c.job == "party",
+            runrules::KeepsGroup(c.keepGroupSeq, c.jobSeq)))
             LeaveParty(c, bot);
 
         if (c.status != "working")
@@ -1873,9 +1882,25 @@ void GuildBotMgr::CheckJobs()
             // the controller has it. The run state is kept here, outside the job's lock, since the two never nest:
             // made or brought up to date before the job's tick, so that its pull step stands down from the first tick
             // inside, and told after it whether the party is in and a step of the tables is due.
+            // A run that could not regroup fails the order: the leader's job and its party's, the engine's only.
+            std::string failure;
+            if (sGuildRunStates.Failure(guid, c.jobSeq, failure))
+            {
+                sGuildDungeon.Stop(guid);
+                FailParty(bot, failure);
+                c.keepGroupSeq = c.jobSeq;
+                c.status = "failed";
+                c.reason = failure;
+                Event(guid, "job_failed", "dungeon " + failure);
+                sGuildRunStates.Acknowledge(guid, c.jobSeq);
+                if (bot->GetPlayerbotAI())
+                    bot->GetPlayerbotAI()->ResetStrategies(false);
+                continue;
+            }
             std::vector<std::pair<std::string, std::string>> runEvents;
-            const runrules::Control control = sGuildRunStates.Prepare(bot, ArgValue(c, "name"), runEvents);
-            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"), control);
+            const runrules::Control control = sGuildRunStates.Prepare(bot, ArgValue(c, "name"), c.jobSeq, runEvents);
+            const bool permit = sGuildRunStates.Permit(guid);
+            GuildDungeon::Update update = sGuildDungeon.Tick(bot, ArgValue(c, "name"), control, permit);
             if (!waiting.empty() && update.status == "working" && update.reason.rfind("waiting", 0) == 0)
                 update.reason = waiting;
             for (auto& [kind, detail] : runEvents)
@@ -2172,6 +2197,31 @@ std::string GuildBotMgr::KeepParty(Character& c, Player* bot)
         ai->ResetStrategies(false);
     }
     return "";
+}
+
+void GuildBotMgr::FailParty(Player* leader, const std::string& why)
+{
+    Group* group = leader ? leader->GetGroup() : nullptr;
+    if (!group)
+        return;
+    for (auto const& slot : group->GetMemberSlots())
+    {
+        const uint32 guid = slot.guid.GetCounter();
+        auto it = characters.find(guid);
+        if (guid == leader->GetGUIDLow() || it == characters.end() || !GetPlayerBot(guid))
+            continue;
+        Character& c = it->second;
+        if (c.job != "party" || c.status != "working")
+            continue;
+        c.status = "failed";
+        c.reason = why;
+        // It keeps the group, so the instance stays valid for it, and stands where it is until the next order.
+        c.keepGroupSeq = c.jobSeq;
+        Event(guid, "job_failed", "party " + why);
+        if (Player* member = GetPlayerBot(guid))
+            if (member->GetPlayerbotAI())
+                member->GetPlayerbotAI()->ResetStrategies(false);
+    }
 }
 
 void GuildBotMgr::LeaveParty(Character& c, Player* bot)

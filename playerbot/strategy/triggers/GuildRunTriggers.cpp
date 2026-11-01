@@ -4,6 +4,7 @@
 #include "playerbot/GuildRunState.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "Groups/Group.h"
+#include "MotionGenerators/MovementGenerator.h"
 
 using namespace ai;
 
@@ -38,10 +39,11 @@ namespace
         return bot->GetDistance(at.getX(), at.getY(), at.getZ());
     }
 
-    // The run strategy the run state calls for, or empty. In hold, a living member the engine plays inside holds.
+    // The run strategy the run state calls for, or empty. In hold, a living member the engine plays inside holds; in any
+    // mode, a member apart from its party holds or walks back to it.
     std::string Wanted(const GuildRunView& view)
     {
-        if (view.valid && view.mode == GuildRunMode::Hold && view.holds)
+        if (view.valid && (view.apart || (view.mode == GuildRunMode::Hold && view.holds)))
             return "run holding";
         if (!view.valid || !view.controls)
             return "";
@@ -97,6 +99,19 @@ bool RunHoldPlaceTrigger::IsActive()
     return view.holdAt.getMapId() == bot->GetMapId() && DistanceTo(bot, view.holdAt) > RUN_AT_SPOT;
 }
 
+bool RunWalkTrigger::IsActive()
+{
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    if (!view.valid || !view.walking || view.walkPoints.empty() || !InWorld(bot) || !bot->IsAlive())
+        return false;
+    // A part under way: its run move is on top.
+    MotionMaster* motion = bot->GetMotionMaster();
+    if (!motion->empty() && runrules::IsRunToken(motion->GetCurrent()->GetMoveId())
+        && motion->GetCurrentMovementGeneratorType() == PATH_MOTION_TYPE)
+        return false;
+    return view.walkPoints.front().getMapId() == bot->GetMapId() && DistanceTo(bot, view.walkPoints.front()) <= runrules::CHUNK_START;
+}
+
 bool GuildRunEnterTrigger::IsActive()
 {
     if (!sGuildBotMgr.IsGuildBot(bot) || !InWorld(bot) || bot->IsInCombat())
@@ -148,9 +163,10 @@ bool RunPullReadyTrigger::IsActive()
     if (!Leads(view) || view.index >= view.stops || view.pull != GuildRunPull::Gather
         || !InWorld(bot) || bot->IsInCombat())
         return false;
-    // Every expected member, the leader among them, online, in the world in the run's own instance, and alive: one
-    // offline, away or dead holds the pull back without a time limit. The rest of readiness is below.
-    if (!GuildRunStates::Present(bot, view))
+    // The run's permit, nobody apart, and every expected member, the leader among them, online, in the world in the run's
+    // own instance, and alive: one offline, away, dead or walking back holds the pull back, before the gather's time limit
+    // below. The rest of readiness is below too.
+    if (!sGuildRunStates.PullAllowed(bot))
         return false;
     const WorldPosition& spot = GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot);
     // Not with another pack's creature in reach of the pull spot, as a patrol that came by while the party gathered,

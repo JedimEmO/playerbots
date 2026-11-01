@@ -20,6 +20,10 @@ bool PullRequestAction::Execute(Event& event)
         return false;
     }
 
+    // A guild run's party not together, or not allowed to start a fight: no pull (GuildRunStates::PullAllowed).
+    if (!sGuildRunStates.PullAllowed(bot))
+        return false;
+
     Player* requester = event.getOwner() ? event.getOwner() : GetMaster();
 
     Unit* target = GetTarget(event);
@@ -155,6 +159,13 @@ bool PullAction::Execute(Event& event)
     InitPullAction();
 
     PullStrategy* strategy = PullStrategy::Get(ai);
+    // Checked again right before the spell or the attack: a pull asked for earlier is ended when the guild run's party
+    // is no longer together, or may no longer start a fight.
+    if (strategy && strategy->HasTarget() && !sGuildRunStates.PullAllowed(bot))
+    {
+        ai->DoSpecificAction("pull end", event, true);
+        return false;
+    }
     if (strategy)
     {
         Unit* target = strategy->GetTarget();

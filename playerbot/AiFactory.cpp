@@ -635,11 +635,12 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
         }
 
         // Inside a run's dungeon with a living pack ahead, the run controller has the party: the leader holds a pull at
-        // its spot, and a member keeps near its place in the fight (GuildRunStates).
+        // its spot, and a member keeps near its place in the fight (GuildRunStates). Not a member apart from the party,
+        // whose place is not there.
         if (sGuildBotMgr.IsGuildBot(player))
         {
             const GuildRunView run = sGuildRunStates.View(player);
-            if (run.valid && run.controls)
+            if (run.valid && run.controls && !run.apart)
                 combatEngine->addStrategy(run.lead ? "run lead" : "run party");
         }
     }

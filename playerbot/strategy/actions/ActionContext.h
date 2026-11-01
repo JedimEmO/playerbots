@@ -373,6 +373,7 @@ namespace ai
             creators["enable molten core strategy"] = [](PlayerbotAI* ai) { return new MoltenCoreEnableDungeonStrategyAction(ai); };
             creators["guild run strategies"] = [](PlayerbotAI* ai) { return new GuildRunStrategiesAction(ai); };
             creators["move to run spot"] = [](PlayerbotAI* ai) { return new MoveToRunSpotAction(ai); };
+            creators["move to run walk"] = [](PlayerbotAI* ai) { return new MoveToRunWalkAction(ai); };
             creators["run choose"] = [](PlayerbotAI* ai) { return new RunChooseAction(ai); };
             creators["run gather"] = [](PlayerbotAI* ai) { return new RunGatherAction(ai); };
             creators["run pull"] = [](PlayerbotAI* ai) { return new RunPullAction(ai); };

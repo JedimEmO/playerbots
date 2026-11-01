@@ -152,6 +152,8 @@ private:
         bool dead = false;
         bool alone = false;         // in a group but with no member near, as its strategies were last built
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
+        uint32 keepGroupSeq = 0;    // the order whose run failed as cannot_rejoin: until the next order, it keeps its
+                                    // group and stays where it is (runrules::KeepsGroup)
         time_t invitedAt = 0;       // when the dungeon leader last invited its companion
         float stillX = 0.0f, stillY = 0.0f, stillZ = 0.0f; // a party member left behind: where it last stood still
         time_t stillSince = 0;      // since when it has stood there, or 0
@@ -242,6 +244,9 @@ private:
     // whom it invites to its group the way a client does. Empty, or why it is not in the group yet.
     std::string InviteCompanion(Character& c, Player* bot);
     void LeaveParty(Character& c, Player* bot);
+    // A dungeon run that failed (GuildRunStates::Failure): the party job of every member of the leader's group the engine
+    // plays fails too, with the same reason. A player's character is left as it is.
+    void FailParty(Player* leader, const std::string& why);
 
     void Event(uint32 guid, const std::string& kind, const std::string& detail = "");
     Character* Find(const std::string& name);

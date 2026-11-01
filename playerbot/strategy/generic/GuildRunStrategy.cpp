@@ -64,6 +64,10 @@ void RunPartyStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
 
 void RunHoldingStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
 {
+    // A member apart walks back to its party over the route's checked way, one part at a time.
+    triggers.push_back(new TriggerNode(
+        "run walk",
+        NextAction::array(0, new NextAction("move to run walk", ACTION_MOVE + 3), NULL)));
     triggers.push_back(new TriggerNode(
         "run hold place",
         NextAction::array(0, new NextAction("move to run spot", ACTION_MOVE + 2), NULL)));

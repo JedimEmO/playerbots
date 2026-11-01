@@ -40,9 +40,10 @@ namespace ai
         void InitCombatTriggers(std::list<TriggerNode*>& triggers) override;
     };
 
-    // A guild party's run in the mode hold, for each living member the engine plays inside, the leader among them: it
-    // stays at the place the run holds it at, where it stood when the hold began, and goes back to it after a fight; it
-    // follows nobody. In a fight it fights, heals and defends as its class does.
+    // A guild party's run in the mode hold, for each living member the engine plays inside, the leader among them, and in
+    // any mode for a member apart from its party: it walks back to the party over the route's checked way, or stays at the
+    // place the run holds it at and goes back to it after a fight; it follows nobody. In a fight it fights, heals and
+    // defends as its class does.
     class RunHoldingStrategy : public Strategy
     {
     public:

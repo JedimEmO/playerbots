@@ -63,6 +63,8 @@ void RunCore::End(RunWorld& world, Generations& generations, const std::string& 
     if (mode == Mode::Ended)
         return;
     held.clear();
+    ClearApart();
+    settled.clear();
     choose = false;
     endSeen = false;
     SetMode(world, generations, Mode::Ended, why);
@@ -153,13 +155,18 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
     std::vector<runrules::Facts> facts;
     for (uint32_t guid : members)
         facts.push_back(world.FactsOf(guid));
+    for (uint32_t guid : expected)
+    {
+        const runrules::Facts member = world.FactsOf(guid);
+        if (member.online && !member.alive)
+            lastDead[guid] = now;
+    }
     // The job's departure on purpose is exempt only while the job has the party for it, or the hold began there.
     const bool leaving = job.leaving && (mode == Mode::Released || (mode == Mode::Hold && heldFrom == Mode::Released));
     holdReasons = runrules::HoldReasons(world.FactsOf(leader), facts, leaving);
 
     if (!holdReasons.empty())
     {
-        leaderBackAt = 0;
         const std::string why = runrules::Join(holdReasons);
         if (mode != Mode::Hold)
         {
@@ -167,6 +174,7 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
             held.clear();
             choose = false;
             SetMode(world, generations, Mode::Hold, why);
+            BeginHold(world, now);
         }
         else if (reason != why)
         {
@@ -174,36 +182,335 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
             Note("run_mode", "mode=hold reason=" + why);
         }
         Place(world, members);
+        if (leaving)
+            ClearApart();
+        else
+            Track(world, members, now);
+        apartSince = 0;
         return true;
     }
-    if (mode != Mode::Hold)
-        return true;
 
-    // Every reason gone: the leader alive inside and the engine's, the group the expected five. The run resumes once the
-    // leader is near a member's place, or a while after it came back.
-    Place(world, members);
-    if (!leaderBackAt)
-        leaderBackAt = now;
-    float nearest = -1.0f;
-    float lx, ly, lz;
-    if (world.Position(leader, lx, ly, lz))
-        for (auto const& [guid, place] : held)
+    // The job takes the party out: nobody walks back into the dungeon, and nothing is pulled (Permit).
+    if (leaving)
+    {
+        ClearApart();
+        apartSince = 0;
+        if (mode == Mode::Hold)
         {
-            if (guid == leader)
-                continue;
-            const float dx = place.x - lx, dy = place.y - ly, dz = place.z - lz;
-            const float distance = float(std::sqrt(dx * dx + dy * dy + dz * dz));
-            if (nearest < 0.0f || distance < nearest)
-                nearest = distance;
+            held.clear();
+            SetMode(world, generations, Mode::Released, "resume_leaving");
         }
-    if (!runrules::Resumes(true, nearest, int64_t(now - leaderBackAt)))
         return true;
-    held.clear();
-    leaderBackAt = 0;
-    const Mode to = heldFrom == Mode::Released ? Mode::Released : Mode::Lead;
-    choose = to == Mode::Lead;
-    SetMode(world, generations, to, nearest >= 0.0f && nearest <= runrules::RESUME_NEAR ? "resume_near" : "resume_waited");
+    }
+
+    if (mode == Mode::Hold)
+        Place(world, members);
+    Track(world, members, now);
+
+    // Held with every reason gone, while the party regroups: the reason says so.
+    if (mode == Mode::Hold && !apart.empty() && reason != "regrouping")
+    {
+        reason = "regrouping";
+        Note("run_mode", "mode=hold reason=regrouping");
+    }
+
+    // Every reason gone, and every member back with the party at the anchor: the run resumes, and the leader chooses its
+    // stop from there. Never by time: a party apart stays held until it regroups or cannot.
+    if (mode == Mode::Hold && apart.empty())
+    {
+        held.clear();
+        hasAnchor = false;
+        const Mode to = heldFrom == Mode::Released ? Mode::Released : Mode::Lead;
+        choose = to == Mode::Lead;
+        SetMode(world, generations, to, "resume_rejoined");
+        apartSince = 0;
+        return true;
+    }
+
+    // A member apart with nothing else holding the run: REJOIN_SECONDS of that, and the run cannot regroup.
+    if (apart.empty())
+        apartSince = 0;
+    else if (!apartSince)
+        apartSince = now;
+    if (runrules::Overdue(int64_t(apartSince), int64_t(now)))
+    {
+        std::string who;
+        for (auto const& [guid, away] : apart)
+            who += (who.empty() ? "" : ",") + world.Name(guid) + (away.blocked.empty() ? "" : ":" + away.blocked);
+        Note("run_rejoin", "result=cannot_rejoin apart=" + who);
+        failed = true;
+        End(world, generations, "cannot_rejoin");
+    }
     return true;
+}
+
+bool RunCore::Permit() const
+{
+    runrules::PermitFacts facts;
+    facts.mode = mode;
+    facts.leaving = job.leaving;
+    facts.apart = !apart.empty();
+    facts.failed = failed;
+    return runrules::PullPermit(facts);
+}
+
+void RunCore::StopWalk(uint32_t guid, Apart& away)
+{
+    if (away.walking)
+        cancels.push_back(guid);
+    away.walking = false;
+    away.walk = Walk();
+}
+
+void RunCore::ClearApart()
+{
+    for (auto& [guid, away] : apart)
+        StopWalk(guid, away);
+    apart.clear();
+    hasAnchor = false;
+}
+
+void RunCore::BeginHold(RunWorld& world, time_t now)
+{
+    // Walks of the mode before are the old plan's: the new generation makes their moves stale, and they go.
+    for (auto& [guid, away] : apart)
+        StopWalk(guid, away);
+    apart.clear();
+    hasAnchor = false;
+    anchorKind.clear();
+    // The cohort: the members alive inside who were not dead a moment ago, so a member just back at the entrance is not
+    // taken for the party. Everyone is apart until it reaches the anchor; the cohort walks there within its minute.
+    std::vector<uint32_t> cohort;
+    for (uint32_t guid : expected)
+    {
+        const runrules::Facts facts = world.FactsOf(guid);
+        auto dead = lastDead.find(guid);
+        Apart away;
+        away.since = now;
+        away.missing = !runrules::Movable(facts);
+        away.cohort = runrules::InCohort(facts, dead == lastDead.end() ? 0 : int64_t(dead->second), int64_t(now));
+        if (away.cohort)
+            cohort.push_back(guid);
+        apart[guid] = away;
+    }
+    // The anchor: the hold place, else the cohort member nearest the current stop's way point whose place is clear.
+    Held place;
+    if (world.HoldPlace(place))
+    {
+        anchor = place;
+        hasAnchor = true;
+        anchorKind = "hold_place";
+    }
+    else
+    {
+        Held stopPoint;
+        const bool hasStop = world.StopWayPoint(stopPoint);
+        float nearest = -1.0f;
+        for (uint32_t guid : cohort)
+        {
+            // On the route's way, so that a member coming back can walk to it, and out of every creature's reach.
+            Held at, onWay;
+            if (!world.Position(guid, at.x, at.y, at.z) || !world.WayPointNear(at, onWay) || !world.PlaceClear(at))
+                continue;
+            const float d = hasStop ? runrules::Distance(VecOf(at), VecOf(stopPoint)) : 0.0f;
+            if (nearest < 0.0f || d < nearest)
+            {
+                nearest = d;
+                anchor = at;
+                hasAnchor = true;
+                anchorKind = "cohort_" + world.Name(guid);
+            }
+        }
+    }
+    std::string names;
+    for (uint32_t guid : cohort)
+        names += (names.empty() ? "" : ",") + world.Name(guid);
+    Note("run_anchor", hasAnchor ? "kind=" + anchorKind + " at=" + Num(anchor.x) + "," + Num(anchor.y) + "," + Num(anchor.z)
+        + " cohort=" + names : "kind=none cohort=" + names);
+}
+
+void RunCore::Track(RunWorld& world, const std::vector<uint32_t>& members, time_t now)
+{
+    // Who is apart: missing, or in lead and released far from the leader. A member back from missing walks to the party.
+    Held leaderAt;
+    const bool leaderHere = runrules::Movable(world.FactsOf(leader)) && world.Position(leader, leaderAt.x, leaderAt.y, leaderAt.z);
+    for (uint32_t guid : expected)
+    {
+        const bool here = runrules::Movable(world.FactsOf(guid)) && Contains(members, guid);
+        auto it = apart.find(guid);
+        if (!here)
+        {
+            if (it == apart.end())
+            {
+                Apart away;
+                away.since = now;
+                it = apart.emplace(guid, away).first;
+            }
+            StopWalk(guid, it->second);
+            it->second.missing = true;
+            it->second.cohort = false;
+            continue;
+        }
+        if (it != apart.end())
+        {
+            if (it->second.missing)
+            {
+                it->second.missing = false;
+                it->second.plannedAt = 0;
+                Note("run_rejoin", "member=" + world.Name(guid) + " result=back");
+            }
+            continue;
+        }
+        Held at;
+        if (mode != Mode::Hold && guid != leader && leaderHere && world.Position(guid, at.x, at.y, at.z)
+            && runrules::Distance(VecOf(at), VecOf(leaderAt)) > runrules::DISPLACED)
+        {
+            Apart away;
+            away.since = now;
+            apart[guid] = away;
+            Note("run_rejoin", "member=" + world.Name(guid) + " result=displaced");
+        }
+    }
+    // In lead and released the leader is the party, and never apart from it.
+    if (mode != Mode::Hold)
+    {
+        auto self = apart.find(leader);
+        if (self != apart.end() && !self->second.missing)
+        {
+            StopWalk(leader, self->second);
+            apart.erase(self);
+        }
+    }
+
+    // Where the party is: the anchor in hold, set by the leader's place when there was none; in lead and released, the
+    // leader's nearest way point.
+    Held leaderOnWay;
+    if (mode == Mode::Hold && !hasAnchor && leaderHere && world.WayPointNear(leaderAt, leaderOnWay) && world.PlaceClear(leaderAt))
+    {
+        anchor = leaderAt;
+        hasAnchor = true;
+        anchorKind = "leader";
+        Note("run_anchor", "kind=leader at=" + Num(anchor.x) + "," + Num(anchor.y) + "," + Num(anchor.z));
+    }
+    if (mode != Mode::Hold && leaderHere)
+    {
+        Held point;
+        if (world.WayPointNear(leaderAt, point))
+        {
+            leaderWay = point;
+            hasLeaderWay = true;
+        }
+    }
+    const bool hasTarget = mode == Mode::Hold ? hasAnchor : hasLeaderWay;
+    const Held target = mode == Mode::Hold ? anchor : leaderWay;
+
+    for (auto it = apart.begin(); it != apart.end();)
+    {
+        const uint32_t guid = it->first;
+        Apart& away = it->second;
+        Held at;
+        if (away.missing || !hasTarget || !world.Position(guid, at.x, at.y, at.z))
+        {
+            ++it;
+            continue;
+        }
+        const std::string name = world.Name(guid);
+        // Arrived: within ARRIVE_NEAR of where the party is, by its walk or already there.
+        if (runrules::Distance(VecOf(at), VecOf(target)) <= runrules::ARRIVE_NEAR)
+        {
+            StopWalk(guid, away);
+            if (mode == Mode::Hold)
+                held[guid] = at;
+            Note("run_rejoin", "member=" + name + " result=arrived at=" + Num(at.x) + "," + Num(at.y) + "," + Num(at.z));
+            it = apart.erase(it);
+            continue;
+        }
+        // The cohort's minute: not there in time, it stands where it is and walks again later as any member apart.
+        if (away.cohort && away.walkSince && now - away.walkSince >= runrules::HOLD_TRAVEL_SECONDS)
+        {
+            away.cohort = false;
+            StopWalk(guid, away);
+            away.plannedAt = now;
+            away.blocked = "hold_travel_timeout";
+            held[guid] = at;
+            Note("run_hold_at", "member=" + name + " result=gave_up pos=" + Num(at.x) + "," + Num(at.y) + "," + Num(at.z)
+                + " place=" + Num(target.x) + "," + Num(target.y) + "," + Num(target.z)
+                + " dist=" + Num(runrules::Distance(VecOf(at), VecOf(target))));
+            ++it;
+            continue;
+        }
+        if (away.walking)
+        {
+            Walk& walk = away.walk;
+            // A part's end reached: on to the next, which the member's AI walks once the last one's move is over.
+            while (walk.chunk < walk.chunks.size()
+                && runrules::Distance(VecOf(at), walk.chunks[walk.chunk].back()) <= runrules::CHUNK_START)
+            {
+                ++walk.chunk;
+                walk.chunkSince = now;
+            }
+            // A walk to a leader that has gone on is walked to its end first, and then planned again to where the leader is,
+            // rather than at every step the leader takes.
+            std::string again;
+            if (walk.chunk >= walk.chunks.size())
+                again = "walked";
+            else if (runrules::LinesDistance({ VecOf(at) }, walk.chunks[walk.chunk]) > runrules::WALK_DRIFT)
+                again = "drift";
+            else if (now - walk.chunkSince >= runrules::WALK_STALL_SECONDS)
+                again = "stalled";
+            else if (!world.Walking(guid)
+                && runrules::Distance(VecOf(at), walk.chunks[walk.chunk].front()) > runrules::CHUNK_START)
+                again = "stopped";
+            else if (world.Respawned(walk.deadNear))
+                again = "respawn";
+            else if (world.CreatureNear(walk.chunks[walk.chunk]))
+                again = "creature_near";
+            if (again.empty())
+            {
+                ++it;
+                continue;
+            }
+            StopWalk(guid, away);
+            away.plannedAt = 0;
+            Note("run_rejoin", "member=" + name + " result=replan why=" + again);
+        }
+        if (now - away.plannedAt < (away.blocked.empty() ? 0 : runrules::REPLAN_SECONDS))
+        {
+            ++it;
+            continue;
+        }
+        Walk walk;
+        std::string why;
+        switch (world.PlanWalk(guid, target, walk, why))
+        {
+            case runrules::PlanResult::Planned:
+                walk.id = ++walkIds;
+                walk.chunkSince = now;
+                away.walk = walk;
+                away.walking = true;
+                away.plannedAt = now;
+                if (!away.walkSince)
+                    away.walkSince = now;
+                away.blocked.clear();
+                Note("run_rejoin", "member=" + name + " result=walking parts=" + std::to_string(walk.chunks.size())
+                    + " to=" + Num(target.x) + "," + Num(target.y) + "," + Num(target.z));
+                break;
+            case runrules::PlanResult::Blocked:
+                away.plannedAt = now;
+                if (why != away.blocked)
+                    Note("run_rejoin", "member=" + name + " result=blocked why=" + why);
+                away.blocked = why;
+                break;
+            default:
+                break;
+        }
+        ++it;
+    }
+
+    settled.clear();
+    for (uint32_t guid : expected)
+        if (!apart.count(guid) && runrules::Movable(world.FactsOf(guid)) && Contains(members, guid))
+            settled.push_back(guid);
 }
 
 runrules::Control RunCore::Prepare(RunWorld& world, Generations& generations, bool livingAhead)
@@ -227,6 +534,7 @@ void RunCore::Settle(RunWorld& world, Generations& generations, const runrules::
             heldFrom = Mode::Lead;
             held.clear();
             SetMode(world, generations, Mode::Hold, "handed_back," + runrules::Join(holdReasons));
+            BeginHold(world, time(nullptr));
             Place(world, expected);
         }
         else
@@ -235,6 +543,30 @@ void RunCore::Settle(RunWorld& world, Generations& generations, const runrules::
             SetMode(world, generations, Mode::Lead, "handed_back");
         }
     }
+}
+
+void Failures::Record(uint32_t leader, uint32_t order, const std::string& why)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    failed[leader] = { order, why };
+}
+
+bool Failures::Find(uint32_t leader, uint32_t order, std::string& why) const
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = failed.find(leader);
+    if (it == failed.end() || it->second.first != order)
+        return false;
+    why = it->second.second;
+    return true;
+}
+
+void Failures::Acknowledge(uint32_t leader, uint32_t order)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    auto it = failed.find(leader);
+    if (it != failed.end() && it->second.first == order)
+        failed.erase(it);
 }
 
 uint32_t RunMoves::TokenOf(uint32_t guid) const
@@ -267,6 +599,16 @@ void RunMoves::Retire(MoveWorld& world, uint32_t guid, uint32_t token)
     // A callback may have recorded a new move meanwhile: only this token's record, and only once it is gone.
     if (it != records.end() && it->second.token == token && !world.HasMove(guid, token))
         records.erase(it);
+}
+
+void RunMoves::Cancel(MoveWorld& world, uint32_t guid)
+{
+    const uint32_t token = TokenOf(guid);
+    const MoveMember member = world.Member(guid);
+    if (!token || !member.visible || !member.inWorld || member.teleporting)
+        return;
+    if (world.RemoveMove(guid, token) != runrules::Removal::Deferred)
+        Retire(world, guid, token);
 }
 
 bool RunMoves::Start(MoveWorld& world, uint32_t guid, const runrules::Stamp& stamp, uint32_t leader,
