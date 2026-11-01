@@ -165,7 +165,43 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
     }
     // The job's departure on purpose is exempt only while the job has the party for it, or the hold began there.
     const bool leaving = job.leaving && (mode == Mode::Released || (mode == Mode::Hold && heldFrom == Mode::Released));
-    holdReasons = runrules::HoldReasons(world.FactsOf(leader), facts, leaving);
+    const runrules::Facts leaderFacts = world.FactsOf(leader);
+    holdReasons = runrules::HoldReasons(leaderFacts, facts, leaving);
+
+    // A person offline holds the run as player_offline, the leader among them, timed from the disconnect and reset only by
+    // the person's return; gone PLAYER_GONE_SECONDS, the run stops, which is no failure.
+    bool personOffline = false;
+    std::string gone;
+    for (uint32_t guid : expected)
+    {
+        const runrules::Facts member = world.FactsOf(guid);
+        if (!IsPerson(guid, member))
+        {
+            offline.erase(guid);
+            continue;
+        }
+        if (member.online)
+        {
+            offline[guid].Reconnected();
+            continue;
+        }
+        offline[guid].Disconnected(int64_t(now));
+        personOffline = true;
+        if (offline[guid].Gone(int64_t(now)))
+            gone += (gone.empty() ? "" : ",") + world.Name(guid);
+    }
+    if (!gone.empty())
+    {
+        Note("run_player", "result=gone members=" + gone);
+        stopped = true;
+        End(world, generations, "player_gone");
+        return true;
+    }
+    if (personOffline)
+    {
+        holdReasons.erase(std::remove(holdReasons.begin(), holdReasons.end(), std::string("leader_offline")), holdReasons.end());
+        holdReasons.insert(holdReasons.begin(), "player_offline");
+    }
 
     if (!holdReasons.empty())
     {
@@ -188,7 +224,7 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
             ClearApart();
         else
             Track(world, members, now);
-        apartSince = 0;
+        TickClocks(world, now, true);
         return true;
     }
 
@@ -196,7 +232,7 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
     if (leaving)
     {
         ClearApart();
-        apartSince = 0;
+        TickClocks(world, now, true);
         if (mode == Mode::Hold)
         {
             held.clear();
@@ -225,23 +261,24 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
         const Mode to = heldFrom == Mode::Released ? Mode::Released : Mode::Lead;
         choose = to == Mode::Lead;
         SetMode(world, generations, to, "resume_rejoined");
-        apartSince = 0;
+        TickClocks(world, now, true);
         return true;
     }
 
-    // A member the engine plays apart with nothing else holding the run: REJOIN_SECONDS of that, and the run cannot
-    // regroup. A person's member apart holds the pull, and the run waits for it without end. Only in hold: in lead a
-    // member apart keeps the pull back, and the blocks at that stop end the run if it never comes back.
-    const bool engineApart = std::any_of(apart.begin(), apart.end(), [](const auto& entry) { return !entry.second.human; });
-    if (!engineApart || mode != Mode::Hold)
-        apartSince = 0;
-    else if (!apartSince)
-        apartSince = now;
-    if (runrules::Overdue(int64_t(apartSince), int64_t(now)))
+    // A member the engine plays apart with nothing else holding the run: REJOIN_SECONDS of that, by its own clock, and
+    // the run cannot regroup. A person's member apart holds the pull, and the run waits for it without end, never running
+    // a bot's clock. Only in hold: in lead a member apart keeps the pull back, and the blocks at that stop end the run if
+    // it never comes back.
+    TickClocks(world, now, mode != Mode::Hold);
+    std::string overdue;
+    for (auto const& [guid, clock] : botClocks)
+        if (clock.Overdue(runrules::REJOIN_SECONDS))
+            overdue += (overdue.empty() ? "" : ",") + world.Name(guid);
+    if (!overdue.empty())
     {
         std::string who;
         for (auto const& [guid, away] : apart)
-            if (!away.human)
+            if (!away.human && botClocks[guid].Overdue(runrules::REJOIN_SECONDS))
                 who += (who.empty() ? "" : ",") + world.Name(guid) + (away.blocked.empty() ? "" : ":" + away.blocked);
         Note("run_rejoin", "result=cannot_rejoin apart=" + who);
         failed = true;
@@ -251,6 +288,41 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
     if (mode == Mode::Released && recovering)
         CheckRecovery(world, generations, now);
     return true;
+}
+
+bool RunCore::IsPerson(uint32_t guid, const runrules::Facts& facts)
+{
+    if (facts.online)
+        controllers[guid] = facts.engine ? runplayer::Controller::Engine : runplayer::Controller::Person;
+    auto it = controllers.find(guid);
+    return it != controllers.end() && it->second == runplayer::Controller::Person;
+}
+
+void RunCore::ControlChanged(RunWorld& world, uint32_t guid, runplayer::Controller to, const std::string& why)
+{
+    if (mode == Mode::Ended)
+        return;
+    controllers[guid] = to;
+    if (to == runplayer::Controller::Engine)
+        offline.erase(guid);
+    Revise("control", "member=" + world.Name(guid) + " to=" + (to == runplayer::Controller::Person ? "person" : "engine")
+        + " why=" + why);
+}
+
+void RunCore::TickClocks(RunWorld& world, time_t now, bool holding)
+{
+    // Each bot apart, by its own clock; every other expected member's clock at zero. apartSince shows the oldest.
+    int64_t longest = -1;
+    for (uint32_t guid : expected)
+    {
+        auto away = apart.find(guid);
+        const bool bot = !IsPerson(guid, world.FactsOf(guid));
+        runplayer::BotClock& clock = botClocks[guid];
+        clock.Tick(int64_t(now), bot && away != apart.end() && !away->second.human, holding);
+        if (bot && away != apart.end() && !away->second.human && !holding)
+            longest = std::max(longest, clock.apartFor);
+    }
+    apartSince = longest < 0 ? 0 : now - time_t(longest);
 }
 
 bool RunCore::Permit() const
@@ -357,7 +429,7 @@ void RunCore::Track(RunWorld& world, const std::vector<uint32_t>& members, time_
         auto it = apart.find(guid);
         // A person's member is never moved: with the party by where it is, else apart until it comes, holding the pull
         // but never failing the order.
-        if (runrules::Human(facts))
+        if (IsPerson(guid, facts))
         {
             // Where the party is: the anchor in hold, else the leader when the engine plays it inside.
             Held at, from = leaderAt;
@@ -579,7 +651,7 @@ void RunCore::Track(RunWorld& world, const std::vector<uint32_t>& members, time_
     for (uint32_t guid : expected)
     {
         const runrules::Facts facts = world.FactsOf(guid);
-        if (!apart.count(guid) && (runrules::Movable(facts) || runrules::Human(facts)) && Contains(members, guid))
+        if (!apart.count(guid) && (runrules::Movable(facts) || IsPerson(guid, facts)) && facts.online && Contains(members, guid))
             settled.push_back(guid);
     }
 }
@@ -737,19 +809,21 @@ void RunCore::CheckRecovery(RunWorld& world, Generations& generations, time_t no
     SetMode(world, generations, Mode::Lead, step == runrules::Recovery::Done ? "recovered" : "recovery_over");
 }
 
-void Failures::Record(uint32_t leader, uint32_t order, const std::string& why)
+void Failures::Record(uint32_t leader, uint32_t order, const std::string& why, runplayer::Outcome outcome)
 {
     std::lock_guard<std::mutex> guard(lock);
-    failed[leader] = { order, why };
+    failed[leader] = { order, why, outcome };
 }
 
-bool Failures::Find(uint32_t leader, uint32_t order, std::string& why) const
+bool Failures::Find(uint32_t leader, uint32_t order, std::string& why, runplayer::Outcome* outcome) const
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = failed.find(leader);
-    if (it == failed.end() || it->second.first != order)
+    if (it == failed.end() || it->second.order != order)
         return false;
-    why = it->second.second;
+    why = it->second.why;
+    if (outcome)
+        *outcome = it->second.outcome;
     return true;
 }
 
@@ -757,7 +831,7 @@ void Failures::Acknowledge(uint32_t leader, uint32_t order)
 {
     std::lock_guard<std::mutex> guard(lock);
     auto it = failed.find(leader);
-    if (it != failed.end() && it->second.first == order)
+    if (it != failed.end() && it->second.order == order)
         failed.erase(it);
 }
 

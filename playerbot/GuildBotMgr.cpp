@@ -7,6 +7,7 @@
 #include "playerbot/GuildRuns.h"
 #include "playerbot/GuildRunState.h"
 #include "playerbot/GuildRunSelfTest.h"
+#include "playerbot/strategy/generic/PullStrategy.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/Engine.h"
@@ -955,9 +956,10 @@ void GuildBotMgr::CheckLeftBehind(Character& c, Player* bot)
     c.stillSince = now;
 
     // As the stall recovery does for a levelling character: under the map, the nearest graveyard; else a reset first,
-    // and if that does not get it moving, home by hearthstone, which for a party is by its dungeon's stone.
+    // and if that does not get it moving, home by hearthstone, which for a party is by its dungeon's stone. Only for a
+    // character the engine plays: a person's is never moved, by ownership, not by whether an AI is there.
     PlayerbotAI* ai = bot->GetPlayerbotAI();
-    if (!ai)
+    if (!ai || GetPlayerBot(c.guid) != bot)
         return;
     if (UnderTheMap(bot) && SendToGraveyard(bot))
     {
@@ -1617,7 +1619,7 @@ void GuildBotMgr::LoadOrders()
                 c.offlineSince = 0;
                 // An order already done or failed before a restart stays so, or the job would run again.
                 std::string status = f[9].GetCppString();
-                if (!f[8].IsNULL() && f[8].GetUInt32() == c.jobSeq && (status == "done" || status == "failed"))
+                if (!f[8].IsNULL() && f[8].GetUInt32() == c.jobSeq && (status == "done" || status == "failed" || status == "stopped"))
                 {
                     c.status = status;
                     c.reason = f[10].GetCppString();
@@ -1665,7 +1667,7 @@ void GuildBotMgr::LoginLogout()
             // Online, and not ours: a player is on it, by a normal login or a takeover.
             if (IsRealSession(player) && !c.playerControlled)
             {
-                c.playerControlled = true;
+                TransferControl(player, guid, runplayer::Controller::Person, "login");
                 Event(guid, "player", "a player logged in");
             }
             continue;
@@ -1678,10 +1680,11 @@ void GuildBotMgr::LoginLogout()
             c.offlineSince = now;
         }
 
-        if (!c.enabled)
-            continue;
-
-        if (c.offlineSince && now - c.offlineSince < RELOGIN_SECONDS)
+        // Kept for its person while a run expects it; handed back, at once; otherwise after the relog delay.
+        if (c.reserved && !sGuildRunStates.Expects(guid))
+            c.reserved = false;
+        if (!runplayer::EngineLogsIn(c.enabled, c.reserved, c.handedBack,
+            c.offlineSince ? int64(now - c.offlineSince) : int64(RELOGIN_SECONDS), int64(RELOGIN_SECONDS)))
             continue;
 
         if (c.loginRequested && now - c.loginRequested < LOGIN_RETRY_SECONDS)
@@ -1702,6 +1705,7 @@ void GuildBotMgr::OnBotLoginInternal(Player* const bot)
 
     Character& c = it->second;
     c.loginRequested = 0;
+    c.handedBack = false;
     c.lastLevel = bot->GetLevel();
     c.progressAt = 0;
     c.stalled = false;
@@ -1884,14 +1888,18 @@ void GuildBotMgr::CheckJobs()
             // inside, and told after it whether the party is in and a step of the tables is due.
             // A run that could not regroup fails the order: the leader's job and its party's, the engine's only.
             std::string failure;
-            if (sGuildRunStates.Failure(guid, c.jobSeq, failure))
+            runplayer::Outcome outcome = runplayer::Outcome::Failed;
+            if (sGuildRunStates.Failure(guid, c.jobSeq, failure, &outcome))
             {
+                // Failed, or stopped because its person is gone, which is neither done nor failed: no run is counted and a
+                // repeating order does not start again. Either way the party keeps its group and stays.
+                const std::string status = runplayer::JobStatus(outcome);
                 sGuildDungeon.Stop(guid);
-                FailParty(bot, failure);
+                FailParty(bot, failure, status);
                 c.keepGroupSeq = c.jobSeq;
-                c.status = "failed";
+                c.status = status;
                 c.reason = failure;
-                Event(guid, "job_failed", "dungeon " + failure);
+                Event(guid, outcome == runplayer::Outcome::Failed ? "job_failed" : "job_stopped", "dungeon " + failure);
                 sGuildRunStates.Acknowledge(guid, c.jobSeq);
                 if (bot->GetPlayerbotAI())
                     bot->GetPlayerbotAI()->ResetStrategies(false);
@@ -2206,7 +2214,7 @@ std::string GuildBotMgr::KeepParty(Character& c, Player* bot)
     return "";
 }
 
-void GuildBotMgr::FailParty(Player* leader, const std::string& why)
+void GuildBotMgr::FailParty(Player* leader, const std::string& why, const std::string& status)
 {
     Group* group = leader ? leader->GetGroup() : nullptr;
     if (!group)
@@ -2220,11 +2228,11 @@ void GuildBotMgr::FailParty(Player* leader, const std::string& why)
         Character& c = it->second;
         if (c.job != "party" || c.status != "working")
             continue;
-        c.status = "failed";
+        c.status = status;
         c.reason = why;
         // It keeps the group, so the instance stays valid for it, and stands where it is until the next order.
         c.keepGroupSeq = c.jobSeq;
-        Event(guid, "job_failed", "party " + why);
+        Event(guid, status == "failed" ? "job_failed" : "job_stopped", "party " + why);
         if (Player* member = GetPlayerBot(guid))
             if (member->GetPlayerbotAI())
                 member->GetPlayerbotAI()->ResetStrategies(false);
@@ -2307,9 +2315,81 @@ void GuildBotMgr::OnPlayerTakeover(Player* player)
 
     // The core has moved the character onto the player's session. Let go of it without logging it out;
     // the bot session it had is left behind, as the core does for random bots.
-    GetAllBots().erase(player->GetGUIDLow());
-    it->second.playerControlled = true;
+    TransferControl(player, it->first, runplayer::Controller::Person, "takeover");
     Event(it->first, "player", "a player took over");
+}
+
+std::list<std::string> GuildBotMgr::HandBack(const std::string& args)
+{
+    std::string name = args;
+    name.erase(0, name.find_first_not_of(' '));
+    name.erase(name.find_last_not_of(' ') + 1);
+    if (name.empty() || !normalizePlayerName(name))
+        return { "guildbot handback <name>   a character kept for a person who disconnected goes back to the engine" };
+    const ObjectGuid guid = sObjectMgr.GetPlayerGuidByName(name);
+    auto it = guid ? characters.find(guid.GetCounter()) : characters.end();
+    if (it == characters.end())
+        return { name + " is not a guild character" };
+    if (sObjectMgr.GetPlayer(guid, false))
+        return { name + " is online; a person hands it back by logging out" };
+    if (!it->second.reserved)
+        return { name + " is not kept for a person" };
+    TransferControl(nullptr, it->first, runplayer::Controller::Engine, "console");
+    Event(it->first, "handed_back", "from the console");
+    return { name + " goes back to the engine, which logs it in" };
+}
+
+void GuildBotMgr::TransferControl(Player* player, uint32 guid, runplayer::Controller to, const std::string& why)
+{
+    auto it = characters.find(guid);
+    if (it == characters.end())
+        return;
+    Character& c = it->second;
+    PlayerbotAI* ai = player ? player->GetPlayerbotAI() : nullptr;
+    for (runplayer::Step step : runplayer::TransferSteps(to))
+    {
+        switch (step)
+        {
+            case runplayer::Step::CancelMoves:
+                sGuildRunStates.CancelMoves(guid);
+                if (ai)
+                    ai->StopMoving();
+                break;
+            case runplayer::Step::CancelPull:
+                // A pull it was asked for, and its queued actions: the run's are refused by the revision next.
+                if (ai)
+                {
+                    if (PullStrategy* strategy = PullStrategy::Get(ai))
+                        if (strategy->HasTarget())
+                            strategy->OnPullEnded();
+                    ai->Reset();
+                }
+                break;
+            case runplayer::Step::Revise:
+                sGuildRunStates.ControlChanged(guid, to, why);
+                break;
+            case runplayer::Step::Ownership:
+                if (to == runplayer::Controller::Person)
+                {
+                    GetAllBots().erase(guid);
+                    c.playerControlled = true;
+                    c.reserved = false;
+                    c.handedBack = false;
+                }
+                else
+                {
+                    // Logged in again by the engine at once; its strategies are built at that login, and the run has it
+                    // walk back to the party.
+                    c.playerControlled = false;
+                    c.reserved = false;
+                    c.handedBack = true;
+                    c.offlineSince = time(nullptr);
+                }
+                break;
+            default:
+                break;
+        }
+    }
 }
 
 void GuildBotMgr::OnPlayerLogout(Player* player)
@@ -2331,9 +2411,19 @@ void GuildBotMgr::OnPlayerLogout(Player* player)
 
     if (it->second.playerControlled)
     {
+        // A logout the client asked for hands the character back; a closed socket or a kick is a disconnect, and the
+        // character stays the player's while a run expects it.
+        WorldSession* session = player->GetSession();
+        if (session && runplayer::LogoutHandsBack(session->IsClientLogout(), session->IsOffline()))
+        {
+            TransferControl(player, it->first, runplayer::Controller::Engine, "logout");
+            Event(it->first, "handed_back", "a player logged out");
+            return;
+        }
         it->second.playerControlled = false;
+        it->second.reserved = sGuildRunStates.Expects(it->first);
         it->second.offlineSince = time(nullptr);
-        Event(it->first, "player_left", "a player logged out");
+        Event(it->first, "player_left", it->second.reserved ? "a player disconnected; kept for them" : "a player disconnected");
     }
 }
 
@@ -2364,6 +2454,8 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
     auto [sub, rest] = SplitWord(args);
 
     // `run state [leader]`: every run the controller keeps, read only, before anything here could make a table.
+    if (sub == "handback")
+        return HandBack(rest);
     if (sub == "run")
     {
         auto [what, leader] = SplitWord(rest);

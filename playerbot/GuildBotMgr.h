@@ -2,6 +2,7 @@
 
 #include "PlayerbotMgr.h"
 #include "ChatHelper.h"
+#include "GuildRunPlayer.h"
 
 #include <map>
 #include <mutex>
@@ -152,6 +153,8 @@ private:
         bool dead = false;
         bool alone = false;         // in a group but with no member near, as its strategies were last built
         std::string partyLeader;    // the leader it joined for its party job, to leave when the job ends
+        bool reserved = false;      // its person disconnected mid-run: the engine does not log it in while a run expects it
+        bool handedBack = false;    // its person logged out cleanly: the engine logs it in at once (runplayer::EngineLogsIn)
         uint32 keepGroupSeq = 0;    // the order whose run failed as cannot_rejoin: until the next order, it keeps its
                                     // group and stays where it is (runrules::KeepsGroup)
         time_t invitedAt = 0;       // when the dungeon leader last invited its companion
@@ -246,7 +249,14 @@ private:
     void LeaveParty(Character& c, Player* bot);
     // A dungeon run that failed (GuildRunStates::Failure): the party job of every member of the leader's group the engine
     // plays fails too, with the same reason. A player's character is left as it is.
-    void FailParty(Player* leader, const std::string& why);
+    void FailParty(Player* leader, const std::string& why, const std::string& status = "failed");
+    // A change of who plays a guild character, at the control boundary (docs/plan.md, item 6): to a person at a takeover
+    // or a login, back to the engine at a clean logout or the console's handback. In runplayer::TransferSteps' order:
+    // what the bot started goes, the runs count a revision and remember who plays it, then the ownership changes.
+    void TransferControl(Player* player, uint32 guid, runplayer::Controller to, const std::string& why);
+    // `guildbot handback <name>`: a character kept for a person who disconnected and is not coming back goes back to the
+    // engine, which logs it in.
+    std::list<std::string> HandBack(const std::string& name);
 
     void Event(uint32 guid, const std::string& kind, const std::string& detail = "");
     Character* Find(const std::string& name);

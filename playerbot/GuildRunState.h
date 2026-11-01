@@ -103,6 +103,12 @@ struct GuildRunView
     runrules::Budget budget;
     std::string keepers;
     bool recovering = false;
+    // The expected members a person plays (docs/plan.md, item 6), and since when only a person has kept the pull back, the
+    // waiting budget frozen for as long (runplayer::FreezeBudget), or 0.
+    std::vector<uint32> persons;
+    int64_t personWaitSince = 0;
+    // A fight the leader did not pull is on, as one a person started: defended, the planned pull cancelled.
+    bool unplannedFight = false;
 };
 
 // The shared state of a guild party's run inside one dungeon instance, which the party's AI plays by: the route of
@@ -151,7 +157,14 @@ public:
     bool Permit(uint32 leaderGuid) const;
     // A run that ended failed, as cannot_rejoin, for the leader's job order: kept, past the run's removal, until the guild
     // manager has failed the party's jobs and says so (Acknowledge).
-    bool Failure(uint32 leaderGuid, uint32 order, std::string& reason) const;
+    bool Failure(uint32 leaderGuid, uint32 order, std::string& reason, runplayer::Outcome* outcome = nullptr) const;
+    // A change of control at its boundary (GuildBotMgr::TransferControl), on the world thread: the member's run moves go
+    // first, when it goes to a person, then the run counts a revision and remembers who plays it. Any run expecting it.
+    void ControlChanged(uint32 guid, runplayer::Controller to, const std::string& why);
+    // The member's run move and walk, removed with no lock held, on the world thread: the first step of a takeover.
+    void CancelMoves(uint32 guid);
+    // Whether any run expects this character: a reservation for its person lasts only while one does.
+    bool Expects(uint32 guid) const;
     void Acknowledge(uint32 leaderGuid, uint32 order);
     // `bench clearroute`: kills every creature of the route's stops before `stop` (1 on), their pulls' extras and their
     // reachers, in the leader's instance only, then the creatures the model does not have along the cleared way, and again
@@ -285,10 +298,14 @@ private:
         time_t stallReportedAt = 0;
         uint32 order = 0;          // the leader's job order the run was made for
         bool failureKept = false;  // its failure is in `failures`
+        bool unplannedFight = false; // in lead, a fight the leader did not pull is on (runplayer::UnplannedFight)
         std::map<size_t, bool> wayChecked; // the route's way, by its first point, WAY_CHECK_POINTS at a time: on the navmesh
         // Readiness: the waiting budget, the keepers as last said, and the block the leader wrote for the tick to take.
         runrules::Budget budget;
         std::string keepers;
+        int64_t personWaitSince = 0;  // only a person keeps the pull back since then: the budget is frozen
+        time_t toldAt = 0;            // the leader last said in party chat what it waits for
+        std::string told;
         uint32 blockId = 0;
         uint32 blockGeneration = 0;
         uint32 blockStop = 0;      // the blocked stop's pack
@@ -308,6 +325,8 @@ private:
     bool Write(Player* leader, const GuildRunStamp& stamp, const char* what,
         const std::function<bool(State&, Map*, std::string&)>& write);
     static const char* PullName(GuildRunPull pull);
+    // Who keeps the pull back, written and said as run_keep, as telemetry with no plan revision. Under the state's lock.
+    static void SayKeepers(State& state, const std::string& text);
     // A leader's write changed the plan: on the instance's map thread, with no lock held, the run's stale run moves of
     // members on that map are removed at once; the rest wait for CleanMoves.
     void StopStaleMoves(Map* map, uint32 leaderGuid, const runcore::RunNow& run);

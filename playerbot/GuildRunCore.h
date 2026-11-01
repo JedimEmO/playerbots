@@ -7,6 +7,7 @@
 // RunMoves keeps the run moves' records apart from the run states, and reaches the members' motion through MoveWorld.
 
 #include "GuildRunRules.h"
+#include "GuildRunPlayer.h"
 
 #include <cstdint>
 #include <ctime>
@@ -136,6 +137,12 @@ namespace runcore
         std::map<uint32_t, time_t> lastDead; // when each member was last seen dead
         time_t apartSince = 0;               // since when a member is apart with nothing else holding the run
         bool failed = false;                 // ended because the party could not regroup, or blocked at one stop too often
+        bool stopped = false;                // ended because its person was gone too long (player_gone): not a failure
+        // Who plays each expected member, kept while it is offline, so a person's disconnect is never taken for a bot gone;
+        // each person's time offline; each bot's own time apart, for cannot_rejoin.
+        std::map<uint32_t, runplayer::Controller> controllers;
+        std::map<uint32_t, runplayer::OfflineClock> offline;
+        std::map<uint32_t, runplayer::BotClock> botClocks;
         // Blocks (docs/run-contract.md, "A block"): the last one taken, the count at each stop by its pack, and the
         // recovery under way: its obligations, kept across a hold, and the reasons it was for.
         uint32_t lastBlock = 0;
@@ -172,6 +179,12 @@ namespace runcore
         void Settle(RunWorld& world, Generations& generations, const runrules::JobReport& report);
         // The job ended, changed or failed: mode ended, every member's motion stopped.
         void End(RunWorld& world, Generations& generations, const std::string& why);
+        // A change of control at its boundary (GuildBotMgr::TransferControl): a person took the member over, or it was
+        // handed back to the engine. A plan revision, so every run action queued before it is refused.
+        void ControlChanged(RunWorld& world, uint32_t guid, runplayer::Controller to, const std::string& why);
+        // Whether a person plays the member, by what is known of it: one online and not the engine's is a person's, one the
+        // engine plays is the engine's, and one offline is what it was.
+        bool IsPerson(uint32_t guid, const runrules::Facts& facts);
         // A leader's write or the tick's own stop change counts a plan revision, said as run_plan.
         void Revise(const std::string& what, const std::string& fields);
         // An event of the run's, its generation and revision first, so that a cut detail keeps them.
@@ -201,6 +214,8 @@ namespace runcore
         void Track(RunWorld& world, const std::vector<uint32_t>& members, time_t now);
         // Nobody apart and no walk: on End, and when the job takes the party out.
         void ClearApart();
+        // Each bot's own time apart (runplayer::BotClock), counted only in hold with nothing holding the run.
+        void TickClocks(RunWorld& world, time_t now, bool holding);
         void StopWalk(uint32_t guid, Apart& away);
         // In released for a recovery: the obligations against the members as they are now, and back to lead, with a new
         // generation, once every one is met or one unmet is past its deadline.
@@ -242,13 +257,21 @@ namespace runcore
     class Failures
     {
     public:
-        void Record(uint32_t leader, uint32_t order, const std::string& why);
-        bool Find(uint32_t leader, uint32_t order, std::string& why) const;
+        // Failed, or stopped as player_gone, which is neither done nor failed (runplayer::Outcome).
+        void Record(uint32_t leader, uint32_t order, const std::string& why,
+            runplayer::Outcome outcome = runplayer::Outcome::Failed);
+        bool Find(uint32_t leader, uint32_t order, std::string& why, runplayer::Outcome* outcome = nullptr) const;
         void Acknowledge(uint32_t leader, uint32_t order);
 
     private:
+        struct Ended
+        {
+            uint32_t order = 0;
+            std::string why;
+            runplayer::Outcome outcome = runplayer::Outcome::Failed;
+        };
         mutable std::mutex lock;
-        std::map<uint32_t, std::pair<uint32_t, std::string>> failed;
+        std::map<uint32_t, Ended> failed;
     };
 
     // A run move: its token, the stamp it was issued under, where the member stood, and the run's leader.

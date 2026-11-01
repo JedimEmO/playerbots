@@ -41,6 +41,19 @@ namespace
         return ready;
     }
 
+    // Whether a person sits eating or drinking: seated, with a health or mana regeneration aura from an item's spell, as
+    // food and drink are. A regeneration aura from anything else, a buff or a talent, is not eating.
+    bool Eating(Player* member)
+    {
+        if (!member->IsSitState())
+            return false;
+        for (AuraType type : { SPELL_AURA_MOD_REGEN, SPELL_AURA_MOD_POWER_REGEN })
+            for (Aura const* aura : member->GetAurasByType(type))
+                if (aura && !aura->GetCastItemGuid().IsEmpty())
+                    return true;
+        return false;
+    }
+
     // Whether a point is on the instance's navmesh: a poly within a few yards of it, as the core's path finder looks.
     // On a route leg the travel map has no way for, a point is on a straight line and need not be.
     bool OnNavmesh(Map* map, const ai::WorldPosition& at)
@@ -830,12 +843,37 @@ std::vector<std::tuple<uint32, std::string, std::string>> GuildRunStates::Reconc
             gone.push_back(state);
         cancels.insert(cancels.end(), state->core.cancels.begin(), state->core.cancels.end());
         state->core.cancels.clear();
-        // A failed run's failure outlives it, until the manager fails the party's jobs.
-        if (state->core.failed && !state->failureKept)
+        // A failed or stopped run's end outlives it, until the manager ends the party's jobs.
+        if ((state->core.failed || state->core.stopped) && !state->failureKept)
         {
             state->failureKept = true;
-            failures.Record(state->leader, state->order, state->core.reason);
+            failures.Record(state->leader, state->order, state->core.reason,
+                state->core.stopped ? runplayer::Outcome::Stopped : runplayer::Outcome::Failed);
         }
+        // A fight the leader did not pull, as one a person started: the planned pull is cancelled by a revision, the party
+        // defends, and once it is over the leader chooses its stop again from what died.
+        if (state->core.mode == GuildRunMode::Lead)
+        {
+            Map* map = sMapMgr.FindMap(state->mapId, state->instanceId);
+            bool fighting = false;
+            for (uint32 guid : state->core.expected)
+                if (Player* member = map ? map->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid)) : nullptr)
+                    fighting = fighting || (member->IsInWorld() && member->IsAlive() && member->IsInCombat());
+            const bool unplanned = runplayer::UnplannedFight(fighting, state->pull == GuildRunPull::Pull, true);
+            if (unplanned && !state->unplannedFight)
+            {
+                state->unplannedFight = true;
+                state->core.Revise("unplanned_fight", "stop=" + std::to_string(state->index + 1) + " pull=" + PullName(state->pull));
+            }
+            else if (!fighting && state->unplannedFight)
+            {
+                state->unplannedFight = false;
+                state->core.choose = true;
+                state->core.Note("run_unplanned", "result=over stop=" + std::to_string(state->index + 1) + " choose=1");
+            }
+        }
+        else
+            state->unplannedFight = false;
         for (const runcore::Event& event : state->core.events)
             events.emplace_back(state->leader, event.kind, event.detail);
         state->core.events.clear();
@@ -871,9 +909,58 @@ bool GuildRunStates::Permit(uint32 leaderGuid) const
     return state->core.mode == GuildRunMode::Ended ? !state->core.failed : state->core.Permit();
 }
 
-bool GuildRunStates::Failure(uint32 leaderGuid, uint32 order, std::string& reason) const
+bool GuildRunStates::Failure(uint32 leaderGuid, uint32 order, std::string& reason, runplayer::Outcome* outcome) const
 {
-    return failures.Find(leaderGuid, order, reason);
+    return failures.Find(leaderGuid, order, reason, outcome);
+}
+
+void GuildRunStates::ControlChanged(uint32 guid, runplayer::Controller to, const std::string& why)
+{
+    std::vector<std::shared_ptr<State>> states;
+    {
+        std::lock_guard<std::mutex> guard(registryLock);
+        for (auto const& [instanceId, state] : byInstance)
+            states.push_back(state);
+    }
+    for (const std::shared_ptr<State>& state : states)
+    {
+        std::lock_guard<std::mutex> guard(state->lock);
+        if (std::find(state->core.expected.begin(), state->core.expected.end(), guid) == state->core.expected.end())
+            continue;
+        ServerRunWorld world(state->mapId, state->instanceId);
+        auto away = state->core.apart.find(guid);
+        if (away != state->core.apart.end() && away->second.walking)
+        {
+            away->second.walking = false;
+            away->second.walk = runcore::Walk();
+        }
+        state->core.ControlChanged(world, guid, to, why);
+    }
+}
+
+void GuildRunStates::CancelMoves(uint32 guid)
+{
+    ServerMoveWorld world;
+    moves.Cancel(world, guid);
+}
+
+bool GuildRunStates::Expects(uint32 guid) const
+{
+    // The registry's lock and a state's are never held together.
+    std::vector<std::shared_ptr<State>> states;
+    {
+        std::lock_guard<std::mutex> guard(registryLock);
+        for (auto const& [instanceId, state] : byInstance)
+            states.push_back(state);
+    }
+    for (const std::shared_ptr<State>& state : states)
+    {
+        std::lock_guard<std::mutex> stateGuard(state->lock);
+        if (state->core.mode != GuildRunMode::Ended
+            && std::find(state->core.expected.begin(), state->core.expected.end(), guid) != state->core.expected.end())
+            return true;
+    }
+    return false;
 }
 
 void GuildRunStates::Acknowledge(uint32 leaderGuid, uint32 order)
@@ -919,12 +1006,25 @@ std::vector<runrules::Kept> GuildRunStates::Readiness(Player* bot, const GuildRu
             ready = ReadyFacts(member, spot ? member->GetDistance(spot.getX(), spot.getY(), spot.getZ()) : 0.0f);
         ready.guid = guid;
         ready.facts.online = member != nullptr;
-        ready.facts.engine = member && member->GetPlayerbotAI();
+        ready.facts.engine = member && sGuildBotMgr.GetPlayerBot(guid) == member;
         ready.facts.inWorld = member && member->IsInWorld();
         ready.facts.teleporting = member && member->IsBeingTeleported();
         ready.facts.inInstance = member != nullptr;
         ready.facts.alive = member && member->IsAlive();
         ready.rejoining = std::find(view.apartMembers.begin(), view.apartMembers.end(), guid) != view.apartMembers.end();
+        // A person's member: its own eating and drinking, and a healer's sight of the tank, the run's leader.
+        ready.person = std::find(view.persons.begin(), view.persons.end(), guid) != view.persons.end()
+            || (member && sGuildBotMgr.GetPlayerBot(guid) != member);
+        if (ready.person && member && member->IsInWorld() && !member->IsBeingTeleported())
+        {
+            ready.eating = Eating(member);
+            ready.healer = PlayerbotAI::IsHeal(member, true);
+            if (leader && leader != member && leader->IsInWorld())
+            {
+                ready.seesTank = member->IsWithinLOSInMap(leader);
+                ready.tankDistance = member->GetDistance(leader);
+            }
+        }
         members.push_back(ready);
     }
     return runrules::Readiness(members);
@@ -1135,7 +1235,7 @@ std::list<std::string> GuildRunStates::Describe(const std::string& leaderName) c
              << " since_pull=" << (state->pullAt ? now - state->pullAt : 0)
              << " since_wait=" << (state->waitSince ? now - state->waitSince : 0)
              << " last_cleared=" << (state->lastCleared < 0 ? 0 : state->lastCleared + 1);
-        line << " permit=" << (core.Permit() ? 1 : 0) << " failed=" << (core.failed ? 1 : 0)
+        line << " permit=" << (core.Permit() ? 1 : 0) << " failed=" << (core.failed ? 1 : 0) << " stopped=" << (core.stopped ? 1 : 0)
              << " apart_for=" << (core.apartSince ? now - core.apartSince : 0);
         // Readiness: the budget's age at this stop and generation, who keeps the pull back, the blocks counted, a recovery.
         const bool budgetHere = state->budget.since && state->budget.stop == state->index && state->budget.generation == core.generation;
@@ -1163,6 +1263,14 @@ std::list<std::string> GuildRunStates::Describe(const std::string& leaderName) c
             auto held = core.held.find(guid);
             if (held != core.held.end())
                 line << " holds_at=" << held->second.x << "," << held->second.y << "," << held->second.z;
+            auto controller = core.controllers.find(guid);
+            if (controller != core.controllers.end() && controller->second == runplayer::Controller::Person)
+            {
+                auto off = core.offline.find(guid);
+                line << " person=1";
+                if (off != core.offline.end() && off->second.since)
+                    line << " offline_for=" << now - off->second.since;
+            }
             auto away = core.apart.find(guid);
             if (away != core.apart.end())
             {
@@ -1245,6 +1353,11 @@ GuildRunView GuildRunStates::View(Player* bot) const
     view.permit = core.Permit();
     for (auto const& [guid, away] : core.apart)
         view.apartMembers.push_back(guid);
+    for (auto const& [guid, controller] : core.controllers)
+        if (controller == runplayer::Controller::Person)
+            view.persons.push_back(guid);
+    view.personWaitSince = state->personWaitSince;
+    view.unplannedFight = state->unplannedFight;
     view.budget = state->budget;
     view.keepers = state->keepers;
     view.recovering = core.recovering;
@@ -1508,19 +1621,55 @@ void GuildRunStates::Keepers(Player* leader, const GuildRunStamp& stamp, const s
     if (!state || state->leader != leader->GetGUIDLow())
         return;
     const std::string text = KeepersText(kept);
-    std::lock_guard<std::mutex> guard(state->lock);
-    // Telemetry: no plan revision, so that the members' gathering moves go on.
-    if (!runrules::Accepts(state->core.mode, state->core.Stamp(), stamp, true) || state->keepers == text)
-        return;
-    state->keepers = text;
-    state->core.Note("run_keep", "stop=" + std::to_string(state->index + 1) + " keepers=" + (text.empty() ? "none" : text)
-        + " budget=" + std::to_string(state->budget.since ? time(nullptr) - state->budget.since : 0));
+    std::string say;
+    {
+        std::lock_guard<std::mutex> guard(state->lock);
+        // Telemetry: no plan revision, so that the members' gathering moves go on.
+        if (!runrules::Accepts(state->core.mode, state->core.Stamp(), stamp, true) || state->keepers == text)
+            return;
+        // Only a person keeping the pull back: the budget is frozen for as long, and no block comes of it.
+        const time_t now = time(nullptr);
+        runplayer::FreezeBudget(state->budget, state->personWaitSince,
+            runplayer::WaitOf(kept) == runplayer::Wait::Person, int64_t(now));
+        state->keepers = text;
+        state->core.Note("run_keep", "stop=" + std::to_string(state->index + 1) + " keepers=" + (text.empty() ? "none" : text)
+            + " budget=" + std::to_string(state->budget.since ? now - state->budget.since : 0)
+            + (state->personWaitSince ? " person_wait=" + std::to_string(now - state->personWaitSince) : std::string()));
+        // What it waits for a person for, in party chat: when it changes, and at most once a minute.
+        say = runplayer::WaitLine(kept, [](uint32_t guid)
+        {
+            std::string name;
+            if (!sObjectMgr.GetPlayerNameByGUID(ObjectGuid(HIGHGUID_PLAYER, guid), name))
+                name = std::to_string(guid);
+            return name;
+        });
+        if (say.empty() || !runplayer::MaySay(say, state->told, int64_t(state->toldAt), int64_t(now)))
+            say.clear();
+        else
+        {
+            state->told = say;
+            state->toldAt = now;
+        }
+    }
+    if (!say.empty() && sGuildBotMgr.GetPlayerBot(leader->GetGUIDLow()) == leader && leader->GetPlayerbotAI())
+        leader->GetPlayerbotAI()->SayToParty(say);
+}
+
+void GuildRunStates::SayKeepers(State& state, const std::string& text)
+{
+    state.keepers = text;
+    state.core.Note("run_keep", "stop=" + std::to_string(state.index + 1) + " keepers=" + (text.empty() ? "none" : text)
+        + " budget=" + std::to_string(state.budget.since ? time(nullptr) - state.budget.since : 0));
 }
 
 void GuildRunStates::Pulled(Player* leader, const GuildRunStamp& stamp, ObjectGuid creature)
 {
     Write(leader, stamp, "pulled", [creature](State& state, Map*, std::string&)
     {
+        // A pull goes only through the gate, with nobody keeping it back: said before the pull, since the keepers' own
+        // write, fired the same tick, is refused once the pull has revised the plan.
+        if (!state.keepers.empty())
+            SayKeepers(state, "");
         state.pull = GuildRunPull::Pull;
         state.pulled = creature;
         state.pullAt = state.changedAt = time(nullptr);

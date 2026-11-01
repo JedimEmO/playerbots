@@ -192,7 +192,12 @@ bool RunBlockTrigger::IsActive()
     // never with nobody keeping the pull back.
     const bool gathered = view.pull == GuildRunPull::Gather
         && DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) <= RUN_AT_SPOT * 2;
-    return runrules::BlockDue(view.budget, int64_t(time(nullptr)), GuildRunStates::Readiness(bot, view), gathered);
+    // Only the bots' reasons may block, and the budget is frozen while a person alone keeps the pull back.
+    const std::vector<runrules::Kept> kept = GuildRunStates::Readiness(bot, view);
+    if (runplayer::WaitOf(kept) == runplayer::Wait::Person)
+        return false;
+    const int64_t now = int64_t(time(nullptr));
+    return runrules::BlockDue(runplayer::Frozen(view.budget, view.personWaitSince, now), now, runplayer::BotReasons(kept), gathered);
 }
 
 bool RunPullFailedTrigger::IsActive()

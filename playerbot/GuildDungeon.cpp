@@ -3993,8 +3993,10 @@ void GuildDungeon::TickLeave(Player* leader, Run& run, Update& update)
                 guildInside++;
             else
                 playerInside = member->GetName();
+            // Only a member the engine plays goes home by hearthstone: a person's never, whatever AI it has.
             PlayerbotAI* memberAi = member->GetPlayerbotAI();
-            if (leaderOut && memberAi && sGuildBotMgr.IsGuildBot(member) && member->IsAlive() && !member->IsBeingTeleported())
+            if (leaderOut && memberAi && sGuildBotMgr.GetPlayerBot(member->GetGUIDLow()) == member && member->IsAlive()
+                && !member->IsBeingTeleported())
             {
                 Run::Still& still = run.stillInside[member->GetGUIDLow()];
                 if (!still.since || member->GetDistance(still.x, still.y, still.z) > STRANDED_STILL)

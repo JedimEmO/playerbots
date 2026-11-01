@@ -678,7 +678,8 @@ namespace runrules
 
     // Readiness (docs/run-contract.md, "Readiness"): why an expected member, the leader among them, keeps the pull back.
     // Dead and away come from Present's facts and A2b's rejoining set; the rest from the member as the leader sees it.
-    enum class Keep : uint8_t { Dead, Away, Fight, Far, Health, Mana, Supplies };
+    // A person's member also keeps it back while eating or drinking, and, as a healer, out of sight of the tank.
+    enum class Keep : uint8_t { Dead, Away, Fight, Far, Health, Mana, Supplies, Eating, Sight };
 
     inline const char* KeepName(Keep keep)
     {
@@ -690,6 +691,8 @@ namespace runrules
             case Keep::Far: return "far";
             case Keep::Health: return "health";
             case Keep::Mana: return "mana";
+            case Keep::Eating: return "eating";
+            case Keep::Sight: return "sight";
             default: return "supplies";
         }
     }
@@ -709,6 +712,13 @@ namespace runrules
         uint32_t mana = 100;
         bool hasFood = true;       // carries food suited to its level
         bool hasDrink = true;      // carries drink suited to its level; asked only of one that uses mana
+        // A person's member (docs/plan.md, item 6): never short of supplies, since the job cannot buy theirs, but waited
+        // for while seated eating or drinking an item's food or drink, and as a healer until in sight of the tank.
+        bool person = false;
+        bool eating = false;
+        bool healer = false;
+        bool seesTank = true;
+        float tankDistance = 0.0f;
     };
 
     // The thresholds, which never change while a party waits.
@@ -720,6 +730,7 @@ namespace runrules
     {
         uint32_t guid = 0;
         Keep why = Keep::Dead;
+        bool person = false;       // a person's reason: waited for, never blocked on
     };
 
     // Each member that keeps the pull back, with each of its reasons, in the members' order. One not there is only dead or
@@ -732,23 +743,29 @@ namespace runrules
         {
             const Facts& f = member.facts;
             const bool present = f.online && f.inWorld && !f.teleporting && f.inInstance && f.alive;
+            const bool person = member.person;
             if (!present || member.rejoining)
             {
-                kept.push_back({ member.guid, f.online && !f.alive ? Keep::Dead : Keep::Away });
+                kept.push_back({ member.guid, f.online && !f.alive ? Keep::Dead : Keep::Away, person });
                 continue;
             }
             if (member.inFight)
-                kept.push_back({ member.guid, Keep::Fight });
+                kept.push_back({ member.guid, Keep::Fight, person });
             if (member.distance > READY_NEAR)
-                kept.push_back({ member.guid, Keep::Far });
-            const bool noFood = member.health < READY_HEALTH && !member.hasFood;
-            const bool noDrink = member.usesMana && member.mana < READY_MANA && !member.hasDrink;
+                kept.push_back({ member.guid, Keep::Far, person });
+            // A person is never out of supplies: waiting mends it, as the person eats, drinks or goes for more.
+            const bool noFood = !person && member.health < READY_HEALTH && !member.hasFood;
+            const bool noDrink = !person && member.usesMana && member.mana < READY_MANA && !member.hasDrink;
             if (member.health < READY_HEALTH && !noFood)
-                kept.push_back({ member.guid, Keep::Health });
+                kept.push_back({ member.guid, Keep::Health, person });
             if (member.usesMana && member.mana < READY_MANA && !noDrink)
-                kept.push_back({ member.guid, Keep::Mana });
+                kept.push_back({ member.guid, Keep::Mana, person });
             if (noFood || noDrink)
-                kept.push_back({ member.guid, Keep::Supplies });
+                kept.push_back({ member.guid, Keep::Supplies, person });
+            if (person && member.eating)
+                kept.push_back({ member.guid, Keep::Eating, person });
+            if (person && member.healer && !(member.seesTank && member.tankDistance >= 0.0f && member.tankDistance <= 40.0f))
+                kept.push_back({ member.guid, Keep::Sight, person });
         }
         return kept;
     }
@@ -849,6 +866,8 @@ namespace runrules
             case Keep::Far: return member.distance <= READY_NEAR;
             case Keep::Health: return member.health >= READY_HEALTH;
             case Keep::Mana: return !member.usesMana || member.mana >= READY_MANA;
+            case Keep::Eating: return !member.eating;
+            case Keep::Sight: return !member.healer || (member.seesTank && member.tankDistance <= 40.0f);
             default:
                 return (member.health >= READY_HEALTH || member.hasFood)
                     && (!member.usesMana || member.mana >= READY_MANA || member.hasDrink);

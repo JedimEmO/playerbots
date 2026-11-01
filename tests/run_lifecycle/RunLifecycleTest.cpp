@@ -2,6 +2,7 @@
 // every lookup and motion call. Built and run by tests/run_lifecycle/run.sh, without the server.
 
 #include "GuildRunCore.h"
+#include "GuildRunPlayer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1659,6 +1660,244 @@ namespace
         CHECK(core.mode == Mode::Hold && !core.failed);
     }
 
+    // Item 6: a person in the party, its pure decisions (GuildRunPlayer.h).
+    void PersonControl()
+    {
+        using namespace runplayer;
+        // A logout the client asked for hands back; a closed socket, even after the request, and a kick do not.
+        CHECK(LogoutHandsBack(true, false));
+        CHECK(!LogoutHandsBack(true, true));     // requested, then the client closed mid-countdown
+        CHECK(!LogoutHandsBack(false, true));    // the socket closed
+        CHECK(!LogoutHandsBack(false, false));   // an AFK or GM kick
+        // The login loop: never a reserved character; a handed-back one at once; otherwise after the relog delay.
+        CHECK(!EngineLogsIn(true, true, false, 10000, 60));
+        CHECK(EngineLogsIn(true, false, true, 0, 60));
+        CHECK(!EngineLogsIn(true, false, false, 59, 60) && EngineLogsIn(true, false, false, 60, 60));
+        CHECK(!EngineLogsIn(false, false, true, 0, 60));
+        // The offline timer: from the disconnect, not moved by a second one, reset only at the reconnection.
+        OfflineClock offline;
+        offline.Disconnected(100);
+        offline.Disconnected(500);
+        CHECK(offline.since == 100 && !offline.Gone(100 + PLAYER_GONE_SECONDS - 1) && offline.Gone(100 + PLAYER_GONE_SECONDS));
+        offline.Reconnected();
+        CHECK(!offline.Gone(100000));
+        offline.Disconnected(3000);
+        CHECK(!offline.Gone(3000 + PLAYER_GONE_SECONDS - 1));
+        // A stop is neither done nor failed, and never counts as a run done.
+        CHECK(std::string(JobStatus(Outcome::Stopped)) == "stopped" && std::string(JobStatus(Outcome::Failed)) == "failed");
+        CHECK(!CountsAsDone(Outcome::Stopped) && !CountsAsDone(Outcome::Failed));
+        // The leader played by a person: held while played, offline held as player_offline.
+        CHECK(LeaderHold(Controller::Engine, true).empty());
+        CHECK(LeaderHold(Controller::Person, true) == "leader_taken_over");
+        CHECK(LeaderHold(Controller::Person, false) == "player_offline");
+        // A change of control, in order: cancel before the revision, the revision before ownership; back the other way.
+        CHECK((TransferSteps(Controller::Person) == std::vector<Step>{ Step::CancelMoves, Step::CancelPull, Step::Revise, Step::Ownership }));
+        CHECK((TransferSteps(Controller::Engine) == std::vector<Step>{ Step::Revise, Step::Ownership, Step::Strategies, Step::Rejoin }));
+    }
+
+    void PersonWaiting()
+    {
+        using namespace runplayer;
+        // Only a person keeps the pull back: no budget, no block, as long as it lasts. Mixed: the bots' recovery runs.
+        CHECK(WaitOf(0, 0) == Wait::None && WaitOf(2, 0) == Wait::Person && WaitOf(0, 1) == Wait::Bots && WaitOf(1, 1) == Wait::Mixed);
+        CHECK(!BudgetRuns(Wait::Person) && !BlockCounts(Wait::Person) && !BudgetRuns(Wait::None));
+        CHECK(BudgetRuns(Wait::Mixed) && BlockCounts(Wait::Mixed) && BlockCounts(Wait::Bots));
+        // Past a third block's timeline the person's wait counts nothing: still no block after an hour.
+        int blocks = 0;
+        for (int minute = 0; minute < 60; ++minute)
+            blocks += BlockCounts(WaitOf(1, 0)) ? 1 : 0;
+        CHECK(blocks == 0);
+        CHECK(!MayResupply(true) && MayResupply(false));
+        // Each bot's own time apart: a long wait for a person uses none of it; a bot newly apart starts at zero, and a
+        // reason to hold starts it over.
+        BotClock bot;
+        for (int64_t t = 0; t <= 3000; t += 10)
+            bot.Tick(t, false, false);
+        CHECK(bot.apartFor == 0);
+        bot.Tick(3010, true, false);
+        bot.Tick(3020, true, false);
+        CHECK(bot.apartFor == 10);
+        bot.Tick(3500, true, true);
+        CHECK(bot.apartFor == 0);
+        bot.Tick(3510, true, false);
+        bot.Tick(3520, true, false);
+        CHECK(bot.apartFor == 10 && !bot.Overdue(runrules::REJOIN_SECONDS));
+        bot.Tick(3510 + runrules::REJOIN_SECONDS, true, false);
+        CHECK(bot.Overdue(runrules::REJOIN_SECONDS));
+        bot.Tick(5000, false, false);
+        CHECK(bot.apartFor == 0);
+        // Eating or drinking from an item, seated: waited for at any mana; a buff's regeneration does not count.
+        CHECK(Eating(true, true) && !Eating(false, true) && !Eating(true, false));
+        // A person healer: in sight of the tank and within 40 yd.
+        CHECK(HealerReady(false, false, 100.0f));
+        CHECK(HealerReady(true, true, 39.0f) && !HealerReady(true, false, 10.0f) && !HealerReady(true, true, 41.0f));
+        CHECK(!HealerReady(true, true, -1.0f));
+        // A fight the leader did not pull: outside the pull phase, or not with the pull's creature.
+        CHECK(UnplannedFight(true, false, false) && UnplannedFight(true, true, false));
+        CHECK(!UnplannedFight(true, true, true) && !UnplannedFight(false, false, false));
+    }
+
+    // A person's member disconnects: still the person's, the run holds as player_offline and runs no bot's clock; back,
+    // the hold ends; gone half an hour, the run stops, which is no failure.
+    void PersonOffline()
+    {
+        Facts human = Inside();
+        human.engine = false;
+        FakeWorld world = Party();
+        world.facts[4] = human;
+        world.places[4] = { 6.0f, 0.0f, 0.0f };
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        CHECK(core.controllers[4] == runplayer::Controller::Person && core.Permit());
+        world.facts[4] = Facts();                 // offline: nothing known of it but who played it
+        core.Reconcile(world, counter, 110);
+        CHECK(core.mode == Mode::Hold && core.reason == "player_offline" && core.controllers[4] == runplayer::Controller::Person);
+        CHECK(core.apart.count(4) && core.apart[4].human && !core.botClocks[4].Overdue(1));
+        core.Reconcile(world, counter, 110 + runrules::REJOIN_SECONDS + 60);
+        CHECK(core.mode == Mode::Hold && !core.failed && !core.stopped);
+        // Back after twenty minutes: the clock starts over, and the hold ends once it is with the party.
+        world.facts[4] = human;
+        core.Reconcile(world, counter, 1310);
+        CHECK(core.offline[4].since == 0 && core.mode == Mode::Lead && core.reason == "resume_rejoined");
+        // Off again, for good: thirty minutes from this disconnect, not the first.
+        world.facts[4] = Facts();
+        core.Reconcile(world, counter, 1400);
+        core.Reconcile(world, counter, 1400 + runplayer::PLAYER_GONE_SECONDS - 1);
+        CHECK(core.mode == Mode::Hold && !core.stopped);
+        core.Reconcile(world, counter, 1400 + runplayer::PLAYER_GONE_SECONDS);
+        CHECK(core.mode == Mode::Ended && core.reason == "player_gone" && core.stopped && !core.failed && !core.Permit());
+        CHECK(HasEvent(core, "run_player", "result=gone members=m4"));
+
+        // The leader played by a person: held as taken over, and offline as player_offline, not leader_offline.
+        FakeWorld led = Party();
+        RunCore lead = Started(led, counter);
+        led.facts[1].engine = false;
+        lead.Reconcile(led, counter, 100);
+        CHECK(lead.mode == Mode::Hold && lead.reason == "leader_taken_over");
+        led.facts[1] = Facts();
+        lead.Reconcile(led, counter, 110);
+        CHECK(lead.reason == "player_offline");
+        // A bot offline is still leader_offline: who played it is what counts.
+        FakeWorld bot = Party();
+        RunCore botLed = Started(bot, counter);
+        bot.facts[1] = Facts();
+        botLed.Reconcile(bot, counter, 100);
+        CHECK(botLed.reason.find("leader_offline") != std::string::npos);
+    }
+
+    // Takeover and hand-back at the control boundary: each a plan revision, so every queued run action is refused; handed
+    // back, the member is the engine's again, apart until it walks back to the party.
+    void TakeoverAndHandBack()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        const runrules::Stamp before = core.Stamp();
+        core.ControlChanged(world, 3, runplayer::Controller::Person, "takeover");
+        CHECK(!runrules::Same(core.Stamp(), before) && core.controllers[3] == runplayer::Controller::Person);
+        CHECK(!runrules::Accepts(core.mode, core.Stamp(), before, false));
+        CHECK(HasEvent(core, "run_plan", "what=control member=m3 to=person why=takeover"));
+        // Played by the person, near the leader: with the party, no hold, never planned.
+        world.facts[3].engine = false;
+        core.Reconcile(world, counter, 110);
+        CHECK(core.mode == Mode::Lead && core.apart.empty() && world.planCalls[3] == 0);
+        // A clean logout hands it back: offline a moment as the engine's, then the engine logs it in at the entrance.
+        core.ControlChanged(world, 3, runplayer::Controller::Engine, "logout");
+        world.facts[3] = Facts();
+        core.Reconcile(world, counter, 120);
+        CHECK(core.mode == Mode::Lead && core.controllers[3] == runplayer::Controller::Engine);
+        CHECK(core.apart.count(3) && !core.apart[3].human && core.apart[3].missing);
+        world.facts[3] = Inside();
+        world.places[3] = { 300.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 125);
+        CHECK(core.apart.count(3) && core.apart[3].walking && HasEvent(core, "run_rejoin", "member=m3 result=back"));
+    }
+
+    // Readiness of a person: never supplies, waited for while eating and, as a healer, out of the tank's sight; the bots'
+    // reasons alone block, and the budget is frozen while only a person keeps the pull back.
+    void PersonReadiness()
+    {
+        runrules::Ready person;
+        person.guid = 4;
+        person.facts = Inside();
+        person.facts.engine = false;
+        person.person = true;
+        person.usesMana = true;
+        person.mana = 30;
+        person.hasDrink = false;                  // a bot would block on supplies; a person drinks or goes for more
+        std::vector<runrules::Kept> kept = runrules::Readiness({ person });
+        CHECK(kept.size() == 1 && kept[0].why == runrules::Keep::Mana && kept[0].person);
+        CHECK(!runrules::BlocksAtOnce(kept));
+        // Eating at full mana still keeps the pull back; a healer out of the tank's sight too.
+        person.mana = 100;
+        person.eating = true;
+        person.healer = true;
+        person.seesTank = false;
+        kept = runrules::Readiness({ person });
+        CHECK(kept.size() == 2 && kept[0].why == runrules::Keep::Eating && kept[1].why == runrules::Keep::Sight);
+        person.eating = false;
+        person.seesTank = true;
+        person.tankDistance = 41.0f;
+        CHECK(runrules::Readiness({ person }).size() == 1);
+        person.tankDistance = 30.0f;
+        CHECK(runrules::Readiness({ person }).empty());
+        // A bot short of drink beside it: mixed, and only the bot's reason is blocked on.
+        runrules::Ready bot;
+        bot.guid = 2;
+        bot.facts = Inside();
+        bot.usesMana = true;
+        bot.mana = 30;
+        bot.hasDrink = false;
+        person.mana = 30;
+        person.hasDrink = false;
+        kept = runrules::Readiness({ bot, person });
+        CHECK(runplayer::WaitOf(kept) == runplayer::Wait::Mixed);
+        const std::vector<runrules::Kept> bots = runplayer::BotReasons(kept);
+        CHECK(bots.size() == 1 && bots[0].guid == 2 && bots[0].why == runrules::Keep::Supplies);
+        CHECK(runplayer::WaitOf(runrules::Readiness({ person })) == runplayer::Wait::Person);
+        // The budget frozen through a person-only wait past what B's three blocks would take: no block, ever.
+        runrules::Budget budget;
+        runrules::TrackBudget(budget, 3, 7, true, 1000);
+        int64_t personSince = 0;
+        int blocks = 0;
+        for (int64_t now = 1000; now <= 1000 + 3 * runrules::READY_BUDGET + 600; now += 30)
+        {
+            const std::vector<runrules::Kept> waiting = runrules::Readiness({ person });
+            runplayer::FreezeBudget(budget, personSince, runplayer::WaitOf(waiting) == runplayer::Wait::Person, now);
+            if (runplayer::WaitOf(waiting) != runplayer::Wait::Person
+                && runrules::BlockDue(runplayer::Frozen(budget, personSince, now), now, runplayer::BotReasons(waiting), true))
+                ++blocks;
+        }
+        CHECK(blocks == 0 && personSince == 1000);
+        // The person ready at last: the budget goes on from where it was, all its time still to come.
+        runplayer::FreezeBudget(budget, personSince, false, 2800);
+        CHECK(personSince == 0 && budget.since == 2800 && !runrules::BudgetOut(budget, 2800 + runrules::READY_BUDGET - 1));
+        // A recovery's obligations are never a person's: eating and sight are met by the person as it is.
+        runrules::Obligation eating{ 4, runrules::Keep::Eating, 5000 };
+        person.facts = Inside();
+        person.eating = false;
+        CHECK(runrules::Met(eating, person));
+    }
+
+    void PersonLines()
+    {
+        std::vector<runrules::Kept> kept = { { 2, runrules::Keep::Mana, false }, { 4, runrules::Keep::Mana, true },
+            { 4, runrules::Keep::Far, true }, { 4, runrules::Keep::Away, true } };
+        const std::string line = runplayer::WaitLine(kept, [](uint32_t guid) { return "m" + std::to_string(guid); });
+        CHECK(line == "Waiting for m4 mana, need 60%; m4 to come to me");
+        CHECK(runplayer::WaitLine({ { 2, runrules::Keep::Mana, false } }, [](uint32_t) { return std::string("x"); }).empty());
+        CHECK(runplayer::MaySay(line, "", 0, 100) && !runplayer::MaySay(line, line, 100, 159) && runplayer::MaySay(line, line, 100, 160));
+        CHECK(!runplayer::MaySay("", "", 0, 100));
+        // A stop is kept like a failure, with its outcome, until acknowledged.
+        Failures kept2;
+        kept2.Record(1, 9, "player_gone", runplayer::Outcome::Stopped);
+        std::string why;
+        runplayer::Outcome outcome = runplayer::Outcome::Failed;
+        CHECK(kept2.Find(1, 9, why, &outcome) && why == "player_gone" && outcome == runplayer::Outcome::Stopped);
+    }
+
     void PullPermitLost()
     {
         // A pull fired while the party was together, run after a member died: the permit is gone, whatever the stamp.
@@ -2296,6 +2535,12 @@ int main()
     PullPermitLost();
     HumanMember();
     HumanInHold();
+    PersonControl();
+    PersonWaiting();
+    PersonOffline();
+    TakeoverAndHandBack();
+    PersonReadiness();
+    PersonLines();
     FailedPartyKeepsGroup();
     SummonInTheWay();
     ReadinessReasons();

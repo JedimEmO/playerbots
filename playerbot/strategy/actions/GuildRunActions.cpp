@@ -158,7 +158,8 @@ bool RunBlockAction::Execute(Event& event)
         return false;
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
     // The reasons as they are now: a party that came ready meanwhile is not blocked.
-    const std::vector<runrules::Kept> kept = GuildRunStates::Readiness(bot, view);
+    // Only the bots' reasons: a person is waited for, never blocked on, and a person's reason never starts a resupply.
+    const std::vector<runrules::Kept> kept = runplayer::BotReasons(GuildRunStates::Readiness(bot, view));
     if (kept.empty())
         return false;
     sGuildRunStates.Block(bot, StampOf(event), kept);
