@@ -82,6 +82,7 @@ namespace runcore
     {
         time_t since = 0;
         bool missing = false;
+        bool human = false;        // played by a person: never walked, and never counted for cannot_rejoin
         bool cohort = false;       // of the hold's cohort, walking to the anchor within its minute
         time_t walkSince = 0;      // when its first walk began, for the cohort's minute
         bool walking = false;
@@ -120,7 +121,8 @@ namespace runcore
         bool choose = false;                 // the leader chooses its stop again from where it stands
         std::map<uint32_t, Held> held;       // in hold, each living member the engine plays inside: where it holds
         std::map<uint32_t, Apart> apart;     // the members apart from the party, in every mode
-        std::vector<uint32_t> settled;       // the expected members alive inside and not apart, as of the last reconcile
+        std::vector<uint32_t> settled;       // the expected members alive inside and not apart, as of the last reconcile,
+                                             // a person's member with the party among them
         bool hasAnchor = false;              // in hold: the party's place, fixed for the hold
         Held anchor;
         std::string anchorKind;

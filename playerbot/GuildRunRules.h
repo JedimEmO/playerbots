@@ -600,6 +600,25 @@ namespace runrules
         return chunks;
     }
 
+    // A member played by a person, not by the engine: the run never moves one, so it is with the party by where it is,
+    // within HUMAN_NEAR of the leader, or of the anchor in hold. A person cannot see the anchor, so the reach is wider than
+    // a walking member's ARRIVE_NEAR.
+    constexpr float HUMAN_NEAR = 20.0f;
+
+    inline bool Human(const Facts& facts)
+    {
+        return facts.online && !facts.engine;
+    }
+
+    // Whether a person's member is with the party: alive, in the world and not between maps, in the run's instance and
+    // in the group, and within HUMAN_NEAR of where the party is. distance < 0: no place to measure from, as with the
+    // leader dead and no anchor yet; alive inside is then enough.
+    inline bool HumanPresent(const Facts& facts, bool inGroup, float distance)
+    {
+        return Human(facts) && facts.alive && facts.inWorld && !facts.teleporting && facts.inInstance && inGroup
+            && (distance < 0.0f || distance <= HUMAN_NEAR);
+    }
+
     // Of a hold's cohort: a member the run may move, not seen dead in the last COHORT_DEAD_SECONDS. lastDead 0: never.
     inline bool InCohort(const Facts& facts, int64_t lastDead, int64_t now)
     {

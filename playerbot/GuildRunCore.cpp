@@ -227,8 +227,10 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
         return true;
     }
 
-    // A member apart with nothing else holding the run: REJOIN_SECONDS of that, and the run cannot regroup.
-    if (apart.empty())
+    // A member the engine plays apart with nothing else holding the run: REJOIN_SECONDS of that, and the run cannot
+    // regroup. A person's member apart holds the pull, and the run waits for it without end.
+    const bool engineApart = std::any_of(apart.begin(), apart.end(), [](const auto& entry) { return !entry.second.human; });
+    if (!engineApart)
         apartSince = 0;
     else if (!apartSince)
         apartSince = now;
@@ -236,7 +238,8 @@ bool RunCore::Reconcile(RunWorld& world, Generations& generations, time_t now)
     {
         std::string who;
         for (auto const& [guid, away] : apart)
-            who += (who.empty() ? "" : ",") + world.Name(guid) + (away.blocked.empty() ? "" : ":" + away.blocked);
+            if (!away.human)
+                who += (who.empty() ? "" : ",") + world.Name(guid) + (away.blocked.empty() ? "" : ":" + away.blocked);
         Note("run_rejoin", "result=cannot_rejoin apart=" + who);
         failed = true;
         End(world, generations, "cannot_rejoin");
@@ -336,8 +339,52 @@ void RunCore::Track(RunWorld& world, const std::vector<uint32_t>& members, time_
     const bool leaderHere = runrules::Movable(world.FactsOf(leader)) && world.Position(leader, leaderAt.x, leaderAt.y, leaderAt.z);
     for (uint32_t guid : expected)
     {
-        const bool here = runrules::Movable(world.FactsOf(guid)) && Contains(members, guid);
+        const runrules::Facts facts = world.FactsOf(guid);
         auto it = apart.find(guid);
+        // A person's member is never moved: with the party by where it is, else apart until it comes, holding the pull
+        // but never failing the order.
+        if (runrules::Human(facts))
+        {
+            // Where the party is: the anchor in hold, else the leader when the engine plays it inside.
+            Held at, from = leaderAt;
+            bool hasFrom = leaderHere;
+            if (mode == Mode::Hold && hasAnchor)
+            {
+                from = anchor;
+                hasFrom = true;
+            }
+            const bool located = world.Position(guid, at.x, at.y, at.z);
+            const float distance = hasFrom && located ? runrules::Distance(VecOf(at), VecOf(from)) : -1.0f;
+            if (runrules::HumanPresent(facts, Contains(members, guid), distance))
+            {
+                if (it != apart.end())
+                {
+                    StopWalk(guid, it->second);
+                    apart.erase(it);
+                    Note("run_rejoin", "member=" + world.Name(guid) + " result=arrived human=1");
+                }
+                continue;
+            }
+            if (it == apart.end() || !it->second.human)
+            {
+                if (it == apart.end())
+                {
+                    Apart away;
+                    away.since = now;
+                    it = apart.emplace(guid, away).first;
+                }
+                Note("run_rejoin", "member=" + world.Name(guid) + " result=away human=1"
+                    + (distance >= 0.0f ? " dist=" + Num(distance) : std::string()));
+            }
+            StopWalk(guid, it->second);
+            it->second.human = true;
+            it->second.missing = true;
+            it->second.cohort = false;
+            continue;
+        }
+        const bool here = runrules::Movable(facts) && Contains(members, guid);
+        if (it != apart.end())
+            it->second.human = false;
         if (!here)
         {
             if (it == apart.end())
@@ -509,8 +556,11 @@ void RunCore::Track(RunWorld& world, const std::vector<uint32_t>& members, time_
 
     settled.clear();
     for (uint32_t guid : expected)
-        if (!apart.count(guid) && runrules::Movable(world.FactsOf(guid)) && Contains(members, guid))
+    {
+        const runrules::Facts facts = world.FactsOf(guid);
+        if (!apart.count(guid) && (runrules::Movable(facts) || runrules::Human(facts)) && Contains(members, guid))
             settled.push_back(guid);
+    }
 }
 
 runrules::Control RunCore::Prepare(RunWorld& world, Generations& generations, bool livingAhead)

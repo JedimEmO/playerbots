@@ -1540,6 +1540,99 @@ namespace
         CHECK(core.mode == Mode::Hold);
     }
 
+    // The user plays a member, a healer or a dps, while a bot tank leads: with the party by where it is, never moved,
+    // and never the reason a run fails.
+    void HumanMember()
+    {
+        Facts human = Inside();
+        human.engine = false;
+        CHECK(runrules::Human(human) && !runrules::Movable(human));
+        CHECK(runrules::HumanPresent(human, true, 19.0f) && !runrules::HumanPresent(human, true, 21.0f));
+        CHECK(runrules::HumanPresent(human, true, -1.0f) && !runrules::HumanPresent(human, false, 1.0f));
+        Facts dead = human;
+        dead.alive = false;
+        Facts outside = human;
+        outside.inInstance = false;
+        CHECK(!runrules::HumanPresent(dead, true, 1.0f) && !runrules::HumanPresent(outside, true, 1.0f));
+        CHECK(!runrules::Human(Inside()) && !runrules::Human(Facts()));
+
+        // In lead, near the leader: with the party, the pull allowed, settled, and never planned, placed or cancelled.
+        FakeWorld world = Party();
+        world.facts[4] = human;
+        world.places[4] = { 15.0f, 0.0f, 0.0f };
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 100);
+        CHECK(core.mode == Mode::Lead && core.apart.empty() && core.Permit());
+        CHECK(std::find(core.settled.begin(), core.settled.end(), 4u) != core.settled.end());
+        // Far off: apart, the pull held, and still nothing moves it; ten minutes and more end nothing.
+        world.places[4] = { 100.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 110);
+        CHECK(core.apart.count(4) && core.apart[4].human && !core.apart[4].walking && !core.Permit());
+        CHECK(HasEvent(core, "run_rejoin", "member=m4 result=away human=1"));
+        core.Reconcile(world, counter, 110 + runrules::REJOIN_SECONDS + 60);
+        CHECK(core.mode == Mode::Lead && !core.failed && core.apartSince == 0);
+        // Dead, the same; back within reach: with the party again, the pull allowed.
+        world.facts[4].alive = false;
+        core.Reconcile(world, counter, 800);
+        CHECK(core.apart.count(4) && core.apart[4].human && core.mode == Mode::Lead && core.apartSince == 0);
+        world.facts[4] = human;
+        world.places[4] = { 12.0f, 3.0f, 0.0f };
+        core.Reconcile(world, counter, 810);
+        CHECK(core.apart.empty() && core.Permit() && HasEvent(core, "run_rejoin", "member=m4 result=arrived human=1"));
+        CHECK(world.planCalls[4] == 0 && !core.held.count(4));
+        for (uint32_t guid : world.cancelled)
+            CHECK(guid != 4);
+
+        // A bot apart beside the person: the bot's ten minutes still end the run, and only the bot is named.
+        world.facts[3].alive = false;
+        world.places[4] = { 100.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 900);
+        CHECK(core.apartSince == 900);
+        core.Reconcile(world, counter, 900 + runrules::REJOIN_SECONDS);
+        CHECK(core.mode == Mode::Ended && core.failed && HasEvent(core, "run_rejoin", "result=cannot_rejoin apart=m3"));
+        CHECK(!HasEvent(core, "run_rejoin", "apart=m3,m4"));
+    }
+
+    void HumanInHold()
+    {
+        Facts human = Inside();
+        human.engine = false;
+        FakeWorld world = Party();
+        world.facts[4] = human;
+        world.places[4] = { 17.0f, 0.0f, 0.0f };   // 15 yd from the anchor, m2's place
+        Counter counter;
+        RunCore core = Started(world, counter);
+        world.facts[1].alive = false;
+        core.Reconcile(world, counter, 100);
+        CHECK(core.mode == Mode::Hold && core.anchorKind == "cohort_m2");
+        CHECK(!core.apart.count(4) && !core.held.count(4) && world.planCalls[4] == 0);
+        // The leader back at the anchor: the run resumes with the person 15 yd off.
+        world.facts[1] = Inside();
+        world.places[1] = { 2.0f, 1.0f, 0.0f };
+        core.Reconcile(world, counter, 120);
+        CHECK(core.mode == Mode::Lead && core.reason == "resume_rejoined");
+        // Again, the person 30 yd off: held until it comes.
+        world.facts[1].alive = false;
+        core.Reconcile(world, counter, 130);
+        world.places[4] = { 32.0f, 0.0f, 0.0f };
+        world.facts[1] = Inside();
+        core.Reconcile(world, counter, 140);
+        CHECK(core.mode == Mode::Hold && core.apart.count(4) && core.apart[4].human && core.apartSince == 0);
+        core.Reconcile(world, counter, 140 + runrules::REJOIN_SECONDS + 60);
+        CHECK(core.mode == Mode::Hold && !core.failed);
+        world.places[4] = { 10.0f, 0.0f, 0.0f };
+        core.Reconcile(world, counter, 900);
+        CHECK(core.mode == Mode::Lead && core.reason == "resume_rejoined");
+
+        // The leader taken over by a person: the run holds, as before, and fails nothing.
+        world.facts[1].engine = false;
+        core.Reconcile(world, counter, 1000);
+        CHECK(core.mode == Mode::Hold && core.reason == "leader_taken_over");
+        core.Reconcile(world, counter, 1000 + runrules::REJOIN_SECONDS + 60);
+        CHECK(core.mode == Mode::Hold && !core.failed);
+    }
+
     void PullPermitLost()
     {
         // A pull fired while the party was together, run after a member died: the permit is gone, whatever the stamp.
@@ -1717,6 +1810,8 @@ int main()
     NoAnchor();
     FailureOutlivesTheRun();
     PullPermitLost();
+    HumanMember();
+    HumanInHold();
     FailedPartyKeepsGroup();
     SummonInTheWay();
     printf("%d checks, %d failed\n", checks, failures);
