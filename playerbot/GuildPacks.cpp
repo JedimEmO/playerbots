@@ -1579,6 +1579,19 @@ int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, const G3D::Vector3
         if ((route.points[i] - at).length() <= runrules::WAY_NEAR)
             near.push_back(i);
     }
+    // A party set down fresh has no progress. Where the way passes it twice, as the Deadmines' passes the upper mine,
+    // it takes the earlier pass: the stops between are dead if the party really came that far, and are passed over then.
+    // Within that pass, the point nearest the party.
+    if (progress < 0.0f && !near.empty())
+    {
+        size_t end = 1;
+        while (end < near.size() && near[end] == near[end - 1] + 1)
+            ++end;
+        nearest = near[0];
+        for (size_t j = 1; j < end; ++j)
+            if ((route.points[near[j]] - at).squaredLength() < (route.points[nearest] - at).squaredLength())
+                nearest = near[j];
+    }
     const size_t place = runrules::PlaceAlong(near, nearest, progress >= 0.0f, progress >= 0.0f ? size_t(progress / ROUTE_STEP) : 0);
     const float along = float(place) * ROUTE_STEP;
     // The living stop whose pull spot is at or ahead of that place, nearest along the way, judged by the spot's place,
