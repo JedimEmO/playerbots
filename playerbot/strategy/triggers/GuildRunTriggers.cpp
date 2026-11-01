@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "GuildRunTriggers.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildMoveGuard.h"
 #include "playerbot/GuildRunState.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "Groups/Group.h"
@@ -10,8 +11,9 @@ using namespace ai;
 
 namespace
 {
-    // How near a bot counts as at its place.
-    constexpr float RUN_AT_SPOT = 3.0f;
+    // How near a bot counts as at its place: the leader gathers this near its spot, and pulls from twice as near, as
+    // readiness asks of it (runrules::LeaderNear).
+    constexpr float RUN_AT_SPOT = runrules::AT_SPOT;
     // How far behind its leader a member may fall on the way before it follows.
     constexpr float RUN_FOLLOW = 8.0f;
     // How long after the party goes on to a stop it waits for the last fight's loot before it walks.
@@ -60,6 +62,14 @@ namespace
             return false;
         AiObjectContext* context = ai->GetAiObjectContext();
         return bot->GetLootGuid() || AI_VALUE(bool, "has available loot");
+    }
+
+    // Whether the movement guard refused this bot's run move lately, by a creature that moves, under this very plan and
+    // stop: it stands, rather than ask again at once, and tries again once the refusal lapses or the plan changes.
+    bool Holding(Player* bot, const GuildRunView& view)
+    {
+        return runguard::Holding(sGuildMoveGuard.RefusalOf(bot->GetGUIDLow()),
+            runguard::PlanKey(view.stamp.generation, view.stamp.plan), view.index, int64_t(time(nullptr)));
     }
 
     // The run strategy the bot has, or empty.
@@ -141,7 +151,10 @@ bool RunApproachTrigger::IsActive()
     // unless it has waited as long as it may.
     if (view.pull == GuildRunPull::Approach && !view.waited && GuildRunStates::Reached(bot->GetMap(), bot, view.stop))
         return false;
-    return DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) > RUN_AT_SPOT;
+    if (DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) <= RUN_AT_SPOT)
+        return false;
+    // Refused lately by a creature that moves: it stands until the refusal lapses.
+    return !Holding(bot, view);
 }
 
 bool RunGatherTrigger::IsActive()
@@ -178,26 +191,35 @@ bool RunKeepersTrigger::IsActive()
     if (!Leads(view) || view.index >= view.stops || !InWorld(bot) || view.pull == GuildRunPull::Blocked
         || view.budget.stop != view.index || view.budget.generation != view.stamp.generation || !view.budget.since)
         return false;
-    return GuildRunStates::KeepersText(GuildRunStates::Readiness(bot, view)) != view.keepers;
+    // Also a guarded member whose stop's clock is not yet keyed to this stop and generation, though the keepers read the same.
+    const std::vector<runrules::Kept> kept = GuildRunStates::Readiness(bot, view);
+    return runplayer::KeepersDue(GuildRunStates::KeepersText(kept), view.keepers, kept, view.guardedClock, view.index,
+        view.stamp.generation);
 }
 
 bool RunBlockTrigger::IsActive()
 {
     GuildRunView view = AI_VALUE(GuildRunView, "run state");
     // Watched in and out of a fight, apart from the pull's own checks, which return early for a fight or a member away.
-    if (!Leads(view) || view.index >= view.stops || !InWorld(bot) || view.pull == GuildRunPull::Blocked
-        || view.pull == GuildRunPull::Pull || view.budget.stop != view.index || view.budget.generation != view.stamp.generation)
-        return false;
     // The budget out, or a member out of what waiting cannot mend, that one only with the leader gathered at its spot;
-    // never with nobody keeping the pull back.
-    const bool gathered = view.pull == GuildRunPull::Gather
-        && DistanceTo(bot, GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot)) <= RUN_AT_SPOT * 2;
-    // Only the bots' reasons may block, and the budget is frozen while a person alone keeps the pull back.
-    const std::vector<runrules::Kept> kept = GuildRunStates::Readiness(bot, view);
-    if (runplayer::WaitOf(kept) == runplayer::Wait::Person)
+    // never with nobody keeping the pull back. Only the bots' reasons may block, and the budget is frozen while only a
+    // person, or only guarded members while their allowance lasts, keep the pull back (GuildRunStates::BlockNow).
+    if (!Leads(view) || !InWorld(bot))
         return false;
-    const int64_t now = int64_t(time(nullptr));
-    return runrules::BlockDue(runplayer::Frozen(view.budget, view.personWaitSince, now), now, runplayer::BotReasons(kept), gathered);
+    std::vector<runrules::Kept> bots;
+    return GuildRunStates::BlockNow(bot, view, bots);
+}
+
+bool RunRefusedTrigger::IsActive()
+{
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    if (!Leads(view) || view.index >= view.stops || view.pull != GuildRunPull::Approach || !InWorld(bot))
+        return false;
+    // A budget of this stop and generation runs already: a later refusal changes nothing.
+    if (view.budget.stop == view.index && view.budget.generation == view.stamp.generation && view.budget.since)
+        return false;
+    return runguard::Fresh(sGuildMoveGuard.RefusalOf(bot->GetGUIDLow()), view.stamp.generation, view.index,
+        int64_t(time(nullptr)));
 }
 
 bool RunPullFailedTrigger::IsActive()
@@ -240,7 +262,10 @@ bool RunStandTrigger::IsActive()
         return false;
     if (LootFirst(ai, bot, view))
         return false;
-    return DistanceTo(bot, spot) > (view.pull == GuildRunPull::Approach ? RUN_FOLLOW : RUN_AT_SPOT);
+    if (DistanceTo(bot, spot) <= (view.pull == GuildRunPull::Approach ? RUN_FOLLOW : RUN_AT_SPOT))
+        return false;
+    // Refused lately by a creature that moves: it stands until the refusal lapses, and readiness says guarded meanwhile.
+    return !Holding(bot, view);
 }
 
 bool RunLeashTrigger::IsActive()

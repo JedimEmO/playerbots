@@ -4,6 +4,7 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildPacks.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildMoveGuard.h"
 #include "playerbot/strategy/values/LastMovementValue.h"
 #include "Entities/Creature.h"
 #include "Groups/Group.h"
@@ -609,6 +610,11 @@ std::shared_ptr<GuildRunStates::State> GuildRunStates::FindLeader(uint32 leaderG
 
 void GuildRunStates::Reset(State& state, size_t index)
 {
+    // A new stop, or a new generation through Choose: the keepers said are forgotten, and a person's or guarded wait under
+    // way ends, so the first keepers' write after it runs and keys the guarded clock to this stop and generation.
+    if (!state.keepers.empty())
+        SayKeepers(state, "");
+    runplayer::ForgetKeepers(state.keepers, state.budget, state.personWaitSince, state.guardedClock, int64_t(time(nullptr)));
     state.index = std::min(index, state.route.size());
     state.pull = GuildRunPull::Approach;
     state.pulled.Clear();
@@ -630,10 +636,10 @@ size_t GuildRunStates::FirstLiving(const GuildPacks::Route* packs, Map* map, siz
 
 size_t GuildRunStates::NextStop(const GuildPacks::Route* packs, const std::vector<GuildRunStop>& route, Map* map, size_t index)
 {
-    size_t next = FirstLiving(packs, map, index);
-    while (next < route.size() && !route[next].planned)
-        next = FirstLiving(packs, map, next + 1);
-    return next;
+    if (!packs || !map)
+        return FirstLiving(packs, map, index);
+    return runrules::NextLiving(index, std::min(route.size(), packs->stops.size()),
+        [&](size_t k) { return route[k].planned && GuildPacks::StopAlive(*packs, map, k); });
 }
 
 GuildRunControl GuildRunStates::Prepare(Player* leader, const std::string& dungeon, uint32 order,
@@ -991,19 +997,37 @@ std::vector<runrules::Kept> GuildRunStates::Readiness(Player* bot, const GuildRu
     Map* map = bot->GetMap();
     Player* leader = map->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, view.leader));
     // Where the party gathers: the stop's fight spot in lead, else around the leader, as the job gathers it.
-    ai::WorldPosition spot;
-    if (view.mode == GuildRunMode::Lead && view.index < view.stops)
+    const bool atStop = view.mode == GuildRunMode::Lead && view.index < view.stops;
+    ai::WorldPosition spot, leaderAt;
+    if (leader && leader->IsInWorld() && !leader->IsBeingTeleported())
+        leaderAt = ai::WorldPosition(leader);
+    if (atStop)
         spot = FightSpot(view.stop, view.pull, view.ownSpot);
     else if (leader && leader->IsInWorld())
         spot = ai::WorldPosition(leader);
+    // On the way to a stop the members follow the leader (PlaceOf), so they are measured from it, and the leader alone from
+    // its spot: a leader the guard keeps on its way is the one kept, guarded and then far, not the members by it.
+    const bool approaching = atStop && view.pull == GuildRunPull::Approach;
+    // At a stop in lead: the leader must be at its own place, to gather and then to pull (runrules::LeaderNear), and a
+    // member the movement guard keeps from its place by a creature that moves is guarded, while the stop's allowance lasts.
+    const int64_t now = int64_t(time(nullptr));
+    const bool allowance = atStop && runplayer::GuardedLeft(view.guardedClock, view.index, view.stamp.generation, now);
     std::vector<runrules::Ready> members;
     for (uint32 guid : view.expected)
     {
         runrules::Ready ready;
         // Through the bot's own map only, which its thread may read: one elsewhere is not there.
         Player* member = map->GetPlayer(ObjectGuid(HIGHGUID_PLAYER, guid));
+        const ai::WorldPosition& from = runrules::MeasuredFromLeader(approaching, guid == view.leader) && leaderAt ? leaderAt
+            : spot;
         if (member && member->IsInWorld() && !member->IsBeingTeleported())
-            ready = ReadyFacts(member, spot ? member->GetDistance(spot.getX(), spot.getY(), spot.getZ()) : 0.0f);
+            ready = ReadyFacts(member, from ? member->GetDistance(from.getX(), from.getY(), from.getZ()) : 0.0f);
+        if (atStop && guid == view.leader && (view.pull == GuildRunPull::Approach || view.pull == GuildRunPull::Wait
+            || view.pull == GuildRunPull::Gather))
+            ready.near = runrules::LeaderNear(view.pull == GuildRunPull::Gather);
+        // A copy of its refusal record, under the guard's lock alone: no run state's lock is held here.
+        if (allowance && member && sGuildBotMgr.GetPlayerBot(guid) == member)
+            ready.guarded = runguard::GuardedNow(sGuildMoveGuard.RefusalOf(guid), view.stamp.generation, view.index, now);
         ready.guid = guid;
         ready.facts.online = member != nullptr;
         ready.facts.engine = member && sGuildBotMgr.GetPlayerBot(guid) == member;
@@ -1028,6 +1052,21 @@ std::vector<runrules::Kept> GuildRunStates::Readiness(Player* bot, const GuildRu
         members.push_back(ready);
     }
     return runrules::Readiness(members);
+}
+
+bool GuildRunStates::BlockNow(Player* leader, const GuildRunView& view, std::vector<runrules::Kept>& bots)
+{
+    bots.clear();
+    if (!leader || !leader->IsInWorld() || leader->IsBeingTeleported() || !view.valid || view.mode != GuildRunMode::Lead
+        || view.index >= view.stops || view.pull == GuildRunPull::Blocked || view.pull == GuildRunPull::Pull
+        || view.budget.stop != view.index || view.budget.generation != view.stamp.generation)
+        return false;
+    // The block at once waits for the leader gathered at its spot, near enough to pull.
+    const ai::WorldPosition& spot = FightSpot(view.stop, view.pull, view.ownSpot);
+    const bool gathered = view.pull == GuildRunPull::Gather
+        && leader->GetDistance(spot.getX(), spot.getY(), spot.getZ()) <= runrules::LeaderNear(true);
+    return runplayer::BlockDueNow(view.budget, view.personWaitSince, view.guardedClock, Readiness(leader, view), gathered,
+        int64_t(time(nullptr)), bots);
 }
 
 std::string GuildRunStates::KeepersText(const std::vector<runrules::Kept>& kept)
@@ -1357,6 +1396,7 @@ GuildRunView GuildRunStates::View(Player* bot) const
         if (controller == runplayer::Controller::Person)
             view.persons.push_back(guid);
     view.personWaitSince = state->personWaitSince;
+    view.guardedClock = state->guardedClock;
     view.unplannedFight = state->unplannedFight;
     view.budget = state->budget;
     view.keepers = state->keepers;
@@ -1625,16 +1665,23 @@ void GuildRunStates::Keepers(Player* leader, const GuildRunStamp& stamp, const s
     {
         std::lock_guard<std::mutex> guard(state->lock);
         // Telemetry: no plan revision, so that the members' gathering moves go on.
-        if (!runrules::Accepts(state->core.mode, state->core.Stamp(), stamp, true) || state->keepers == text)
+        // Only when what it says changes, or a guarded member waits on a clock not yet keyed to this stop and generation.
+        if (!runrules::Accepts(state->core.mode, state->core.Stamp(), stamp, true)
+            || !runplayer::KeepersDue(text, state->keepers, kept, state->guardedClock, state->index, state->core.generation))
             return;
-        // Only a person keeping the pull back: the budget is frozen for as long, and no block comes of it.
+        // Only a person keeping the pull back: the budget is frozen for as long, and no block comes of it. Only guarded
+        // members besides: frozen on the guarded clock, for its allowance at most.
         const time_t now = time(nullptr);
-        runplayer::FreezeBudget(state->budget, state->personWaitSince,
-            runplayer::WaitOf(kept) == runplayer::Wait::Person, int64_t(now));
+        const runplayer::Wait wait = runplayer::WaitOf(kept);
+        runplayer::FreezeBudget(state->budget, state->personWaitSince, wait == runplayer::Wait::Person, int64_t(now));
+        runplayer::GuardedFreeze(state->guardedClock, state->budget, wait == runplayer::Wait::Guarded, state->index,
+            state->core.generation, int64_t(now));
+        const int64_t guardedWait = runplayer::GuardedUsed(state->guardedClock, state->index, state->core.generation, int64_t(now));
         state->keepers = text;
         state->core.Note("run_keep", "stop=" + std::to_string(state->index + 1) + " keepers=" + (text.empty() ? "none" : text)
             + " budget=" + std::to_string(state->budget.since ? now - state->budget.since : 0)
-            + (state->personWaitSince ? " person_wait=" + std::to_string(now - state->personWaitSince) : std::string()));
+            + (state->personWaitSince ? " person_wait=" + std::to_string(now - state->personWaitSince) : std::string())
+            + (guardedWait ? " guarded_wait=" + std::to_string(guardedWait) : std::string()));
         // What it waits for a person for, in party chat: when it changes, and at most once a minute.
         say = runplayer::WaitLine(kept, [](uint32_t guid)
         {
@@ -1653,6 +1700,25 @@ void GuildRunStates::Keepers(Player* leader, const GuildRunStamp& stamp, const s
     }
     if (!say.empty() && sGuildBotMgr.GetPlayerBot(leader->GetGUIDLow()) == leader && leader->GetPlayerbotAI())
         leader->GetPlayerbotAI()->SayToParty(say);
+}
+
+void GuildRunStates::LeaderRefused(Player* leader, const GuildRunStamp& stamp)
+{
+    if (!leader || !leader->IsInWorld() || leader->IsBeingTeleported())
+        return;
+    std::shared_ptr<State> state = Find(leader->GetInstanceId());
+    if (!state || state->leader != leader->GetGUIDLow())
+        return;
+    std::lock_guard<std::mutex> guard(state->lock);
+    // Telemetry, as the keepers are: no plan revision, so the party's moves go on.
+    if (!runrules::Accepts(state->core.mode, state->core.Stamp(), stamp, true) || state->pull != GuildRunPull::Approach
+        || state->index >= state->route.size())
+        return;
+    if (state->budget.stop == state->index && state->budget.generation == state->core.generation && state->budget.since)
+        return;
+    const time_t now = time(nullptr);
+    runrules::TrackBudget(state->budget, state->index, state->core.generation, true, int64_t(now));
+    state->core.Note("run_budget", "stop=" + std::to_string(state->index + 1) + " from=refused");
 }
 
 void GuildRunStates::SayKeepers(State& state, const std::string& text)
@@ -1777,24 +1843,37 @@ void GuildRunStates::Advance(Player* leader, const GuildRunStamp& stamp, bool sk
 
 void GuildRunStates::Choose(Player* leader, const GuildRunStamp& stamp)
 {
-    Write(leader, stamp, "chosen", [leader](State& state, Map* map, std::string&)
+    Write(leader, stamp, "chosen", [](State& state, Map* map, std::string& fields)
     {
         if (!state.core.choose)
             return false;
-        size_t start = state.route.size();
-        if (state.packs)
+        // By the run's order from the stop it is at, never by where the leader stands: in the shipped build a leader at stop
+        // 75 chose stop 132 by its place, passing living packs. Only Prepare places a party by where it stands.
+        const size_t from = state.index;
+        const size_t start = NextStop(state.packs.get(), state.route, map, from);
+        // Each stop passed, as the instance shows it now: its pack dead, or passed over by the controller, with why.
+        std::string passed;
+        for (size_t k = from; k < start && k < state.route.size(); ++k)
         {
-            // The run's progress, the stop it was at, reads the leader's place where the way passes it twice: in the
-            // Deadmines the upper mine, early and again after the ship.
-            float progress = -1.0f;
-            if (state.index < state.packs->stops.size())
-                progress = state.packs->stops[state.index].pullAlong;
-            else if (state.lastCleared >= 0 && size_t(state.lastCleared) < state.packs->stops.size())
-                progress = state.packs->stops[state.lastCleared].pullAlong;
-            const int32 first = GuildPacks::FirstLiveStop(*state.packs, map,
-                G3D::Vector3(leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ()), progress);
-            start = NextStop(state.packs.get(), state.route, map, first < 0 ? state.route.size() : size_t(first));
+            std::string why;
+            if (!state.route[k].planned)
+            {
+                why = "skipped(" + state.route[k].skipped + ")";
+                std::replace(why.begin(), why.end(), ' ', '_');
+            }
+            else
+                why = state.packs && GuildPacks::StopAlive(*state.packs, map, k) ? "alive" : "dead";
+            passed += (passed.empty() ? "" : ",") + std::to_string(k + 1) + ":" + why;
+            // A stop passed as dead names its pack's spawns, so an export can check each against the instance's creatures.
+            if (why == "dead" && state.packs && k < state.packs->stops.size())
+            {
+                std::string spawns;
+                for (uint32 spawn : state.packs->stops[k].spawns)
+                    spawns += (spawns.empty() ? "" : ",") + std::to_string(spawn);
+                state.core.Note("run_passed", "stop=" + std::to_string(k + 1) + " spawns=" + (spawns.empty() ? "none" : spawns));
+            }
         }
+        fields = "from=" + std::to_string(from + 1) + " passed=" + (passed.empty() ? "none" : passed);
         Reset(state, start);
         state.core.choose = false;
         return true;
@@ -1873,9 +1952,12 @@ bool GuildRunStates::Reached(Map* map, Unit* bot, const GuildRunStop& stop)
         // Dead, or not loaded, which a creature near the party is: gone.
         if (!creature || !creature->IsInWorld() || !creature->IsAlive())
             continue;
-        const float reach = creature->GetAttackDistance(bot) + creature->GetObjectBoundingRadius() + bot->GetObjectBoundingRadius()
-            + REACH_MARGIN;
-        if (creature->GetDistance(stop.pull.getX(), stop.pull.getY(), stop.pull.getZ(), DIST_CALC_NONE) <= reach)
+        // By the one rule: the 3D distance between centres within its aggro radius toward the bot and ReachPad.
+        const float reach = creature->GetAttackDistance(bot)
+            + runguard::ReachPad(creature->GetObjectBoundingRadius(), bot->GetObjectBoundingRadius());
+        const runrules::Vec pull = { stop.pull.getX(), stop.pull.getY(), stop.pull.getZ() };
+        const runrules::Vec at = { creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ() };
+        if (runrules::Distance(pull, at) <= reach)
             return true;
     }
     return false;

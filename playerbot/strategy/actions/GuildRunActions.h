@@ -61,7 +61,8 @@ namespace ai
         bool Execute(Event& event) override;
     };
 
-    // The leader blocks the pull with its reasons, rechecked now, and lets go of any pull it had asked for.
+    // The leader blocks the pull with its reasons, the whole block predicate judged again now on a fresh view, and lets go of
+    // any pull it had asked for.
     class RunBlockAction : public Action
     {
     public:
@@ -69,10 +70,19 @@ namespace ai
         bool Execute(Event& event) override;
     };
 
+    // The leader's waiting budget starts at the movement guard's refusal of its way to the spot (GuildRunStates::LeaderRefused).
+    class RunRefusedAction : public Action
+    {
+    public:
+        RunRefusedAction(PlayerbotAI* ai) : Action(ai, "run refused") {}
+        bool Execute(Event& event) override;
+    };
+
     // The leader pulls the stop's pack: its creature nearest the pull spot, from range by the pull strategy, which brings
     // the pull back to the spot. A tank that cannot pull from range attacks it. A pack whose own creatures reach its pull
     // spot is pulled from the stop before's, from range and in sight only, else from its own spot. A pack out of range
-    // and out of sight from its own spot as well is passed over.
+    // and out of sight from its own spot as well is passed over. The pull phase is written before anything moves, so the
+    // movement guard lets the pull's own move close on the pack, and goes back when nothing started.
     class RunPullAction : public AttackAction
     {
     public:

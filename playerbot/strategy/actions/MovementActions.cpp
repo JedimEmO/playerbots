@@ -6,6 +6,9 @@
 #include "playerbot/FleeManager.h"
 #include "playerbot/LootObjectStack.h"
 #include "playerbot/GuildBotMgr.h"
+#include "playerbot/GuildMoveGuard.h"
+#include "playerbot/GuildRunState.h"
+#include "playerbot/strategy/actions/ReachTargetActions.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/values/PositionValue.h"
@@ -19,6 +22,44 @@
 #include "playerbot/strategy/generic/CombatStrategy.h"
 
 using namespace ai;
+
+namespace
+{
+    // Where a chase or a follow of a target at `distance` ends: on the 3D segment from the target to the bot
+    // (runguard::ChaseEnd). False when the bot is that near already, and nothing moves.
+    bool ChaseEnd(Player* bot, WorldObject* target, float distance, runrules::Vec& end)
+    {
+        const runrules::Vec from = { bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ() };
+        const runrules::Vec to = { target->GetPositionX(), target->GetPositionY(), target->GetPositionZ() };
+        return runguard::ChaseEnd(from, to, distance, end);
+    }
+
+    // The run's movement guard on a chase or a follow, before the core's generator paths on its own: a target refused in
+    // the last few seconds, or whose end is in a creature's reach, is not chased. A chase that moves nothing is never
+    // refused. The core checks every launch again, on its real spline.
+    bool GuardRefusesChase(Player* bot, WorldObject* target, float distance, const char* kind)
+    {
+        if (!sGuildBotMgr.IsGuildBot(bot))
+            return false;
+        GuildRunView view;
+        if (!sGuildMoveGuard.Guarded(bot, view))
+            return false;
+        runrules::Vec end;
+        if (!ChaseEnd(bot, target, distance, end))
+            return false;
+        // A permit, as a healer's, lets the reach through, the refusals before it included.
+        if (sGuildMoveGuard.Permitted(bot, end))
+            return false;
+        if (sGuildMoveGuard.Refuses(bot, target->GetObjectGuid(), &end))
+            return true;
+        std::string by;
+        runguard::GuardThreat blocker;
+        if (sGuildMoveGuard.PointClear(bot, view, end, &by, &blocker))
+            return false;
+        sGuildMoveGuard.NoteRefusal(bot, target->GetObjectGuid(), &end, std::string(kind) + " by=" + by, &blocker);
+        return true;
+    }
+}
 
 void MovementAction::CreateWp(Player* wpOwner, float x, float y, float z, float o, uint32 entry, bool important)
 {
@@ -1258,6 +1299,37 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
 
     movePath.ClipPath(ai, mover, ignoreEnemyTargets);
 
+    // The run's movement guard (GuildMoveGuard), early and cheap, on the path this move resolved: clipped short of a
+    // creature's reach, or refused, so the action fails and the engine takes its next one. The core checks the final path
+    // again as its spline launches, since MovePoint paths once more.
+    if (!movePath.empty() && mover == bot && sGuildBotMgr.IsGuildBot(bot))
+    {
+        GuildRunView guardView;
+        if (sGuildMoveGuard.Guarded(bot, guardView))
+        {
+            std::vector<runrules::Vec> line = { { startPos.getX(), startPos.getY(), startPos.getZ() } };
+            for (const WorldPosition& point : movePath.getPointPath())
+                line.push_back({ point.getX(), point.getY(), point.getZ() });
+            std::string by;
+            runguard::GuardThreat blocker;
+            const runguard::GuardResult verdict = sGuildMoveGuard.Check(bot, guardView, line, true, &by, &blocker);
+            if (verdict.verdict == runguard::Verdict::Refuse)
+            {
+                sGuildMoveGuard.NoteRefusal(bot, ObjectGuid(), &line.back(), "move by=" + by, &blocker);
+                return false;
+            }
+            if (verdict.verdict == runguard::Verdict::Clip)
+            {
+                const std::vector<runrules::Vec> clipped = runguard::Clip(line, verdict.clipAlong);
+                std::vector<WorldPosition> points;
+                for (size_t i = 1; i < clipped.size(); ++i)
+                    points.push_back(WorldPosition(bot->GetMapId(), clipped[i].x, clipped[i].y, clipped[i].z));
+                movePath.clear();
+                movePath.addPath(points);
+            }
+        }
+    }
+
     if(ai->HasStrategy("debug move", BotState::BOT_STATE_NON_COMBAT))
     {
         for (auto& p : movePath.getPath())
@@ -2447,6 +2519,10 @@ bool MovementAction::Follow(Unit* target, float distance, float angle)
     if (FollowOnTransport(target))
         return true;
 
+    // Not into a creature's reach in a run, nor after a target just refused.
+    if (GuardRefusesChase(bot, target, distance, "follow"))
+        return false;
+
     WorldPosition botPos(bot);
     WorldPosition tarPos(target);
 
@@ -2653,8 +2729,8 @@ bool MovementAction::Follow(Unit* target, float distance, float angle)
     }
 #endif
 
-    // Find jump shortcut
-    if (ai->HasStrategy("follow jump", BotState::BOT_STATE_NON_COMBAT) && ai->AllowActivity())
+    // Find jump shortcut; never in a run, whose guard sees splines and not the knock-back packets a jump is made of.
+    if (ai->HasStrategy("follow jump", BotState::BOT_STATE_NON_COMBAT) && ai->AllowActivity() && !sGuildMoveGuard.Guarded(bot))
     {
         WorldPosition botPos(bot);
         if (!botPos.isInWater())
@@ -2699,6 +2775,10 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
     {
         return false;
     }
+
+    // Not into a creature's reach in a run, nor after a target just refused.
+    if (obj && GuardRefusesChase(bot, obj, distance, "chase"))
+        return false;
 
     if (!ai->IsSafe(obj))
         return false;
@@ -2854,8 +2934,8 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance, float angle)
 
     if (!ai->IsSafe(obj)) return false;
 
-    // Find jump shortcut
-    if (ai->HasStrategy("follow chase", BotState::BOT_STATE_NON_COMBAT) && ai->AllowActivity())
+    // Find jump shortcut; never in a run, whose guard sees splines and not the knock-back packets a jump is made of.
+    if (ai->HasStrategy("follow chase", BotState::BOT_STATE_NON_COMBAT) && ai->AllowActivity() && !sGuildMoveGuard.Guarded(bot))
     {
         bool tryJump = ai->DoSpecificAction("jump::chase", Event(), true);
         if (tryJump)
@@ -3769,7 +3849,8 @@ bool MoveToAction::Execute(Event& event)
 
 bool JumpAction::isUseful()
 {
-    return bot->IsInWorld() && ai->HasPlayerNearby() && !ai->IsJumping();
+    // No jumps in a run: the movement guard sees splines, and a jump is sent as knock-back packets.
+    return bot->IsInWorld() && ai->HasPlayerNearby() && !ai->IsJumping() && !sGuildMoveGuard.Guarded(bot);
 }
 
 bool JumpAction::Execute(ai::Event &event)
@@ -4804,3 +4885,32 @@ WorldPosition JumpAction::GetPossibleJumpStartForInRange(const WorldPosition& sr
     return WorldPosition();
 }
 
+bool ReachPartyMemberToHealAction::Execute(Event& event)
+{
+    Unit* patient = GetTarget();
+    GuildRunView view;
+    if (!patient || !sGuildBotMgr.IsGuildBot(bot) || !sGuildMoveGuard.Guarded(bot, view)
+        || sGuildMoveGuard.HasPermit(bot->GetGUIDLow(), runguard::PermitKind::Heal, patient->GetGUIDLow()))
+        return ReachTargetAction::Execute(event);
+
+    // A spot in range and in sight of the patient, nearest the healer first, that the guard passes; its path is checked
+    // again by MoveTo and as it launches.
+    const runrules::Vec at = { patient->GetPositionX(), patient->GetPositionY(), patient->GetPositionZ() };
+    const runrules::Vec here = { bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ() };
+    for (const runrules::Vec& spot : runguard::HealSpots(at, range, here))
+    {
+        if (!patient->IsWithinLOS(spot.x, spot.y, spot.z + bot->GetCollisionHeight()))
+            continue;
+        if (!sGuildMoveGuard.PointClear(bot, view, spot))
+            continue;
+        if (MoveTo(bot->GetMapId(), spot.x, spot.y, spot.z))
+            return true;
+    }
+
+    // None: the reach anyway, under a permit for this healer, patient, fight and plan.
+    const uint64 fight = bot->IsInCombat() ? uint64(ai->GetCombatStartTime()) : 0;
+    sGuildMoveGuard.Grant(runguard::HealPermit(bot->GetGUIDLow(), patient->GetGUIDLow(), fight, view.stamp.generation,
+        view.stamp.plan, at, range + runguard::PERMIT_NEAR, time(nullptr)),
+        "healer=" + std::string(bot->GetName()) + " patient=" + std::string(patient->GetName()));
+    return ReachTargetAction::Execute(event);
+}

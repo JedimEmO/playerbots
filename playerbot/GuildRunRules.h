@@ -483,18 +483,117 @@ namespace runrules
         return least;
     }
 
-    // A creature that may stand in a walk's way: where it may be (one point, or a patrol's path, closed when it loops)
-    // and how far it reaches from there.
+    // From a point to a place a creature can be, when it can move `spread` yards across from there: its movement counts
+    // horizontally only, sqrt(max(0, horizontal - spread)^2 + dz^2). Never up or down: a creature on a floor 23 yards
+    // under a walkway does not come nearer the walkway by walking under it.
+    inline float SpreadDistance(const Vec& point, const Vec& place, float spread)
+    {
+        const float dx = point.x - place.x, dy = point.y - place.y, dz = point.z - place.z;
+        const float across = std::max(0.0f, std::sqrt(dx * dx + dy * dy) - std::max(0.0f, spread));
+        return std::sqrt(across * across + dz * dz);
+    }
+
+    inline Vec Lerp(const Vec& a, const Vec& b, float t)
+    {
+        return { a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t };
+    }
+
+    // The least of a function convex on [0, 1], by golden section.
+    template<class F>
+    float LeastConvex(F f)
+    {
+        const float g = 0.6180340f;
+        float a = 0.0f, b = 1.0f;
+        float c = b - g * (b - a), d = a + g * (b - a);
+        float fc = f(c), fd = f(d);
+        for (int i = 0; i < 40; ++i)
+        {
+            if (fc <= fd)
+            {
+                b = d;
+                d = c;
+                fd = fc;
+                c = b - g * (b - a);
+                fc = f(c);
+            }
+            else
+            {
+                a = c;
+                c = d;
+                fc = fd;
+                d = a + g * (b - a);
+                fd = f(d);
+            }
+        }
+        return std::min({ f(0.0f), f(1.0f), fc, fd });
+    }
+
+    // The least SpreadDistance between two segments, ab of a bot's path and cd of a creature's places, either of which may be
+    // a point. With no spread it is the 3D segment distance; with one, the distance is convex along both segments (the
+    // horizontal part less the spread, floored at 0, and the height, each convex, under a norm), so golden sections find it.
+    inline float SegmentSpreadDistance(const Vec& a, const Vec& b, const Vec& c, const Vec& d, float spread)
+    {
+        if (spread <= 0.0f)
+            return SegmentDistance(a, b, c, d);
+        const bool abPoint = Distance(a, b) <= 1e-4f, cdPoint = Distance(c, d) <= 1e-4f;
+        if (abPoint && cdPoint)
+            return SpreadDistance(a, c, spread);
+        if (cdPoint)
+            return LeastConvex([&](float t) { return SpreadDistance(Lerp(a, b, t), c, spread); });
+        if (abPoint)
+            return LeastConvex([&](float u) { return SpreadDistance(a, Lerp(c, d, u), spread); });
+        return LeastConvex([&](float t)
+        {
+            const Vec p = Lerp(a, b, t);
+            return LeastConvex([&](float u) { return SpreadDistance(p, Lerp(c, d, u), spread); });
+        });
+    }
+
+    // The one rule's distance, from a path (one point or more, between its points too) to the places a creature can be:
+    // one point (a spawn, a live place) or a loop, each point at its own height, with `spread` yards across it may move
+    // from there (a wanderer's range, a live mover's travel). A creature reaches the path when this is within its reach
+    // (runguard::AggroRadius and runguard::ReachPad). -1 when either is empty.
+    inline float PlaceDistance(const std::vector<Vec>& path, const std::vector<Vec>& where, float spread)
+    {
+        if (path.empty() || where.empty())
+            return -1.0f;
+        float least = -1.0f;
+        for (size_t i = 0; i < std::max<size_t>(path.size() - 1, 1); ++i)
+            for (size_t j = 0; j < std::max<size_t>(where.size() - 1, 1); ++j)
+            {
+                const Vec& a = path[i];
+                const Vec& b = path.size() > 1 ? path[i + 1] : path[i];
+                const Vec& c = where[j];
+                const Vec& d = where.size() > 1 ? where[j + 1] : where[j];
+                // The spread takes at most `spread` off the 3D distance: a pair that far off cannot be the least.
+                if (least >= 0.0f && spread > 0.0f && SegmentDistance(a, b, c, d) - spread >= least)
+                    continue;
+                const float dist = SegmentSpreadDistance(a, b, c, d, spread);
+                if (least < 0.0f || dist < least)
+                    least = dist;
+            }
+        return least;
+    }
+
+    inline float PlaceDistance(const Vec& point, const std::vector<Vec>& where, float spread)
+    {
+        return PlaceDistance(std::vector<Vec>{ point }, where, spread);
+    }
+
+    // A creature that may stand in a walk's way: where it may be (one point, or a patrol's path, closed when it loops),
+    // how far it reaches from there, and how far across it may move from there (a wanderer's range, a mover's travel),
+    // which the one rule (PlaceDistance) takes across only, never up or down.
     struct Threat
     {
         uint32_t spawn = 0;            // 0 for a creature the route's model does not have, as a summon
         uint32_t entry = 0;            // set for a creature the model does not have, to name it
         std::vector<Vec> where;
         float reach = 0.0f;
+        float spread = 0.0f;
     };
 
-    // A living creature the route's model does not have, a summon or a script's spawn, reaches this far from where it
-    // stands: its aggro reach, the margin, and TRAVEL_MARGIN more when it moves.
+    // A living creature the route's model does not have, a summon or a script's spawn, reaches from where it stands by its
+    // aggro reach and the margin, and when it moves may be TRAVEL_MARGIN across from there.
     constexpr float TRAVEL_MARGIN = 10.0f;
 
     // A creature as a blocked walk names it: by its spawn and its stop (0 for none), or one the model does not have by its
@@ -507,12 +606,13 @@ namespace runrules
         return "spawn_" + std::to_string(threat.spawn) + "_stop_" + std::to_string(stop + 1);
     }
 
-    // The first creature whose reach comes to the line anywhere along it, between its points too, or -1.
+    // The first creature whose reach comes to the line anywhere along it, between its points too, or -1. By the one rule:
+    // its spread across only.
     inline int FirstThreat(const std::vector<Threat>& threats, const std::vector<Vec>& line)
     {
         for (size_t i = 0; i < threats.size(); ++i)
         {
-            const float d = LinesDistance(threats[i].where, line);
+            const float d = PlaceDistance(line, threats[i].where, threats[i].spread);
             if (d >= 0.0f && d <= threats[i].reach)
                 return int(i);
         }
@@ -679,7 +779,9 @@ namespace runrules
     // Readiness (docs/run-contract.md, "Readiness"): why an expected member, the leader among them, keeps the pull back.
     // Dead and away come from Present's facts and A2b's rejoining set; the rest from the member as the leader sees it.
     // A person's member also keeps it back while eating or drinking, and, as a healer, out of sight of the tank.
-    enum class Keep : uint8_t { Dead, Away, Fight, Far, Health, Mana, Supplies, Eating, Sight };
+    // Guarded is far, for a member the movement guard refused lately by a creature that moves (runguard::GuardedNow), for
+    // as long as its allowance lasts (runplayer::GuardedClock): waited for, never blocked on.
+    enum class Keep : uint8_t { Dead, Away, Fight, Far, Health, Mana, Supplies, Eating, Sight, Guarded };
 
     inline const char* KeepName(Keep keep)
     {
@@ -693,6 +795,7 @@ namespace runrules
             case Keep::Mana: return "mana";
             case Keep::Eating: return "eating";
             case Keep::Sight: return "sight";
+            case Keep::Guarded: return "guarded";
             default: return "supplies";
         }
     }
@@ -719,12 +822,33 @@ namespace runrules
         bool healer = false;
         bool seesTank = true;
         float tankDistance = 0.0f;
+        // How near the fight spot it must be (READY_NEAR, or for the leader its own place: LeaderNear), and whether the
+        // movement guard keeps it from getting there, which makes it guarded in place of far.
+        float near = 12.0f;        // READY_NEAR
+        bool guarded = false;
     };
 
     // The thresholds, which never change while a party waits.
     constexpr float READY_NEAR = 12.0f;
     constexpr uint32_t READY_HEALTH = 80;
     constexpr uint32_t READY_MANA = 60;
+    // How near its place a bot counts as at it: the leader gathers this near its spot, and pulls from twice as near.
+    constexpr float AT_SPOT = 3.0f;
+
+    // How near its fight spot the leader must be for the run to go on: to gather, while it walks there or waits at the stop
+    // before, and to pull once gathered. A leader the guard keeps short of it is guarded, then far, as any member.
+    inline float LeaderNear(bool gathered)
+    {
+        return gathered ? AT_SPOT * 2.0f : AT_SPOT;
+    }
+
+    // Where readiness measures a member from at a stop in lead: the leader from its fight spot, always; any other member
+    // from the leader while the party approaches, since it follows the leader there (GuildRunStates::PlaceOf), and from
+    // the spot once the party gathers. A leader the guard keeps on its way is then the one kept, not the members by it.
+    inline bool MeasuredFromLeader(bool approaching, bool isLeader)
+    {
+        return approaching && !isLeader;
+    }
 
     struct Kept
     {
@@ -751,8 +875,8 @@ namespace runrules
             }
             if (member.inFight)
                 kept.push_back({ member.guid, Keep::Fight, person });
-            if (member.distance > READY_NEAR)
-                kept.push_back({ member.guid, Keep::Far, person });
+            if (member.distance > member.near)
+                kept.push_back({ member.guid, member.guarded ? Keep::Guarded : Keep::Far, person });
             // A person is never out of supplies: waiting mends it, as the person eats, drinks or goes for more.
             const bool noFood = !person && member.health < READY_HEALTH && !member.hasFood;
             const bool noDrink = !person && member.usesMana && member.mana < READY_MANA && !member.hasDrink;
@@ -843,6 +967,9 @@ namespace runrules
         std::vector<Obligation> obligations;
         for (const Kept& k : block)
         {
+            // A guarded wait is never blocked on, so never owed.
+            if (k.why == Keep::Guarded)
+                continue;
             const int64_t seconds = k.why == Keep::Supplies ? RECOVERY_SUPPLY_SECONDS
                 : k.why == Keep::Dead || k.why == Keep::Away ? RECOVERY_DEAD_SECONDS : RECOVERY_SECONDS;
             obligations.push_back({ k.guid, k.why, now + seconds });
@@ -863,7 +990,7 @@ namespace runrules
         {
             case Keep::Dead: case Keep::Away: return true;
             case Keep::Fight: return !member.inFight;
-            case Keep::Far: return member.distance <= READY_NEAR;
+            case Keep::Far: case Keep::Guarded: return member.distance <= member.near;
             case Keep::Health: return member.health >= READY_HEALTH;
             case Keep::Mana: return !member.usesMana || member.mana >= READY_MANA;
             case Keep::Eating: return !member.eating;
@@ -966,6 +1093,17 @@ namespace runrules
         for (const Kept& k : kept)
             text += (text.empty() ? "" : ",") + nameOf(k.guid) + ":" + KeepName(k.why);
         return text;
+    }
+
+    // The first stop at or after `from`, of `count`, that `takes` accepts, or `count`: the run's next stop by its order,
+    // never by where the leader stands, so no living stop is passed (GuildRunStates::NextStop, Choose).
+    template<class Takes>
+    size_t NextLiving(size_t from, size_t count, Takes takes)
+    {
+        for (size_t k = from; k < count; ++k)
+            if (takes(k))
+                return k;
+        return count;
     }
 
     // Joins words with commas, for a key=value field.

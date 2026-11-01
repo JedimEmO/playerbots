@@ -3,6 +3,7 @@
 
 #include "GuildRunCore.h"
 #include "GuildRunPlayer.h"
+#include "GuildRunGuard.h"
 
 #include <algorithm>
 #include <cmath>
@@ -400,6 +401,32 @@ namespace
         CHECK(runrules::FirstThreat({ patrol }, line) == 0);
         patrol.where = { { 40, 30, 0 }, { 60, 60, 0 } };
         CHECK(runrules::FirstThreat({ patrol }, line) < 0);
+        // A wanderer's range spreads its places across only, by the one rule (runrules::PlaceDistance): a foundry
+        // wanderer 23 yards under a walkway, ranging 12, reach 21.9, never reaches the walkway above its range, which the
+        // old sphere of reach and range (33.9) took; on its own floor its range carries its reach 12 yards farther.
+        {
+            runrules::Threat wanderer;
+            wanderer.spawn = 3;
+            wanderer.where = { { 50, 0, 21 } };
+            wanderer.reach = 21.9f;
+            wanderer.spread = 12.0f;
+            const std::vector<Vec> walkway = { { 30, 10, 44 }, { 70, 10, 44 } };
+            CHECK(runrules::LinesDistance(wanderer.where, walkway) <= wanderer.reach + wanderer.spread);
+            CHECK(runrules::FirstThreat({ wanderer }, walkway) < 0);
+            CHECK(std::fabs(runrules::PlaceDistance(walkway, wanderer.where, 12.0f) - 23.0f) < 0.05f);
+            const std::vector<Vec> floor = { { 30, 30, 21 }, { 70, 30, 21 } };
+            CHECK(runrules::FirstThreat({ wanderer }, floor) == 0);
+            wanderer.spread = 0.0f;
+            CHECK(runrules::FirstThreat({ wanderer }, floor) < 0);
+            // A mover's travel the same: an unmodelled creature in a fight under the walkway, TRAVEL_MARGIN across.
+            runrules::Threat mover;
+            mover.entry = 4417;
+            mover.where = { { 50, 10, 21 } };
+            mover.reach = 21.5f;
+            mover.spread = runrules::TRAVEL_MARGIN;
+            CHECK(runrules::FirstThreat({ mover }, walkway) < 0);
+            CHECK(runrules::FirstThreat({ mover }, { { 30, 40, 21 }, { 70, 40, 21 } }) == 0);
+        }
         // A path kept near the way, and one that leaves it.
         CHECK(runrules::Along({ { 10, 1, 0 }, { 50, -1.5f, 0 } }, line, 2.0f));
         CHECK(!runrules::Along({ { 10, 1, 0 }, { 50, 3.0f, 0 } }, line, 2.0f));
@@ -2485,6 +2512,390 @@ namespace
         core.Reconcile(world, counter, 400);
         CHECK(core.mode == Mode::Lead && !core.recovering && HasEvent(core, "run_recovery", "result=done"));
     }
+    // Item 4a's fix: a member the movement guard keeps from its place by a creature that moves is guarded, not far.
+    void GuardedReadiness()
+    {
+        using runrules::Keep;
+        runrules::Ready refused = ReadyMember(3);
+        refused.distance = 20.0f;
+        refused.guarded = true;
+        std::vector<runrules::Kept> kept = runrules::Readiness({ ReadyMember(1), refused });
+        CHECK(kept.size() == 1 && kept[0].why == Keep::Guarded && std::string(runrules::KeepName(kept[0].why)) == "guarded");
+        // Guarded alone: waited for, the budget frozen, no block, ever, while the allowance lasts.
+        CHECK(runplayer::WaitOf(kept) == runplayer::Wait::Guarded);
+        CHECK(runplayer::BotReasons(kept).empty());
+        runrules::Budget budget;
+        runrules::TrackBudget(budget, 4, 9, true, 1000);
+        runplayer::GuardedClock clock;
+        runplayer::GuardedFreeze(clock, budget, true, 4, 9, 1000);
+        std::vector<runrules::Kept> bots;
+        CHECK(!runplayer::BlockDueNow(budget, 0, clock, kept, true, 1000 + 3 * runrules::READY_BUDGET, bots) && bots.empty());
+        // Guarded beside a far member: blocked on far only, and no obligation is guarded.
+        runrules::Ready far = ReadyMember(4);
+        far.distance = 30.0f;
+        kept = runrules::Readiness({ ReadyMember(1), refused, far });
+        CHECK(runplayer::WaitOf(kept) == runplayer::Wait::Bots);
+        runrules::Budget running;
+        runrules::TrackBudget(running, 4, 9, true, 1000);
+        CHECK(runplayer::BlockDueNow(running, 0, runplayer::GuardedClock(), kept, true, 1000 + runrules::READY_BUDGET, bots));
+        CHECK(bots.size() == 1 && bots[0].guid == 4 && bots[0].why == Keep::Far);
+        CHECK(runrules::Obligations(kept, 0).size() == 1 && runrules::Obligations(kept, 0)[0].why == Keep::Far);
+        // A person's wait beside a guarded member is the guarded one's, on its clock; a person alone has the person's.
+        runrules::Ready person = ReadyMember(5);
+        person.person = true;
+        person.health = 50;
+        CHECK(runplayer::WaitOf(runrules::Readiness({ refused, person })) == runplayer::Wait::Guarded);
+        CHECK(runplayer::WaitOf(runrules::Readiness({ person })) == runplayer::Wait::Person);
+        // Spent, the member is far again, an ordinary keeper beside the person's: mixed, and the budget runs.
+        refused.guarded = false;
+        CHECK(runplayer::WaitOf(runrules::Readiness({ refused, person })) == runplayer::Wait::Mixed);
+    }
+
+    // The guarded allowance: 120 seconds per stop and generation, over every stretch, and the budget frozen by as much.
+    void GuardedClockAccounting()
+    {
+        runrules::Budget budget;
+        runrules::TrackBudget(budget, 4, 9, true, 1000);
+        runplayer::GuardedClock clock;
+        CHECK(runplayer::GuardedLeft(clock, 4, 9, 1000));
+        // 50 seconds guarded, then 30 with no guarded member, then guarded again.
+        runplayer::GuardedFreeze(clock, budget, true, 4, 9, 1000);
+        CHECK(runplayer::GuardedUsed(clock, 4, 9, 1030) == 30);
+        // A block decision mid-stretch sees the budget frozen so far, with no keepers' write.
+        CHECK(runplayer::Frozen(budget, 0, clock, 1030).since == 1030);
+        runplayer::GuardedFreeze(clock, budget, false, 4, 9, 1050);
+        CHECK(clock.used == 50 && !clock.since && budget.since == 1050);
+        CHECK(runplayer::GuardedUsed(clock, 4, 9, 1080) == 50);
+        runplayer::GuardedFreeze(clock, budget, true, 4, 9, 1080);
+        // 70 more seconds are left: at 1150 the allowance is spent, whatever the keepers last said.
+        CHECK(runplayer::GuardedLeft(clock, 4, 9, 1149));
+        CHECK(!runplayer::GuardedLeft(clock, 4, 9, 1150));
+        // The freeze a block sees is capped by the allowance, though the stretch is not yet closed.
+        CHECK(runplayer::Frozen(budget, 0, clock, 1300).since == 1050 + 70);
+        runplayer::GuardedFreeze(clock, budget, false, 4, 9, 1300);
+        CHECK(clock.used == runplayer::GUARDED_WAIT_SECONDS && budget.since == 1120);
+        // Spent: a new guarded-only wait freezes nothing more.
+        runplayer::GuardedFreeze(clock, budget, true, 4, 9, 1310);
+        CHECK(!clock.since && runplayer::Frozen(budget, 0, clock, 1400).since == 1120);
+        // A new generation starts a new allowance, as does another stop.
+        CHECK(runplayer::GuardedLeft(clock, 4, 10, 1400) && runplayer::GuardedLeft(clock, 5, 9, 1400));
+        runrules::TrackBudget(budget, 4, 10, true, 1400);
+        runplayer::GuardedFreeze(clock, budget, true, 4, 10, 1400);
+        CHECK(clock.generation == 10 && clock.used == 0 && clock.since == 1400);
+        // A person's freeze is apart: it ends when the person is ready, and leaves the guarded clock alone.
+        int64_t personSince = 0;
+        runplayer::FreezeBudget(budget, personSince, true, 1400);
+        CHECK(personSince == 1400 && clock.used == 0);
+    }
+
+    // The leader must reach its own place: within 3 yards to gather, 6 to pull. Kept short of it by the guard, it is
+    // guarded and then far, so its refused budget always comes to a block (Codex r24, point 3).
+    void LeaderNear()
+    {
+        using runrules::Keep;
+        // Refused 5 yards from its spot on the way: kept, guarded while a creature that moves refuses it.
+        runrules::Ready leader = ReadyMember(1);
+        leader.distance = 5.0f;
+        leader.near = runrules::LeaderNear(false);
+        leader.guarded = true;
+        std::vector<runrules::Kept> kept = runrules::Readiness({ leader });
+        CHECK(kept.size() == 1 && kept[0].why == Keep::Guarded);
+        // Refused 8 yards off once gathered: kept, since it pulls from 6.
+        leader.distance = 8.0f;
+        leader.near = runrules::LeaderNear(true);
+        leader.guarded = false;
+        kept = runrules::Readiness({ leader });
+        CHECK(kept.size() == 1 && kept[0].why == Keep::Far);
+        // 5 yards off once gathered is near enough to pull.
+        leader.distance = 5.0f;
+        CHECK(runrules::Readiness({ leader }).empty());
+        // As any member, 8 yards was not far, and a refused leader's budget would have run out with nobody kept.
+        leader.distance = 8.0f;
+        leader.near = runrules::READY_NEAR;
+        CHECK(runrules::Readiness({ leader }).empty());
+        // Refused 5 yards off on the way by a creature standing still: the refusal starts the budget, a later gather keeps
+        // it, and it runs out into a block naming the leader far.
+        runrules::Budget budget;
+        runrules::TrackBudget(budget, 4, 9, true, 2000);
+        runrules::TrackBudget(budget, 4, 9, true, 2100);
+        CHECK(budget.since == 2000);
+        leader.distance = 5.0f;
+        leader.near = runrules::LeaderNear(false);
+        std::vector<runrules::Kept> bots;
+        CHECK(!runplayer::BlockDueNow(budget, 0, runplayer::GuardedClock(), runrules::Readiness({ leader }), false,
+            2000 + runrules::READY_BUDGET - 1, bots));
+        CHECK(runplayer::BlockDueNow(budget, 0, runplayer::GuardedClock(), runrules::Readiness({ leader }), false,
+            2000 + runrules::READY_BUDGET, bots));
+        CHECK(bots.size() == 1 && bots[0].guid == 1 && bots[0].why == Keep::Far);
+        // Its far obligation is met by its own place, as near as the obligation's member asks.
+        runrules::Obligation obligation{ 1, Keep::Far, 5000 };
+        leader.distance = 2.0f;
+        CHECK(runrules::Met(obligation, leader));
+        leader.distance = 4.0f;
+        CHECK(!runrules::Met(obligation, leader));
+    }
+
+    // Choose by the run's order: the first living planned stop at or after the current one, wherever the leader stands.
+    void NextLivingByProgress()
+    {
+        // 150 stops; stop 75 (index 74) is dead, 76 lives, and so does every later one. A leader standing by stop 132 still
+        // goes to 76: in the shipped build it chose 132 by its place.
+        std::vector<bool> alive(150, true), planned(150, true);
+        alive[74] = false;
+        auto takes = [&](size_t k) { return planned[k] && alive[k]; };
+        CHECK(runrules::NextLiving(74, 150, takes) == 75);
+        // A stop passed over is passed again.
+        planned[75] = false;
+        CHECK(runrules::NextLiving(74, 150, takes) == 76);
+        // Nothing living after: the route's end.
+        for (size_t k = 74; k < 150; ++k)
+            alive[k] = false;
+        CHECK(runrules::NextLiving(74, 150, takes) == 150);
+        // The current stop living: it stays.
+        alive[74] = true;
+        CHECK(runrules::NextLiving(74, 150, takes) == 74);
+    }
+
+    // The leader's adapter in simulated seconds, as GuildRunStates' readiness, keepers and block decisions use the pure
+    // rules: member 3 refused at its stand, every 5 seconds, by a patrol that never goes. Each stop and generation the
+    // budget starts at the gather; the guarded allowance freezes it for 120 seconds; member 3 is far after that, the budget
+    // runs out and the stop blocks; the recovery's far obligation passes unmet, back to lead with a new generation; the
+    // third block at the stop fails the run (Codex r24, point 6).
+    void GuardedThroughThreeBlocks()
+    {
+        FakeWorld world = Party();
+        Counter counter;
+        RunCore core = Started(world, counter);
+        core.Reconcile(world, counter, 99);
+        runrules::Ready apart = ReadyMember(3);
+        apart.distance = 30.0f;
+        world.ready[3] = apart;
+        const size_t stop = 4;
+        const uint32_t pack = 41;
+        const runrules::Vec stand = { 10, 0, 0 };
+        runrules::Budget budget;
+        int64_t personSince = 0;
+        runplayer::GuardedClock clock;
+        std::string keepers;
+        runguard::Refusal refusal;
+        uint32_t blockId = 0;
+        std::vector<int64_t> blockAt;
+        bool guardedBlocked = false, frozenTooLong = false;
+        for (int64_t now = 100; now < 3000 && core.mode != Mode::Ended; ++now)
+        {
+            core.Reconcile(world, counter, now);
+            if (core.mode != Mode::Lead || core.recovering)
+                continue;
+            const uint32_t generation = core.generation;
+            if (now % 5 == 0)
+                runguard::Note(refusal, 0, &stand, 3600054, now, runguard::PlanKey(generation, 0), stop, true);
+            // The leader at its spot: the budget of this stop and generation starts at the gather.
+            runrules::TrackBudget(budget, stop, generation, true, now);
+            // Readiness, as GuildRunStates::Readiness fills it.
+            runrules::Ready m3 = apart;
+            m3.guarded = runplayer::GuardedLeft(clock, stop, generation, now)
+                && runguard::GuardedNow(refusal, generation, stop, now);
+            const std::vector<runrules::Kept> kept = runrules::Readiness({ ReadyMember(1), ReadyMember(2), m3, ReadyMember(4),
+                ReadyMember(5) });
+            // The keepers' write, only when what it says changes.
+            const std::string text = runrules::KeepText(kept, [](uint32_t guid) { return "m" + std::to_string(guid); });
+            if (text != keepers)
+            {
+                const runplayer::Wait wait = runplayer::WaitOf(kept);
+                runplayer::FreezeBudget(budget, personSince, wait == runplayer::Wait::Person, now);
+                runplayer::GuardedFreeze(clock, budget, wait == runplayer::Wait::Guarded, stop, generation, now);
+                keepers = text;
+            }
+            frozenTooLong = frozenTooLong || runplayer::GuardedUsed(clock, stop, generation, now) > runplayer::GUARDED_WAIT_SECONDS;
+            // The trigger, and the action again on the run as it is: the same predicate.
+            std::vector<runrules::Kept> bots;
+            if (!runplayer::BlockDueNow(budget, personSince, clock, kept, true, now, bots))
+                continue;
+            for (const runrules::Kept& k : bots)
+                guardedBlocked = guardedBlocked || k.why == runrules::Keep::Guarded;
+            core.TakeBlock(world, counter, ++blockId, generation, pack, bots,
+                runrules::KeepText(bots, [](uint32_t guid) { return "m" + std::to_string(guid); }), now);
+            blockAt.push_back(now);
+            keepers.clear();
+        }
+        CHECK(!guardedBlocked && !frozenTooLong);
+        CHECK(blockAt.size() == 3);
+        // Gather at 100, frozen to 220, out at 520; the recovery over at 700, a new budget and allowance: 1120; then 1720.
+        CHECK(blockAt.size() == 3 && blockAt[0] == 520 && blockAt[1] == 1120 && blockAt[2] == 1720);
+        CHECK(core.mode == Mode::Ended && core.failed && core.reason == "blocked,m3:far");
+        CHECK(HasEvent(core, "run_block", "result=fail stop=41 count=3/3"));
+        CHECK(HasEvent(core, "run_recovery", "result=over obligations=m3:far:unmet"));
+    }
+
+    // The keepers' write and the block as the leader's adapter makes them, in simulated seconds: `keep` gives readiness at
+    // a time from the clock as it stands; `due` decides whether the keepers' write runs (KeepersDue, or the old rule of a
+    // change of text alone). Returns the first second a block is due, with its reasons, or 0 by `until`.
+    template<class Keep, class Due>
+    int64_t FirstBlock(int64_t from, int64_t until, size_t stop, uint32_t generation, runrules::Budget& budget,
+        runplayer::GuardedClock& clock, std::string& keepers, Keep keep, Due due, std::vector<runrules::Kept>& bots)
+    {
+        int64_t personSince = 0;
+        for (int64_t now = from; now <= until; ++now)
+        {
+            const std::vector<runrules::Kept> kept = keep(now);
+            const std::string text = runrules::KeepText(kept, [](uint32_t guid) { return "m" + std::to_string(guid); });
+            if (due(text, kept))
+            {
+                const runplayer::Wait wait = runplayer::WaitOf(kept);
+                runplayer::FreezeBudget(budget, personSince, wait == runplayer::Wait::Person, now);
+                runplayer::GuardedFreeze(clock, budget, wait == runplayer::Wait::Guarded, stop, generation, now);
+                keepers = text;
+            }
+            if (runplayer::BlockDueNow(budget, personSince, clock, kept, false, now, bots))
+                return now;
+        }
+        return 0;
+    }
+
+    // A leader the guard refuses 20 yards short of its spot on the way, its four members following within 8 yards of it:
+    // measured from the leader, the members keep nothing back, so the leader alone is guarded, the budget it started is
+    // frozen for the allowance, and the block at 420 seconds names the leader far. Measured from the spot, the members
+    // were far, the budget ran at once and the block named them, 120 seconds early.
+    void RefusedLeaderOnTheWay()
+    {
+        using runrules::Keep;
+        const size_t stop = 6;
+        const uint32_t generation = 3;
+        CHECK(runrules::MeasuredFromLeader(true, false) && !runrules::MeasuredFromLeader(true, true)
+            && !runrules::MeasuredFromLeader(false, false));
+        auto party = [&](const runplayer::GuardedClock& clock, int64_t now, bool fromLeader)
+        {
+            std::vector<runrules::Ready> members;
+            runrules::Ready leader = ReadyMember(1);
+            leader.distance = 20.0f;
+            leader.near = runrules::LeaderNear(false);
+            // Refused afresh every few seconds, by a creature that moves: guarded while the allowance lasts.
+            leader.guarded = runplayer::GuardedLeft(clock, stop, generation, now);
+            members.push_back(leader);
+            for (uint32_t guid = 2; guid <= 5; ++guid)
+            {
+                runrules::Ready member = ReadyMember(guid);
+                const float fromIt = 3.0f + float(guid);   // 5 to 8 yards behind the leader
+                member.distance = runrules::MeasuredFromLeader(fromLeader, false) ? fromIt : 20.0f + fromIt;
+                members.push_back(member);
+            }
+            return runrules::Readiness(members);
+        };
+        // The refusal starts the budget at 1000 (GuildRunStates::LeaderRefused).
+        {
+            runrules::Budget budget;
+            runrules::TrackBudget(budget, stop, generation, true, 1000);
+            runplayer::GuardedClock clock;
+            std::string keepers;
+            const std::vector<runrules::Kept> first = party(clock, 1000, true);
+            CHECK(first.size() == 1 && first[0].guid == 1 && first[0].why == Keep::Guarded);
+            CHECK(runplayer::WaitOf(first) == runplayer::Wait::Guarded);
+            std::vector<runrules::Kept> bots;
+            const int64_t at = FirstBlock(1000, 2000, stop, generation, budget, clock, keepers,
+                [&](int64_t now) { return party(clock, now, true); },
+                [&](const std::string& text, const std::vector<runrules::Kept>& kept)
+                { return runplayer::KeepersDue(text, keepers, kept, clock, stop, generation); }, bots);
+            CHECK(at == 1000 + runplayer::GUARDED_WAIT_SECONDS + runrules::READY_BUDGET);
+            CHECK(bots.size() == 1 && bots[0].guid == 1 && bots[0].why == Keep::Far);
+        }
+        // As the members were measured before: far from the spot, an ordinary wait, a block at 300 naming them only.
+        {
+            runrules::Budget budget;
+            runrules::TrackBudget(budget, stop, generation, true, 1000);
+            runplayer::GuardedClock clock;
+            std::string keepers;
+            CHECK(runplayer::WaitOf(party(clock, 1000, false)) == runplayer::Wait::Bots);
+            std::vector<runrules::Kept> bots;
+            const int64_t at = FirstBlock(1000, 2000, stop, generation, budget, clock, keepers,
+                [&](int64_t now) { return party(clock, now, false); },
+                [&](const std::string& text, const std::vector<runrules::Kept>& kept)
+                { return runplayer::KeepersDue(text, keepers, kept, clock, stop, generation); }, bots);
+            CHECK(at == 1000 + runrules::READY_BUDGET);
+            CHECK(bots.size() == 4 && std::none_of(bots.begin(), bots.end(), [](const runrules::Kept& k) { return k.guid == 1; }));
+        }
+    }
+
+    // The same keepers, "m3:guarded", carried from one generation into the next: the clock must be keyed afresh, or its
+    // allowance is never spent and the guarded wait has no end. KeepersDue keys it though the text is the same, and
+    // GuildRunStates::Reset forgets the keepers at the new stop or generation besides (ForgetKeepers).
+    void GuardedKeepersCarriedOver()
+    {
+        using runrules::Keep;
+        const size_t stop = 4;
+        // Generation 9: member 3 guarded from 1000, the clock keyed to it, the keepers said.
+        runrules::Budget budget;
+        runrules::TrackBudget(budget, stop, 9, true, 1000);
+        runplayer::GuardedClock clock;
+        runplayer::GuardedFreeze(clock, budget, true, stop, 9, 1000);
+        std::string keepers = "m3:guarded";
+        // A hold, generation 10, Choose back to the same stop; the party gathers again at 2000.
+        const uint32_t generation = 10;
+        runrules::TrackBudget(budget, stop, generation, true, 2000);
+        const runrules::Budget fresh = budget;
+        const runplayer::GuardedClock carried = clock;
+        auto keep = [&](const runplayer::GuardedClock& c, int64_t now)
+        {
+            runrules::Ready refused = ReadyMember(3);
+            refused.distance = 20.0f;
+            refused.guarded = runplayer::GuardedLeft(c, stop, generation, now);
+            return runrules::Readiness({ ReadyMember(1), ReadyMember(2), refused });
+        };
+        CHECK(runrules::KeepText(keep(clock, 2000), [](uint32_t guid) { return "m" + std::to_string(guid); }) == keepers);
+        // The old rule, a change of text alone: the write never runs, the clock stays the old generation's, and no block
+        // comes in an hour.
+        {
+            std::vector<runrules::Kept> bots;
+            const int64_t at = FirstBlock(2000, 5600, stop, generation, budget, clock, keepers,
+                [&](int64_t now) { return keep(clock, now); },
+                [&](const std::string& text, const std::vector<runrules::Kept>&) { return text != keepers; }, bots);
+            CHECK(at == 0 && clock.generation == 9);
+        }
+        // KeepersDue: the write runs at 2000 and keys the clock; the allowance is spent at 2120, and the block comes at 2420.
+        {
+            budget = fresh;
+            clock = carried;
+            keepers = "m3:guarded";
+            CHECK(runplayer::KeepersDue(keepers, keepers, keep(clock, 2000), clock, stop, generation));
+            CHECK(!runplayer::KeepersDue(keepers, keepers, runrules::Readiness({ ReadyMember(1) }), clock, stop, generation));
+            std::vector<runrules::Kept> bots;
+            const int64_t at = FirstBlock(2000, 5600, stop, generation, budget, clock, keepers,
+                [&](int64_t now) { return keep(clock, now); },
+                [&](const std::string& text, const std::vector<runrules::Kept>& kept)
+                { return runplayer::KeepersDue(text, keepers, kept, clock, stop, generation); }, bots);
+            CHECK(at == 2000 + runplayer::GUARDED_WAIT_SECONDS + runrules::READY_BUDGET);
+            CHECK(clock.generation == generation && bots.size() == 1 && bots[0].guid == 3 && bots[0].why == Keep::Far);
+        }
+        // Reset's ForgetKeepers: the keepers are forgotten, so the old rule alone keys the clock too, and the block is due
+        // at the same second.
+        {
+            budget = fresh;
+            clock = carried;
+            keepers = "m3:guarded";
+            int64_t personSince = 0;
+            runplayer::ForgetKeepers(keepers, budget, personSince, clock, 2000);
+            CHECK(keepers.empty() && !clock.since);
+            // The old generation's stretch is closed on its clock and moves no budget of another generation.
+            CHECK(clock.used == runplayer::GUARDED_WAIT_SECONDS && budget.since == 2000);
+            std::vector<runrules::Kept> bots;
+            const int64_t at = FirstBlock(2000, 5600, stop, generation, budget, clock, keepers,
+                [&](int64_t now) { return keep(clock, now); },
+                [&](const std::string& text, const std::vector<runrules::Kept>&) { return text != keepers; }, bots);
+            CHECK(at == 2000 + runplayer::GUARDED_WAIT_SECONDS + runrules::READY_BUDGET);
+        }
+        // Within one stop and generation, ForgetKeepers closes a person's wait and a guarded stretch as their ends would.
+        {
+            runrules::Budget same;
+            runrules::TrackBudget(same, 2, 5, true, 100);
+            runplayer::GuardedClock c;
+            runplayer::GuardedFreeze(c, same, true, 2, 5, 150);
+            int64_t personSince = 120;
+            std::string said = "m3:guarded";
+            runplayer::ForgetKeepers(said, same, personSince, c, 190);
+            CHECK(said.empty() && !personSince && !c.since && c.used == 40);
+            CHECK(same.since == 100 + 70 + 40);
+        }
+    }
+
 }
 
 int main()
@@ -2558,6 +2969,13 @@ int main()
     ApartOverdueOnlyInHold();
     SupplyNoSafeWay();
     SupplyWalksOut();
+    GuardedReadiness();
+    GuardedClockAccounting();
+    LeaderNear();
+    NextLivingByProgress();
+    GuardedThroughThreeBlocks();
+    RefusedLeaderOnTheWay();
+    GuardedKeepersCarriedOver();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

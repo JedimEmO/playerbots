@@ -8,4 +8,7 @@ OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 ${CXX:-g++} -std=c++17 -O1 -Wall -Wextra -Werror -I "$ROOT/playerbot" \
     "$ROOT/tests/run_lifecycle/RunLifecycleTest.cpp" "$ROOT/playerbot/GuildRunCore.cpp" -o "$OUT/run_lifecycle_test"
+${CXX:-g++} -std=c++17 -O1 -Wall -Wextra -Werror -I "$ROOT/playerbot" \
+    "$ROOT/tests/run_lifecycle/RunGuardTest.cpp" -o "$OUT/run_guard_test"
+"$OUT/run_guard_test"
 "$OUT/run_lifecycle_test"

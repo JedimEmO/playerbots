@@ -20,6 +20,11 @@ void RunLeadStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
         "run keepers",
         NextAction::array(0, new NextAction("run keepers", ACTION_MOVE + 0.5f), NULL)));
 
+    // The movement guard refused the leader's way to its spot: its waiting budget starts, as at a gather.
+    triggers.push_back(new TriggerNode(
+        "run refused",
+        NextAction::array(0, new NextAction("run refused", ACTION_MOVE + 9.5f), NULL)));
+
     // A cleared stop moves the run on before anything else, so the leader never walks to a dead pack's spot.
     triggers.push_back(new TriggerNode(
         "run cleared",

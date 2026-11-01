@@ -57,6 +57,8 @@ namespace
     constexpr size_t MAX_LINES = 40;
     // A route is walked in points this far apart.
     constexpr float ROUTE_STEP = 2.0f;
+    // The step a stand's path is sampled at for the creatures that walk about.
+    constexpr float STAND_STEP = 1.0f;
     // A pack is on the way when one of it would attack a party this much nearer than its aggro range to the route,
     // as the dungeon job looks ahead for its next pull.
     constexpr float ROUTE_AHEAD = 15.0f;
@@ -78,8 +80,6 @@ namespace
     constexpr int32 ROUTE_CLEAR_DEPTH = 2;
     // How many packs one pack's plan tries to clear first, one at a time: a way across a crowded floor meets several.
     constexpr int32 ROUTE_CLEAR_TRIES = 10;
-    // A pull spot or stand point is clear of a creature this far outside its aggro reach.
-    constexpr float REACH_MARGIN = 3.0f;
     // A pack's and a spot's place along the way is looked for this far either side of where the stop is needed.
     constexpr float ANCHOR_WINDOW = 120.0f;
     // A party set down on a route counts a pull spot this far behind it along the way as still ahead: it can stand a
@@ -420,9 +420,15 @@ std::vector<uint32> GuildPacks::Near(const MapModel& model, const G3D::Vector3& 
 
 float GuildPacks::Reach(const Node& node, uint32 level) const
 {
-    // Detection less the level difference, at least 5 yards, as Unit::GetAttackDistance has it, plus both bounding radii.
-    const float creatureLevel = float(node.minLevel + node.maxLevel) / 2.0f;
-    return std::max(5.0f, node.detection - (float(level) - creatureLevel)) + node.bounding + PLAYER_BOUNDING;
+    // Unit::GetAttackDistance's radius at the creature's highest level, so the route's reach is never shorter than the live
+    // guard's by the level a spawn rolls, plus both bounding radii.
+    return runguard::AggroRadius(node.detection, int32_t(node.maxLevel), int32_t(level)) + node.bounding + PLAYER_BOUNDING;
+}
+
+float GuildPacks::GuardReach(const Node& node, uint32 level) const
+{
+    return runguard::AggroRadius(node.detection, int32_t(node.maxLevel), int32_t(level))
+        + runguard::ReachPad(node.bounding, PLAYER_BOUNDING);
 }
 
 GuildPacks::Prediction GuildPacks::Predict(const MapModel& model, Map* map, const G3D::Vector3& spot, uint32 level,
@@ -729,10 +735,11 @@ std::list<std::string> GuildPacks::ShowPrediction(const MapModel& model, Map* ma
 
 
 std::vector<G3D::Vector3> GuildPacks::StandPoints(const MapModel& model, const G3D::Vector3& spot, const G3D::Vector3& pack,
-    const std::function<bool(const G3D::Vector3&)>& clear) const
+    const std::function<bool(const std::vector<G3D::Vector3>&)>& clear) const
 {
     // Behind the pull spot, away from the pack: two melee places either side near it, then the ranged one's and the healer's
-    // farther back. Each is taken where a navmesh path from the spot ends, if it ends near it and the spot is in sight.
+    // farther back. Each is taken where a navmesh path from the spot ends, if it ends near it, the whole path is clear, and
+    // the spot is in sight.
     struct Place { float yards; float degrees; };
     static const Place places[4] = { { 4.0f, -40.0f }, { 4.5f, 40.0f }, { 7.0f, -15.0f }, { 8.0f, 15.0f } };
     G3D::Vector3 away = spot - pack;
@@ -753,8 +760,13 @@ std::vector<G3D::Vector3> GuildPacks::StandPoints(const MapModel& model, const G
             const std::vector<ai::WorldPosition> path = from.getPathTo(target, nullptr);
             if (!target.isPathTo(path, STAND_SLACK))
                 continue;
-            const G3D::Vector3 at(path.back().getX(), path.back().getY(), path.back().getZ());
-            if (!clear(at) || !VMAP::VMapFactory::createOrGetVMapManager()->isInLineOfSight(model.mapId, at.x, at.y, at.z + EYE,
+            std::vector<G3D::Vector3> line;
+            line.reserve(path.size() + 1);
+            line.push_back(spot);
+            for (const ai::WorldPosition& point : path)
+                line.emplace_back(point.getX(), point.getY(), point.getZ());
+            const G3D::Vector3 at = line.back();
+            if (!clear(line) || !VMAP::VMapFactory::createOrGetVMapManager()->isInLineOfSight(model.mapId, at.x, at.y, at.z + EYE,
                 spot.x, spot.y, spot.z + EYE, false))
                 continue;
             points.push_back(at);
@@ -763,8 +775,9 @@ std::vector<G3D::Vector3> GuildPacks::StandPoints(const MapModel& model, const G
     return points;
 }
 
-std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model, const std::string& name, uint32 level,
-    const std::string& levelFrom, const std::vector<std::pair<int32, G3D::Vector3>>& stops) const
+std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model, const runguard::ReachIndex& index,
+    const std::string& name, uint32 level, const std::string& levelFrom,
+    const std::vector<std::pair<int32, G3D::Vector3>>& stops) const
 {
     auto result = std::make_shared<Route>();
     Route& r = *result;
@@ -863,16 +876,23 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
     std::vector<size_t> pullSpots;              // each stop's pull spot's point on the way
     std::vector<std::set<uint32>> deadAfter;    // what is dead once each stop's pull is done
 
-    // The living creatures that reach a spot, by kind. Strict: one standing still within its aggro reach in 3D and
-    // REACH_MARGIN, another pack's wanderer whose spawn is that near, and any of the pack's own, a wanderer of it from
-    // anywhere in its range; walking there pulls them. Another pack's wanderer from the rest of its spawn plus half its
-    // range, no margin, and another pack's patrol from any point of its path: those move, and are waited for.
+    // The living creatures that reach a spot, by kind. Strict: one standing still or wandering whose envelope reaches it by
+    // the reach the guard shares (runguard::StaticRefuses: its aggro reach in 3D, the margin, and a wanderer's whole range
+    // across, never up or down),
+    // the pack's own among them, and a patrol of the pack's own from its spawn; walking there pulls them. Another pack's
+    // patrol from any point of its path, and a follower from its master's: those move, and are waited for. The creatures
+    // standing still or wandering are found by the reach index's cells, which cover every envelope's whole reach.
     struct Reached
     {
-        std::vector<uint32> strict, wander, patrol;
+        std::vector<uint32> strict, patrol;
         std::vector<size_t> strictAt;   // for a way, the point of the route where the walk first meets each strict one
     };
-    std::map<uint32, std::vector<G3D::Vector3>> patrolPaths;   // each patrol's path as a closed loop
+    // Each patrol's path as a closed loop, and each follower's, as BuildReach's envelopes have them (FollowerReach): its
+    // master's loop with its follow distance across, or its master's spawn with the master's wander range and its follow
+    // distance across. The core keeps a follower at a fixed angle to its master's facing, so it turns about the master.
+    std::map<uint32, std::vector<G3D::Vector3>> patrolPaths;
+    std::map<uint32, float> patrolRange;
+    std::vector<uint32> movers = patrols;
     for (uint32 i : patrols)
     {
         std::vector<G3D::Vector3>& path = patrolPaths[i];
@@ -880,46 +900,86 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             path.push_back(point.first);
         path.push_back(path.front());
     }
-    auto reachOf = [&](const G3D::Vector3& spot, const std::set<uint32>& own)
+    for (uint32 i = 0; i < model.nodes.size(); ++i)
     {
-        Reached found;
-        for (uint32 i : Near(model, spot, ROUTE_REACH / 2.0f))
+        const Node& node = model.nodes[i];
+        if (!node.follows || node.master < 0 || node.maybe || !node.aggroes || !node.patrol.empty())
+            continue;
+        const Node& master = model.nodes[node.master];
+        float range = 0.0f;
+        if (!FollowerPlaces(node, master, patrolPaths[i], range))
+        {
+            patrolPaths.erase(i);
+            continue;
+        }
+        patrolRange[i] = range;
+        movers.push_back(i);
+    }
+    auto toLine = [](const std::vector<G3D::Vector3>& points)
+    {
+        std::vector<runrules::Vec> line;
+        line.reserve(points.size());
+        for (const G3D::Vector3& p : points)
+            line.push_back({ p.x, p.y, p.z });
+        return line;
+    };
+    // The creatures standing still or wandering, alive at this point of the run's order, whose envelopes refuse a path: the
+    // test the guard passes them by, so a place or path planned clear is never refused live by one on its envelope.
+    auto staticOf = [&](const std::vector<G3D::Vector3>& points)
+    {
+        std::vector<uint32> found;
+        auto living = [&](const runguard::Envelope& envelope)
+        {
+            auto it = model.bySpawn.find(envelope.spawn);
+            return it != model.bySpawn.end() && !dead.count(it->second) && !model.nodes[it->second].maybe
+                && model.nodes[it->second].aggroes;
+        };
+        for (uint32 e : runguard::StaticBlockers(index, toLine(points), living))
+            found.push_back(model.bySpawn.at(index.Envelopes()[e].spawn));
+        return found;
+    };
+    // What walks about and reaches a point: the pack's own patrols and followers within reach of their spawn, and another
+    // pack's patrol or follower, strict when it paces within reach, else one to wait for. The guard judges these live, bound
+    // by the same loops. By the one rule (runguard::PlaceDistance): each loop point at its own height, a wanderer's range
+    // across only.
+    std::map<uint32, std::vector<runrules::Vec>> moverLines;
+    for (auto const& [i, path] : patrolPaths)
+        moverLines[i] = toLine(path);
+    auto moversOf = [&](const G3D::Vector3& spot, const std::set<uint32>& own, Reached& found)
+    {
+        const runrules::Vec at = { spot.x, spot.y, spot.z };
+        // The pack's own that walk about: walking where one's spawn reaches pulls it, as one standing still.
+        for (uint32 i : own)
         {
             const Node& node = model.nodes[i];
-            if (dead.count(i) || node.maybe || !node.aggroes)
+            if (dead.count(i) || node.maybe || !node.aggroes || !patrolPaths.count(i))
                 continue;
-            const float d = (node.at - spot).length(), reach = Reach(node, level);
-            if (own.count(i))
-            {
-                if (d <= reach + REACH_MARGIN + (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f))
-                    found.strict.push_back(i);
-            }
-            else if (node.movement == RANDOM_MOTION_TYPE)
-            {
-                // At its spawn it reaches the spot as one standing still would; only the rest of its range is waited for.
-                if (d <= reach + REACH_MARGIN)
-                    found.strict.push_back(i);
-                else if (d <= reach + node.spawnDist / 2.0f)
-                    found.wander.push_back(i);
-            }
-            else if (node.movement != WAYPOINT_MOTION_TYPE && d <= reach + REACH_MARGIN)
+            if (runguard::CreatureReaches({ at }, { { node.at.x, node.at.y, node.at.z } }, 0.0f, GuardReach(node, level)))
                 found.strict.push_back(i);
         }
-        for (uint32 i : patrols)
+        for (uint32 i : movers)
         {
             if (dead.count(i) || own.count(i))
                 continue;
-            const float reach = Reach(model.nodes[i], level) + REACH_MARGIN;
-            float along;
-            G3D::Vector3 nearest;
-            if (DistanceToPath(spot, patrolPaths[i], along, nearest) > reach)
+            const auto range = patrolRange.find(i);
+            const float spread = range != patrolRange.end() ? range->second : 0.0f;
+            const float reach = GuardReach(model.nodes[i], level);
+            const std::vector<runrules::Vec>& line = moverLines[i];
+            if (!runguard::CreatureReaches({ at }, line, spread, reach))
                 continue;
             // One pacing a path that never leaves its reach of the spot, as the foundry's Goblin Engineers do, never moves
-            // off: it is as one standing still.
-            const bool paces = std::all_of(patrolPaths[i].begin(), patrolPaths[i].end(),
-                [&](const G3D::Vector3& point) { return (point - spot).length() <= reach; });
+            // off: it is as one standing still. A wanderer's follower may be anywhere in its range, and counts as pacing;
+            // a patrol's follower paces when it may be in reach at every point of the loop, about its master.
+            const bool paces = line.size() == 1 || std::all_of(line.begin(), line.end(),
+                [&](const runrules::Vec& point) { return runguard::CreatureReaches({ at }, { point }, spread, reach); });
             (paces ? found.strict : found.patrol).push_back(i);
         }
+    };
+    auto reachOf = [&](const G3D::Vector3& spot, const std::set<uint32>& own)
+    {
+        Reached found;
+        found.strict = staticOf({ spot });
+        moversOf(spot, own, found);
         return found;
     };
     // The way from the stop before's pull spot to a pull spot: the points of the route between them, either way round,
@@ -947,7 +1007,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             for (float t = ROUTE_STEP; t < length; t += ROUTE_STEP)
                 points.emplace_back(a + (spot - a) * (t / length), to);
         }
-        std::set<uint32> strict, wander, patrol;
+        std::set<uint32> strict, patrol;
         for (auto const& [at, j] : points)
         {
             const Reached here = reachOf(at, std::set<uint32>());
@@ -957,16 +1017,10 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                     found.strict.push_back(i);
                     found.strictAt.push_back(j);
                 }
-            for (uint32 i : here.wander)
-                if (!own.count(i))
-                    wander.insert(i);
             for (uint32 i : here.patrol)
                 if (!own.count(i))
                     patrol.insert(i);
         }
-        for (uint32 i : wander)
-            if (!strict.count(i))
-                found.wander.push_back(i);
         for (uint32 i : patrol)
             if (!strict.count(i))
                 found.patrol.push_back(i);
@@ -1080,8 +1134,8 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
                     if (!own.count(joined.node))
                         c.extras.push_back(joined.node);
                 c.lateFirst = c.prediction.late.empty() ? std::numeric_limits<uint32>::max() : c.prediction.late.front().second;
-                // Fewest that would be pulled by walking there, then fewest wanderers to wait for, then the rest as before.
-                const auto rank = [](const Choice& x) { return std::make_pair(x.reached.strict.size(), x.reached.wander.size()); };
+                // Fewest that would be pulled by walking there, then fewest patrols to wait for, then the rest as before.
+                const auto rank = [](const Choice& x) { return std::make_pair(x.reached.strict.size(), x.reached.patrol.size()); };
                 const bool better = !have || rank(c) < rank(best)
                     || (rank(c) == rank(best) && (c.extras.size() < best.extras.size()
                         || (c.extras.size() == best.extras.size() && (c.lateFirst > best.lateFirst
@@ -1124,7 +1178,7 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             // Off the way, when the way passes no nearer than PULL_FAR or every spot on it is reached: PULL_BEST from the
             // nearest of the pack, toward the way and turned either side, on the navmesh by a path from the way, and in
             // sight of the creature.
-            if (have && (best.distance > PULL_FAR + ROUTE_STEP || !best.reached.strict.empty() || !best.reached.wander.empty()))
+            if (have && (best.distance > PULL_FAR + ROUTE_STEP || !best.reached.strict.empty()))
             {
                 int32 member = -1;
                 distanceToPack(route[anchor], member);
@@ -1270,8 +1324,6 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             const bool ownPack = own.count(i) > 0;
             stop.reachers.push_back({ model.nodes[i].spawn, strictKind(i, ownPack), ownPack });
         }
-        for (uint32 i : best.reached.wander)
-            stop.reachers.push_back({ model.nodes[i].spawn, ReachKind::Wanderer, false });
         for (uint32 i : best.reached.patrol)
             stop.reachers.push_back({ model.nodes[i].spawn, ReachKind::Patrol, false });
         // The way there: what stands on it, and the wanderers and patrols to wait for before walking it.
@@ -1286,9 +1338,6 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             if (listed.insert(model.nodes[i].spawn).second)
                 stop.reachers.push_back({ model.nodes[i].spawn, strictKind(i, own.count(i) > 0), own.count(i) > 0, true });
         }
-        for (uint32 i : leg.wander)
-            if (listed.insert(model.nodes[i].spawn).second)
-                stop.reachers.push_back({ model.nodes[i].spawn, ReachKind::Wanderer, false, true });
         for (uint32 i : leg.patrol)
             if (listed.insert(model.nodes[i].spawn).second)
                 stop.reachers.push_back({ model.nodes[i].spawn, ReachKind::Patrol, false, true });
@@ -1297,11 +1346,30 @@ std::shared_ptr<GuildPacks::Route> GuildPacks::BuildRoute(const MapModel& model,
             stop.lateSpawn = model.nodes[best.prediction.late.front().node].spawn;
             stop.lateSecond = best.lateFirst;
         }
+        // Each stand certified over the whole navmesh path from the spot, by the shared reach, against every creature standing
+        // still or wandering alive at this point of the run's order: the packs planned before and their joiners are dead,
+        // this stop's own pack is not. And, as the spot is, against what walks about and the guard refuses live at every
+        // yard of that path: another pack's pacing patrol or a wanderer's follower, and the pack's own patrols and followers.
         stop.stand = StandPoints(model, best.spot, model.nodes[best.member].at,
-            [&](const G3D::Vector3& at)
+            [&](const std::vector<G3D::Vector3>& path)
             {
-                const Reached reached = reachOf(at, own);
-                return reached.strict.empty() && reached.wander.empty();
+                if (!staticOf(path).empty())
+                    return false;
+                for (size_t p = 0; p < path.size(); ++p)
+                {
+                    // Each point of the path, and every STAND_STEP yards on toward the next.
+                    const G3D::Vector3 a = path[p];
+                    const G3D::Vector3 b = p + 1 < path.size() ? path[p + 1] : a;
+                    const float length = (b - a).length();
+                    for (float t = 0.0f; t == 0.0f || t < length; t += STAND_STEP)
+                    {
+                        Reached movers;
+                        moversOf(length > 0.0f ? a + (b - a) * (t / length) : a, own, movers);
+                        if (!movers.strict.empty())
+                            return false;
+                    }
+                }
+                return true;
             });
         r.stops.push_back(std::move(stop));
         pullSpots.push_back(best.index);
@@ -1526,8 +1594,12 @@ std::shared_ptr<const GuildPacks::Route> GuildPacks::FindRoute(const std::string
     auto cached = routes.find(key);
     if (cached == routes.end())
     {
-        std::shared_ptr<Route> built = BuildRoute(Model(mapId), dungeon, level, levelFrom, points);
+        const MapModel& model = Model(mapId);
+        // The envelopes first: the route plans its spots and stands by the reach the guard shares with it.
+        std::shared_ptr<const runguard::ReachIndex> reach = BuildReach(model, level);
+        std::shared_ptr<Route> built = BuildRoute(model, *reach, dungeon, level, levelFrom, points);
         built->team = uint32(leader->GetTeam());
+        built->reach = reach;
         cached = routes.emplace(key, std::shared_ptr<const Route>(std::move(built))).first;
     }
     return cached->second;
@@ -1616,6 +1688,13 @@ int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, const G3D::Vector3
     return best;
 }
 
+bool GuildPacks::StopAlive(const Route& route, Map* map, size_t stop)
+{
+    if (!map || stop >= route.stops.size())
+        return false;
+    return StopLives(route.stops[stop], map, map->GetPersistentState(), time(nullptr));
+}
+
 int32 GuildPacks::FirstLiveStop(const Route& route, Map* map, size_t from)
 {
     if (!map)
@@ -1656,8 +1735,10 @@ std::vector<runrules::Threat> GuildPacks::Threats(const Route& route, Map* map, 
     {
         if (!node.aggroes)
             continue;
-        const float reach = Reach(node, route.level) + margin + (node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f);
-        bool close = near(node.at, reach + 10.0f);
+        // Its reach in 3D, and a wanderer's range across only, by the one rule (FirstThreat's PlaceDistance).
+        const float reach = Reach(node, route.level) + margin;
+        const float spread = node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f;
+        bool close = near(node.at, reach + spread + 10.0f);
         for (auto const& point : node.patrol)
             close = close || near(point.first, reach + 10.0f);
         if (!close)
@@ -1679,6 +1760,7 @@ std::vector<runrules::Threat> GuildPacks::Threats(const Route& route, Map* map, 
         runrules::Threat threat;
         threat.spawn = node.spawn;
         threat.reach = reach;
+        threat.spread = spread;
         if (!node.patrol.empty())
         {
             for (auto const& point : node.patrol)
@@ -1693,7 +1775,8 @@ std::vector<runrules::Threat> GuildPacks::Threats(const Route& route, Map* map, 
         {
             const G3D::Vector3 at(creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ());
             threat.where = { vec(at) };
-            threat.reach = Reach(node, route.level) + margin;
+            threat.reach = reach;
+            threat.spread = 0.0f;
             threats.push_back(threat);
         }
     }
@@ -1729,24 +1812,163 @@ std::vector<runrules::Threat> GuildPacks::UnmodelledLocked(const MapModel& model
             continue;
         if (creature->GetDbGuid() && model.bySpawn.count(creature->GetDbGuid()))
             continue;
-        // Its reach as a modelled creature's, from its own detection range and level, and more when it moves.
-        const float level = float(creature->GetLevel());
-        float reach = std::max(5.0f, float(creature->GetDetectionRange()) - (float(route.level) - level))
-            + creature->GetObjectBoundingRadius() + PLAYER_BOUNDING + margin;
-        if (!creature->movespline->Finalized() || creature->IsInCombat())
-            reach += runrules::TRAVEL_MARGIN;
+        // Its reach as a modelled creature's, from its own detection range and level (the server's aggro radius at the
+        // route's level), both radii and the margin; when it moves, TRAVEL_MARGIN across, never up or down.
         runrules::Threat threat;
         threat.spawn = creature->GetDbGuid();
         threat.entry = creature->GetEntry();
         threat.where = { { creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ() } };
-        threat.reach = reach;
-        const float d = runrules::LinesDistance(threat.where, line);
-        if (d >= 0.0f && d <= reach)
+        threat.reach = runguard::AggroRadius(float(creature->GetDetectionRange()), int32_t(creature->GetLevel()), int32_t(route.level))
+            + creature->GetObjectBoundingRadius() + PLAYER_BOUNDING + margin;
+        threat.spread = !creature->movespline->Finalized() || creature->IsInCombat() ? runrules::TRAVEL_MARGIN : 0.0f;
+        const float d = runrules::PlaceDistance(line, threat.where, threat.spread);
+        if (d >= 0.0f && d <= threat.reach)
         {
             threats.push_back(threat);
             if (found)
                 found->push_back(creature->GetObjectGuid());
         }
+    }
+    return threats;
+}
+
+bool GuildPacks::FollowerPlaces(const Node& node, const Node& master, std::vector<G3D::Vector3>& places, float& range)
+{
+    // The core keeps a linked follower its spawn's distance from its master (CreatureLinkingHolder::SetFollowing: the 3D
+    // offset less both radii, which FollowMovementGenerator adds back), across, at a fixed angle to the master's facing
+    // (FollowMovementGenerator::_getLocation), so as the master turns it may stand anywhere on that circle about it.
+    const float follow = (node.at - master.at).length();
+    places.clear();
+    if (!master.patrol.empty())
+    {
+        for (auto const& point : master.patrol)
+            places.push_back(point.first);
+        places.push_back(master.patrol.front().first);
+        range = follow;
+        return true;
+    }
+    if (master.movement == RANDOM_MOTION_TYPE)
+    {
+        places.push_back(master.at);
+        range = master.spawnDist + follow;
+        return true;
+    }
+    return false;
+}
+
+std::shared_ptr<const runguard::ReachIndex> GuildPacks::BuildReach(const MapModel& model, uint32 level) const
+{
+    // Each creature's envelope as the route plans by it: a patrol along its loop, a wanderer over its range across, any
+    // other at its spawn, each with the one reach (GuardReach) at the level. A creature that walks with a master that
+    // patrols or wanders is a follower (FollowerPlaces): along its master's loop, or over its master's range around the
+    // master's spawn, with its follow distance across, since it turns about its master. Like a patrol, the guard judges
+    // a follower where it is, bound by that envelope. One envelope per node, in node order.
+    std::vector<runguard::Envelope> envelopes;
+    envelopes.reserve(model.nodes.size());
+    auto vec = [](const G3D::Vector3& at) { return runrules::Vec{ at.x, at.y, at.z }; };
+    for (const Node& node : model.nodes)
+    {
+        runguard::Envelope envelope;
+        envelope.spawn = node.spawn;
+        envelope.pack = node.pack;
+        envelope.reach = GuardReach(node, level);
+        envelope.walk = node.walk;
+        envelope.run = node.run;
+        envelope.aggroes = node.aggroes;
+        if (!node.patrol.empty())
+        {
+            envelope.kind = runguard::Kind::Patrol;
+            for (auto const& point : node.patrol)
+                envelope.where.push_back(vec(point.first));
+            envelope.where.push_back(vec(node.patrol.front().first));
+        }
+        else
+        {
+            envelope.kind = node.movement == RANDOM_MOTION_TYPE ? runguard::Kind::Wanderer : runguard::Kind::Still;
+            envelope.range = node.movement == RANDOM_MOTION_TYPE ? node.spawnDist : 0.0f;
+            envelope.where.push_back(vec(node.at));
+            std::vector<G3D::Vector3> places;
+            float range = 0.0f;
+            if (node.follows && node.master >= 0 && FollowerPlaces(node, model.nodes[node.master], places, range))
+            {
+                envelope.kind = runguard::Kind::Follower;
+                envelope.range = range;
+                envelope.where.clear();
+                for (const G3D::Vector3& point : places)
+                    envelope.where.push_back(vec(point));
+            }
+        }
+        envelopes.push_back(std::move(envelope));
+    }
+    return std::make_shared<const runguard::ReachIndex>(std::move(envelopes));
+}
+
+float GuildPacks::LiveSpeed(Creature* creature, bool walks)
+{
+    // Its spline's speed while it moves, else what it would move at: running in a fight, walking about when it walks.
+    if (!creature->movespline->Finalized() && creature->movespline->Speed() > 0.0f)
+        return creature->movespline->Speed();
+    if (creature->IsInCombat())
+        return creature->GetSpeed(MOVE_RUN);
+    return walks ? creature->GetSpeed(MOVE_WALK) : 0.0f;
+}
+
+std::vector<runguard::GuardThreat> GuildPacks::LiveThreats(const Route& route, Map* map, const std::vector<runrules::Vec>& line,
+    Unit* mover, float moverSpeed, std::vector<ObjectGuid>* found)
+{
+    std::vector<runguard::GuardThreat> threats;
+    if (!map || line.empty() || !route.reach)
+        return threats;
+    // The line's box, to pass over creatures far from it before the exact test.
+    float x0 = line[0].x, x1 = x0, y0 = line[0].y, y1 = y0;
+    for (const runrules::Vec& point : line)
+    {
+        x0 = std::min(x0, point.x);
+        x1 = std::max(x1, point.x);
+        y0 = std::min(y0, point.y);
+        y1 = std::max(y1, point.y);
+    }
+    auto& store = map->GetObjectsStore();
+    for (auto it = store.begin<Creature>(); it != store.end<Creature>(); ++it)
+    {
+        Creature* creature = it->second;
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || creature->IsClientControlled()
+            || creature->IsPet() || creature->IsTotem() || creature->IsCivilian())
+            continue;
+        if (creature->GetMasterGuid().IsPlayer())
+            continue;
+        FactionTemplateEntry const* faction = creature->GetFactionTemplateEntry();
+        if (!faction || !faction->IsHostileToPlayers())
+            continue;
+        const runrules::Vec at = { creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ() };
+        // A modelled creature standing still or wandering where it belongs is the index's. A patrol or a follower is the
+        // scan's wherever it is: the guard judges it where it stands, bound by its loop while on it and out of a fight.
+        const runguard::Envelope* envelope = creature->GetDbGuid() ? route.reach->BySpawn(creature->GetDbGuid()) : nullptr;
+        const bool walks = envelope && envelope->kind != runguard::Kind::Still;
+        if (envelope && (!envelope->aggroes || (runguard::StaticReach(*envelope) >= 0.0f && !runguard::OffEnvelope(*envelope, at))))
+            continue;
+        // Its reach toward the mover: the server's aggro radius, as the core measures aggro, or with no mover from its
+        // detection range and level, and ReachPad.
+        const float aggro = mover ? creature->GetAttackDistance(mover)
+            : runguard::AggroRadius(float(creature->GetDetectionRange()), int32_t(creature->GetLevel()), int32_t(route.level));
+        const float reach = aggro + runguard::ReachPad(creature->GetObjectBoundingRadius(),
+            mover ? mover->GetObjectBoundingRadius() : PLAYER_BOUNDING);
+        const float speed = LiveSpeed(creature, walks);
+        // Taken by the most it may reach anywhere along the line: its reach and its walk across to the horizon's end. The
+        // walk counts across only, so the 3D distance less it never leaves out one the guard would refuse.
+        const float most = reach + runguard::MaxSpread(speed, moverSpeed);
+        if (at.x < x0 - most || at.x > x1 + most || at.y < y0 - most || at.y > y1 + most)
+            continue;
+        const float d = runrules::LinesDistance({ at }, line);
+        if (d < 0.0f || d > most)
+            continue;
+        runguard::GuardThreat threat = envelope
+            ? runguard::EnvelopeThreat(*envelope, &at, reach, speed, creature->IsInCombat() || runguard::OffEnvelope(*envelope, at))
+            : runguard::LiveThreat(creature->GetDbGuid(), creature->GetEntry(), at, reach, speed);
+        threat.aggro = aggro;
+        threats.push_back(threat);
+        if (found)
+            found->push_back(creature->GetObjectGuid());
     }
     return threats;
 }

@@ -229,6 +229,10 @@ namespace ai
     public:
         ReachPartyMemberToHealAction(PlayerbotAI* ai) : ReachTargetAction(ai, "reach party member to heal", ai->GetRange("heal")) {}
         virtual std::string GetTargetName() override { return "party member to heal"; }
+        // In a run, a spot in healing range and sight of the patient that the movement guard passes first; with none, the
+        // reach anyway, under a permit until the healer arrives, the need or the fight ends, the plan changes, or 10
+        // seconds pass (GuildMoveGuard). In MovementActions.cpp.
+        virtual bool Execute(Event& event) override;
     };
 
     class ReachPartyMemberForTotemAction : public ReachTargetAction

@@ -107,6 +107,9 @@ struct GuildRunView
     // waiting budget frozen for as long (runplayer::FreezeBudget), or 0.
     std::vector<uint32> persons;
     int64_t personWaitSince = 0;
+    // The guarded wait's allowance at this stop and generation (runplayer::GuardedClock): while it lasts, a member the
+    // movement guard keeps back from its place by a creature that moves is guarded, never far.
+    runplayer::GuardedClock guardedClock;
     // A fight the leader did not pull is on, as one a person started: defended, the planned pull cancelled.
     bool unplannedFight = false;
 };
@@ -141,8 +144,6 @@ public:
     static constexpr time_t STALL_SECONDS = 60;
     // How long the party waits at the stop before for another pack's creature to leave, before it pulls anyway.
     static constexpr time_t WAIT_SECONDS = 90;
-    // The margin on a creature's reach, as GuildPacks measures a pull spot's.
-    static constexpr float REACH_MARGIN = 3.0f;
 
     // From the guild tick, for a dungeon leader, outside GuildDungeon's lock, on either side of the job's own tick.
     // Before it: with the leader in a dungeon's instance, the run state is made the first time, from GuildPacks' route
@@ -204,6 +205,10 @@ public:
     static std::vector<runrules::Kept> Readiness(Player* bot, const GuildRunView& view);
     // The keepers' text for events, name:why.
     static std::string KeepersText(const std::vector<runrules::Kept>& kept);
+    // The whole block predicate (runplayer::BlockDueNow), for the leader's trigger and again in its action: in lead at a
+    // stop, the budget of this stop and generation, readiness now, frozen by a person's or a guarded wait. `bots` gets
+    // the reasons the block names.
+    static bool BlockNow(Player* leader, const GuildRunView& view, std::vector<runrules::Kept>& bots);
     // For the job's recovery after a block: the block's id; the members with a supplies obligation, once the party has
     // walked the checked way out to the entrance; and whether that walk is still to come or under way. False with none.
     bool Recovery(uint32 leaderGuid, uint32& id, std::vector<uint32>& supplies, bool& walkingOut) const;
@@ -233,14 +238,20 @@ public:
     // The leader blocks the pull with these reasons: its pull phase blocked, a plan revision, and a block for the tick to
     // take once. Never empty.
     void Block(Player* leader, const GuildRunStamp& stamp, const std::vector<runrules::Kept>& kept);
-    // Who keeps the pull back now, as telemetry: no plan revision, and run_keep said only when the list changes.
+    // Who keeps the pull back now, as telemetry: no plan revision, and run_keep said only when the list changes. The person's
+    // and the guarded waits' clocks move at each change.
     void Keepers(Player* leader, const GuildRunStamp& stamp, const std::vector<runrules::Kept>& kept);
+    // The movement guard refused the leader on its way to this stop's spot: the waiting budget starts now, as at a gather,
+    // when none runs under this stop and generation, so a leader that cannot get there still comes to a block. Telemetry,
+    // with no plan revision: run_budget from=refused.
+    void LeaderRefused(Player* leader, const GuildRunStamp& stamp);
     // On to the first stop with a living pack from the current one, or past it with skip, as for a pack that pulls
     // bring nothing of; a stop passed over is passed again. Without skip, the current stop's pack is dead: the leader saw
     // it cleared. Looks at the leader's own map, so only from its map's thread.
     void Advance(Player* leader, const GuildRunStamp& stamp, bool skip);
-    // After a hold, a hand-back or a change of members: the first living stop ahead of where the leader stands, as for a
-    // party set down mid-route. The tick never chooses a stop.
+    // After a hold, a hand-back or a change of members: the first living planned stop at or after the run's current one, by
+    // the run's progress and never by where the leader stands, so no living stop is left behind (runrules::NextLiving).
+    // The stops passed are noted, each dead or skipped with why. The tick never chooses a stop.
     void Choose(Player* leader, const GuildRunStamp& stamp);
     // It waits at the stop before for another pack's wanderer or patrol to leave; it goes on when none is in reach, or when
     // it has waited WAIT_SECONDS; it pulls its pack from its own spot after the stop before's failed; it passes the stop over.
@@ -304,6 +315,7 @@ private:
         runrules::Budget budget;
         std::string keepers;
         int64_t personWaitSince = 0;  // only a person keeps the pull back since then: the budget is frozen
+        runplayer::GuardedClock guardedClock; // only guarded members keep it back: the budget is frozen, for so long
         time_t toldAt = 0;            // the leader last said in party chat what it waits for
         std::string told;
         uint32 blockId = 0;

@@ -3,6 +3,7 @@
 #include "AreaTriggerAction.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildMoveGuard.h"
 
 using namespace ai;
 
@@ -39,6 +40,8 @@ bool ReachAreaTriggerAction::Execute(Event& event)
         return true;
     }
 
+    // Into the trigger in a run: the movement guard's named exception, scoped to this trigger and the run's plan.
+    sGuildMoveGuard.GrantPortal(bot, atEntry->x, atEntry->y, atEntry->z, atEntry->radius);
     MotionMaster &mm = *bot->GetMotionMaster();
 	mm.MovePoint(atEntry->mapid, atEntry->x, atEntry->y, atEntry->z, FORCED_MOVEMENT_RUN);
     const float distance = sqrt(bot->GetDistance(atEntry->x, atEntry->y, atEntry->z));

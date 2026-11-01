@@ -2,6 +2,7 @@
 #include "playerbot/GuildRuns.h"
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildDungeon.h"
+#include "playerbot/GuildMoveGuard.h"
 #include "Groups/Group.h"
 #include "World/World.h"
 #include "Grids/GridNotifiers.h"
@@ -649,6 +650,17 @@ void GuildRuns::SampleFight(Run& run, Group* group, uint32 nowMs, time_t now)
         const bool onTheWay = fight.leaderReason.rfind("on the way to", 0) == 0
             || (fight.leaderReason.empty() && leaderInside && leader->IsMoving());
         fight.began = fight.pulled ? "pull" : !leaderFirst ? "member" : onTheWay ? "walked_in" : "attacked";
+        // A fight the party did not pull: each member's last movement guard check before it, what it found nearest and
+        // where, so a walk-in can be explained by the creature's place and timing, not by its label alone.
+        if (!fight.pulled)
+            for (Player* member : party)
+            {
+                int64_t at = 0;
+                const std::string last = sGuildMoveGuard.LastCheckOf(member->GetGUIDLow(), at);
+                if (!last.empty())
+                    sGuildBotMgr.RecordEvent(member->GetGUIDLow(), "guard_last", "fight=" + std::to_string(fight.seq)
+                        + " began=" + fight.began + " age=" + std::to_string(int64_t(now) - at) + " " + last);
+            }
 
         // The first creature: one attacking the first member in combat, the leader when it is, or that member's victim.
         Player* first = leaderFirst ? leader : nullptr;

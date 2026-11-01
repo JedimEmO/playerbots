@@ -156,17 +156,27 @@ bool RunBlockAction::Execute(Event& event)
 {
     if (!Settled(bot))
         return false;
-    GuildRunView view = AI_VALUE(GuildRunView, "run state");
-    // The reasons as they are now: a party that came ready meanwhile is not blocked.
+    // The whole block predicate again, on the run as it is now: the budget and its freezes, the allowance of a guarded
+    // wait, and the reasons. A party that came ready meanwhile, or whose wait is a person's or a guarded one, is not blocked.
     // Only the bots' reasons: a person is waited for, never blocked on, and a person's reason never starts a resupply.
-    const std::vector<runrules::Kept> kept = runplayer::BotReasons(GuildRunStates::Readiness(bot, view));
-    if (kept.empty())
+    const GuildRunView view = sGuildRunStates.View(bot);
+    std::vector<runrules::Kept> kept;
+    if (!view.valid || !view.controls || !view.lead || view.choose || !GuildRunStates::BlockNow(bot, view, kept) || kept.empty())
         return false;
     sGuildRunStates.Block(bot, StampOf(event), kept);
     // A pull asked for under the old plan goes at once; fighting what comes stays.
     if (PullStrategy* strategy = PullStrategy::Get(ai))
         if (strategy->HasTarget())
             ai->DoSpecificAction("pull end", event, true);
+    Refresh(context);
+    return true;
+}
+
+bool RunRefusedAction::Execute(Event& event)
+{
+    if (!Settled(bot))
+        return false;
+    sGuildRunStates.LeaderRefused(bot, StampOf(event));
     Refresh(context);
     return true;
 }
@@ -242,17 +252,25 @@ bool RunPullAction::Execute(Event& event)
     // with the stamp unchanged.
     if (!sGuildRunStates.PullAllowed(bot))
         return false;
+    // The pull phase first, and the leader's own copy of the run read afresh, before anything can move it: the pull's
+    // move, or a melee fallback's chase, launches then under the plan's exemption for the stop's pack, which the movement
+    // guard reads from that copy. A write refused for a stale stamp pulls nothing.
+    sGuildRunStates.Pulled(bot, stamp, target->GetObjectGuid());
+    Refresh(context);
+    const GuildRunView pulling = sGuildRunStates.View(bot);
+    if (!pulling.valid || pulling.pull != GuildRunPull::Pull || pulling.pulled != target->GetObjectGuid())
+        return false;
     bool started = ai->DoSpecificAction("pull my target", Event("attack anything", target->GetObjectGuid()), true);
     if (!started && !fromBefore)
         started = Attack(nullptr, target);
     if (!started)
     {
-        sGuildRunStates.PullFailed(bot, stamp);
+        // Nothing started: the pull phase goes back, under the stamp its own write made, and the exemption with it.
+        sGuildRunStates.PullFailed(bot, pulling.stamp);
         Refresh(context);
         return false;
     }
 
-    sGuildRunStates.Pulled(bot, stamp, target->GetObjectGuid());
     sGuildRuns.NotePull(bot, target);
     Refresh(context);
     return true;

@@ -8,6 +8,7 @@
 #include "playerbot/GuildRunState.h"
 #include "playerbot/GuildRunSelfTest.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
+#include "playerbot/GuildMoveGuard.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/strategy/Engine.h"
@@ -917,6 +918,8 @@ void GuildBotMgr::CheckBreath(Character& c, Player* bot)
     if (bot->getStandState() != UNIT_STAND_STATE_STAND)
         bot->SetStandState(UNIT_STAND_STATE_STAND);
     bot->GetMotionMaster()->Clear();
+    // Surfacing for breath in a run: the movement guard's named exception, straight up, for ten seconds.
+    sGuildMoveGuard.GrantSurface(bot, bot->GetPositionX(), bot->GetPositionY(), surface);
     bot->GetMotionMaster()->MovePoint(0, bot->GetPositionX(), bot->GetPositionY(), surface, FORCED_MOVEMENT_RUN);
     if (!c.surfacing)
         Event(c.guid, "recovery", "up for air");
@@ -1213,6 +1216,11 @@ void GuildBotMgr::Tick(uint32 elapsed)
     }
     else
         ReconcileRuns();
+
+    // The movement guard: running splines against what came into their way, permits that ran out, refusals told.
+    if (tablesReady)
+        for (auto& [guid, kind, detail] : sGuildMoveGuard.Watch(elapsed))
+            Event(guid, kind, detail);
 
     // The fight log samples every party in a run about once a second.
     sinceFights += elapsed;
@@ -2463,8 +2471,11 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
             return sGuildRunStates.Describe(leader);
         if (what == "selftest")
             return GuildRunSelfTest(leader);
+        if (what == "guard")
+            return sGuildMoveGuard.Describe(leader);
         return { "guildbot run state [leader]   every run the controller keeps: its mode, members and holds; reads only",
-            "guildbot run selftest <character> <second character>   the run's move removal on a lab character's motion stack" };
+            "guildbot run guard <character> <x> <y> <z>   the movement guard's verdict on its path there; reads only",
+            "guildbot run selftest <character> <second character> [patrol=<spawn>]   the run's move removal and the movement guard on a lab character" };
     }
 
     if (!tablesReady)

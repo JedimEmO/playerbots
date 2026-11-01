@@ -94,6 +94,15 @@ namespace ai
         bool IsActive() override;
     };
 
+    // The movement guard refused the leader on its way to the stop's spot, and no waiting budget runs for this stop and
+    // generation yet: it starts now, so that a leader kept from its spot still comes to a block.
+    class RunRefusedTrigger : public RunTrigger
+    {
+    public:
+        RunRefusedTrigger(PlayerbotAI* ai) : RunTrigger(ai, "run refused") {}
+        bool IsActive() override;
+    };
+
     // A pull that started no fight in a while.
     class RunPullFailedTrigger : public RunTrigger
     {
