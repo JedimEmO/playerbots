@@ -56,12 +56,6 @@ void RunLeadStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "run pull failed",
         NextAction::array(0, new NextAction("run pull failed", ACTION_HIGH), NULL)));
-
-    // The run's tactics while a member fights or the pull comes, though the leader itself is not yet in it
-    // (docs/plan.md, item 5): the kill order's marks and the interrupts, decided again when stale.
-    triggers.push_back(new TriggerNode(
-        "run tactics",
-        NextAction::array(0, new NextAction("run tactics", ACTION_INTERRUPT + 1), NULL)));
 }
 
 void RunLeadStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
@@ -75,16 +69,6 @@ void RunLeadStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "run hold",
         NextAction::array(0, new NextAction("move to run spot", ACTION_MOVE + 5), NULL)));
-
-    // The run's tactics in the fight: the kill order's marks, the tank's target and who interrupts what, decided again
-    // when stale; and the leader's own interrupt when the plan gives it one, above its class's own on its current target.
-    triggers.push_back(new TriggerNode(
-        "run tactics",
-        NextAction::array(0, new NextAction("run tactics", ACTION_INTERRUPT + 1), NULL)));
-
-    triggers.push_back(new TriggerNode(
-        "run interrupt",
-        NextAction::array(0, new NextAction("run interrupt", ACTION_INTERRUPT + 5), NULL)));
 }
 
 void RunPartyStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
@@ -111,10 +95,4 @@ void RunPartyStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "run leash",
         NextAction::array(0, new NextAction("move to run spot", ACTION_MOVE + 4), NULL)));
-
-    // The interrupt the run's plan gives this member: a summon or a heal being cast, by any creature of the fight, not only
-    // its current target (docs/plan.md, item 5).
-    triggers.push_back(new TriggerNode(
-        "run interrupt",
-        NextAction::array(0, new NextAction("run interrupt", ACTION_INTERRUPT + 5), NULL)));
 }

@@ -2,8 +2,6 @@
 #include "playerbot/playerbot.h"
 #include "TankTargetValue.h"
 #include "PossibleAttackTargetsValue.h"
-#include "playerbot/GuildBotMgr.h"
-#include "playerbot/GuildTactics.h"
 
 using namespace ai;
 
@@ -99,15 +97,6 @@ private:
 ObjectGuid TankTargetValue::Calculate()
 {
     GuidSet exclusions = GatherStrategyTargetExclusions(ai, TargetValueExclusionType::TankTarget);
-
-    // In a guild run the controller leads, the run's plan may give the tank a target of its own: a creature on the healer,
-    // while the party strikes the skull (GuildTactics::TankTarget, docs/plan.md, item 5).
-    if (sGuildBotMgr.IsGuildBot(bot))
-    {
-        ObjectGuid planned = sGuildTactics.TankTarget(bot, AI_VALUE(GuildRunView, "run state"));
-        if (planned && !exclusions.count(planned))
-            return planned;
-    }
 
     // The marked target, unless another bot tank following the same mark already holds it. Once the mark is on this
     // tank, a creature no tank holds comes first, and the tank goes back to the mark when none is left: kept on the mark,

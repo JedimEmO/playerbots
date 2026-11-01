@@ -7,7 +7,6 @@
 #include "playerbot/GuildRuns.h"
 #include "playerbot/GuildRunState.h"
 #include "playerbot/GuildRunSelfTest.h"
-#include "playerbot/GuildTactics.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "playerbot/GuildMoveGuard.h"
 #include "playerbot/PlayerbotAIConfig.h"
@@ -1244,9 +1243,6 @@ void GuildBotMgr::ReconcileRuns()
         return;
     for (auto& [guid, kind, detail] : sGuildRunStates.Reconcile())
         Event(guid, kind, detail);
-    // The tactics of runs no longer in lead are let go, their marks cleared where they still stand (GuildTactics).
-    for (auto& [guid, kind, detail] : sGuildTactics.Sweep())
-        Event(guid, kind, detail);
     sGuildRunStates.CleanMoves();
 }
 
@@ -2477,12 +2473,9 @@ std::list<std::string> GuildBotMgr::HandleCommand(std::string args)
             return GuildRunSelfTest(leader);
         if (what == "guard")
             return sGuildMoveGuard.Describe(leader);
-        if (what == "tactics")
-            return sGuildTactics.Describe(leader);
         return { "guildbot run state [leader]   every run the controller keeps: its mode, members and holds; reads only",
             "guildbot run guard <character> <x> <y> <z>   the movement guard's verdict on its path there; reads only",
-            "guildbot run selftest <character> <second character> [patrol=<spawn>]   the run's move removal and the movement guard on a lab character",
-            "guildbot run tactics [leader]   every run's tactics plan; with a leader, its fight's facts, interrupts, a fresh decision and checks; reads only" };
+            "guildbot run selftest <character> <second character> [patrol=<spawn>]   the run's move removal and the movement guard on a lab character" };
     }
 
     if (!tablesReady)

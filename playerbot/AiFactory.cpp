@@ -603,15 +603,8 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
 
         // A guild tank in a party marks its target, so the party strikes one creature and the crowd control classes
         // (polymorph, sap, a freezing trap, shackle) take another: CcTargetValue passes over the marked one.
-        // Not while a run's controller has the party: its leader marks Skull and Cross from the run's kill order
-        // (GuildTactics), and the two would compete. The strategies are built again when the run leaves lead, which
-        // gives the marking back.
         if (sGuildBotMgr.IsGuildBot(player) && player->GetGroup() && PlayerbotAI::IsTank(player))
-        {
-            const GuildRunView run = sGuildRunStates.View(player);
-            if (!(run.valid && run.controls && !run.apart))
-                combatEngine->addStrategy("mark rti");
-        }
+            combatEngine->addStrategy("mark rti");
 
         // remove threat for now
         //engine->removeStrategy("threat");
