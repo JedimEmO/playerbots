@@ -1387,6 +1387,18 @@ std::list<std::string> GuildRunStates::Describe(const std::string& leaderName) c
     return out;
 }
 
+bool GuildRunStates::ModeOf(uint32 instanceId, GuildRunMode& mode, GuildRunStamp& stamp, uint32& leader) const
+{
+    std::shared_ptr<State> state = Find(instanceId);
+    if (!state)
+        return false;
+    std::lock_guard<std::mutex> guard(state->lock);
+    mode = state->core.mode;
+    stamp = state->core.Stamp();
+    leader = state->leader;
+    return true;
+}
+
 GuildRunView GuildRunStates::View(Player* bot) const
 {
     GuildRunView view;
@@ -1406,6 +1418,7 @@ GuildRunView GuildRunStates::View(Player* bot) const
     view.valid = true;
     view.mode = core.mode;
     view.stamp = core.Stamp();
+    view.start = core.start;
     view.choose = core.choose;
     view.instanceId = state->instanceId;
     view.expected.assign(core.expected.begin(), core.expected.end());

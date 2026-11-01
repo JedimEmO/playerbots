@@ -86,6 +86,7 @@ struct GuildRunView
     uint32 pullTries = 0;      // pulls of this stop that brought nothing
     GuildRunMode mode = GuildRunMode::Ended;
     GuildRunStamp stamp;       // the run's generation and plan revision
+    uint64 start = 0;          // the server's start, which the generation is told with in events
     bool choose = false;       // the leader is to choose its stop again from where it stands
     uint32 instanceId = 0;
     std::vector<uint32> expected; // the members the run waits for, the leader among them
@@ -181,6 +182,9 @@ public:
     // The guild tick, on the world thread before the maps update, once a tick and before the jobs: every run it keeps.
     // Returns its events, as (the leader's guid, kind, detail).
     std::vector<std::tuple<uint32, std::string, std::string>> Reconcile();
+    // The mode and stamp of the run in this instance, and its leader, from what the state stores; false with no run there.
+    // For GuildTactics' sweep, on the world thread between map updates.
+    bool ModeOf(uint32 instanceId, GuildRunMode& mode, GuildRunStamp& stamp, uint32& leader) const;
     // The console's `run state`: every run kept, ended ones and those with a leader offline included, from what each state
     // stores. Reads only.
     std::list<std::string> Describe(const std::string& leaderName) const;

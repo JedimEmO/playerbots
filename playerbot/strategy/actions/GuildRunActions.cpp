@@ -2,6 +2,7 @@
 #include "GuildRunActions.h"
 #include "playerbot/GuildRunState.h"
 #include "playerbot/GuildRuns.h"
+#include "playerbot/GuildTactics.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "playerbot/strategy/values/LastMovementValue.h"
 #include "Entities/Creature.h"
@@ -265,6 +266,9 @@ bool RunPullAction::Execute(Event& event)
     const GuildRunView pulling = sGuildRunStates.View(bot);
     if (!pulling.valid || pulling.pull != GuildRunPull::Pull || pulling.pulled != target->GetObjectGuid())
         return false;
+    // The tactics for the pack, under the pull's own stamp, before it comes: Skull and Cross on the kill order, so the party
+    // strikes one creature from the first blow (GuildTactics::Decide).
+    sGuildTactics.Decide(bot, pulling, "pull", target);
     bool started = ai->DoSpecificAction("pull my target", Event("attack anything", target->GetObjectGuid()), true);
     // The pull asked for, its spell cast now from where the leader stands: "pull action" run directly takes no reach move.
     // When it casts nothing, as with a seal still to put on, the pull strategy's own steps follow as before.
@@ -274,9 +278,11 @@ bool RunPullAction::Execute(Event& event)
         started = Attack(nullptr, target);
     if (!started)
     {
-        // Nothing started: the pull phase goes back, under the stamp its own write made, and the exemption with it.
+        // Nothing started: the pull phase goes back, under the stamp its own write made, and the exemption with it. The
+        // marks set for the pack come off the creature where it stands (GuildTactics::Clear).
         sGuildRunStates.PullFailed(bot, pulling.stamp);
         Refresh(context);
+        sGuildTactics.Clear(bot, sGuildRunStates.View(bot), "pull_failed");
         return false;
     }
 
@@ -296,6 +302,8 @@ bool RunPullFailedAction::Execute(Event& event)
     else
         sGuildRunStates.PullFailed(bot, StampOf(event));
     Refresh(context);
+    // The pull brought nothing: the marks set for the pack come off the creature where it stands (GuildTactics::Clear).
+    sGuildTactics.Clear(bot, sGuildRunStates.View(bot), "pull_failed");
     return true;
 }
 
@@ -332,4 +340,42 @@ bool RunGoAction::Execute(Event& event)
     sGuildRunStates.Go(bot, StampOf(event));
     Refresh(context);
     return true;
+}
+
+bool RunTacticsAction::Execute(Event& event)
+{
+    if (!Settled(bot))
+        return false;
+    // The trigger's stamp, then why it fired.
+    const std::string param = event.getParam();
+    const size_t space = param.find(' ');
+    const GuildRunStamp stamp = runrules::ParseStamp(param.substr(0, space));
+    const std::string why = space == std::string::npos ? std::string("look") : param.substr(space + 1);
+    const GuildRunView view = sGuildRunStates.View(bot);
+    if (!view.valid || !view.lead || !view.controls || !sGuildRunStates.Current(bot, view, stamp, true))
+    {
+        // Fired on a cached view the run has moved on from: read afresh for the next look.
+        Refresh(context);
+        return false;
+    }
+    return sGuildTactics.Decide(bot, view, why);
+}
+
+bool RunInterruptAction::isUseful()
+{
+    return Settled(bot) && bot->IsAlive();
+}
+
+bool RunInterruptAction::Execute(Event& event)
+{
+    if (!Settled(bot))
+        return false;
+    const GuildRunView view = sGuildRunStates.View(bot);
+    const GuildRunStamp stamp = StampOf(event);
+    if (!view.valid || !view.controls || !runrules::Accepts(view.mode, view.stamp, stamp, true))
+    {
+        sGuildRunStates.Refused(bot);
+        return false;
+    }
+    return sGuildTactics.Interrupt(bot, view, stamp);
 }

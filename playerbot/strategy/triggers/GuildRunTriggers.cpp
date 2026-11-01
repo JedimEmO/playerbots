@@ -3,6 +3,7 @@
 #include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildMoveGuard.h"
 #include "playerbot/GuildRunState.h"
+#include "playerbot/GuildTactics.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
 #include "Groups/Group.h"
 #include "MotionGenerators/MovementGenerator.h"
@@ -300,4 +301,43 @@ bool RunClearTrigger::IsActive()
     // Go only when the guard's model has no blocker on the whole way to the spot, the spot or its stands
     // (runguard::WaitReaches), so the guard lets the walk there. The block, when it comes, is "run block"'s.
     return runrules::WaitNext(!GuildRunStates::Reached(bot, view), false) == runrules::WaitStep::Go;
+}
+
+bool RunTacticsTrigger::IsActive()
+{
+    GuildRunView view = AI_VALUE(GuildRunView, "run state");
+    if (!Leads(view) || !InWorld(bot) || !bot->IsAlive())
+        return false;
+    return sGuildTactics.Look(bot, view, why);
+}
+
+Event RunTacticsTrigger::Check()
+{
+    if (!IsActive())
+        return Event();
+    return Event(getName(), runrules::StampText(AI_VALUE(GuildRunView, "run state").stamp) + " " + why);
+}
+
+bool RunInterruptTrigger::IsActive()
+{
+    // A cheap look first: most members are given no interrupt in most fights.
+    if (!InWorld(bot) || !bot->IsAlive() || !sGuildTactics.Assigned(bot))
+        return false;
+    // Then the run as it is now, not as cached: an interrupt is late in a second.
+    const GuildRunView view = sGuildRunStates.View(bot);
+    if (!view.valid || !view.controls || view.mode != GuildRunMode::Lead)
+        return false;
+    Unit* foe = nullptr;
+    uint32 spell = 0;
+    if (!sGuildTactics.InterruptDue(bot, view, foe, spell))
+        return false;
+    stamp = view.stamp;
+    return true;
+}
+
+Event RunInterruptTrigger::Check()
+{
+    if (!IsActive())
+        return Event();
+    return Event(getName(), runrules::StampText(stamp));
 }
