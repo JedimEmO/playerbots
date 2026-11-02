@@ -171,6 +171,7 @@ namespace ai
             creators["rti target"] = [](PlayerbotAI* ai) { return new RtiTargetValue(ai); };
             creators["run state"] = [](PlayerbotAI* ai) { return new RunStateValue(ai); };
             creators["run spot"] = [](PlayerbotAI* ai) { return new RunSpotValue(ai); };
+            creators["run pull step"] = [](PlayerbotAI* ai) { return new RunPullStepValue(ai); };
             creators["rti cc target"] = [](PlayerbotAI* ai) { return new RtiCcTargetValue(ai); };
             creators["duel target"] = [](PlayerbotAI* ai) { return new DuelTargetValue(ai); };
             creators["party member to dispel"] = [](PlayerbotAI* ai) { return new PartyMemberToDispel(ai); };

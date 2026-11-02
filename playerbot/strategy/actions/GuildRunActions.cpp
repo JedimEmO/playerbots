@@ -1,9 +1,11 @@
 #include "playerbot/playerbot.h"
 #include "GuildRunActions.h"
+#include "playerbot/GuildBotMgr.h"
 #include "playerbot/GuildRunState.h"
 #include "playerbot/GuildRuns.h"
 #include "playerbot/GuildTactics.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
+#include "playerbot/strategy/values/GuildRunValues.h"
 #include "playerbot/strategy/values/LastMovementValue.h"
 #include "Entities/Creature.h"
 
@@ -31,6 +33,47 @@ namespace
     bool Settled(Player* bot)
     {
         return bot->IsInWorld() && !bot->IsBeingTeleported();
+    }
+
+    // Yards to a tenth, for events.
+    std::string Tenths(float yards)
+    {
+        char text[24];
+        snprintf(text, sizeof(text), "%.1f", yards);
+        return text;
+    }
+
+    // A run event's leading fields, as the run state's own events have them (runcore::RunCore::Note): the generation, told
+    // with the server's start, and the plan revision.
+    std::string RunFields(uint64 start, uint32 generation, uint32 plan)
+    {
+        return "gen=" + std::to_string(start) + "." + std::to_string(generation) + " rev=" + std::to_string(plan);
+    }
+
+    std::string RunFields(const GuildRunView& view)
+    {
+        return RunFields(view.start, view.stamp.generation, view.stamp.plan);
+    }
+
+    // A yes, a no, or not known (-1), for events.
+    std::string Flag(int8 value)
+    {
+        return value < 0 ? "-" : (value ? "1" : "0");
+    }
+
+    // The leader's step onto its spot, said once it is over (run_stepped), under the generation and stop it was taken at:
+    // why it is over (runrules::StepEnd), its yards off the spot when it stepped and when it was first seen over, the time
+    // between, whether the leader still moved then and by the step's own move, and whether the creature was then in sight
+    // by the pull spell's rule and with M2 doodads. Said however late, so a step that drew a fight or that a wait cut short
+    // is told as well.
+    void SayStep(Player* bot, runrules::PullStep& step)
+    {
+        step.told = true;
+        sGuildBotMgr.RecordEvent(bot->GetGUIDLow(), "run_stepped", RunFields(step.start, step.gather.generation, step.plan)
+            + " stop=" + std::to_string(step.gather.index + 1) + " over=" + runrules::StepEndName(step.end)
+            + " from=" + Tenths(step.from) + " off=" + (step.off < 0.0f ? std::string("-") : Tenths(step.off))
+            + " ms=" + std::to_string(step.endMs) + " moving=" + (step.moving ? "1" : "0") + " own=" + (step.own ? "1" : "0")
+            + " sight=" + Flag(step.sight) + " sight_m2=" + Flag(step.sightM2));
     }
 }
 
@@ -192,6 +235,15 @@ bool RunPullAction::Execute(Event& event)
     if (!view.valid || !view.lead || !view.controls || view.index >= view.stops || !sGuildRunStates.Current(bot, view, stamp, true))
         return false;
 
+    // The leader's last step onto its spot, before anything this pull writes: its end marked the first time it is seen
+    // over, and its outcome said then. "run stepped" does the same in a fight and once the run moved on, where no pull
+    // comes.
+    runrules::PullStep step = AI_VALUE(runrules::PullStep, "run pull step");
+    const bool stepping = StepNow(bot, view, step);
+    if (runrules::StepOutcomeDue(step))
+        SayStep(bot, step);
+    SET_AI_VALUE(runrules::PullStep, "run pull step", step);
+
     // The creature the dungeon model chose the spot to pull, else the pack's living one nearest the spot.
     Map* map = bot->GetMap();
     Creature* target = view.stop.pulled ? map->GetCreature(view.stop.pulled) : nullptr;
@@ -220,18 +272,37 @@ bool RunPullAction::Execute(Event& event)
         return true;
     }
 
-    // From where the leader stands, the pull spot's or the stop before's: whether the creature can be pulled from here.
+    // From where the leader stands, the pull spot's or the stop before's: whether the creature can be pulled from here. In
+    // sight by the pull spell's own rule, which ignores M2 doodads, as the reach move judges it too. The stricter answer,
+    // M2 included, goes into the events only.
     PullStrategy* strategy = PullStrategy::Get(ai);
     const float range = strategy ? strategy->GetRange() : ai->GetRange("spell");
     const float distance = bot->GetDistance(target);
-    const bool inSight = bot->IsWithinLOSInMap(target);
+    const bool inSight = bot->IsWithinLOSInMap(target, true);
+    const bool sightM2 = bot->IsWithinLOSInMap(target);
     const bool fromRange = strategy && strategy->CanDoPullAction(target);
     const std::string stop = "stop " + std::to_string(view.index + 1);
+    const bool castHere = fromRange && inSight && distance <= range;
 
     // A creature that stands still, or of the pack's own, reaches the pull spot, so the pack is pulled from the stop
     // before's, where the party stands: only from range and in sight, so the fight comes to the party. Otherwise from
     // its own spot.
     const bool fromBefore = view.stop.stillReach && view.stop.hasBefore && !view.ownSpot;
+    // Out of range and out of sight from where it stands, of a pack pulled from its own spot: passed over, once judged
+    // from the spot the route planned (below).
+    const bool passOver = !fromBefore && distance > range && !inSight;
+
+    // The step onto the planned spot (runrules::PullStep): one per gather, and waited on while its own move lasts, within
+    // its bound. Any other movement of the leader is not waited on.
+    const WorldPosition& spot = GuildRunStates::FightSpot(view.stop, view.pull, view.ownSpot);
+    const float offSpot = spot ? bot->GetDistance(spot.getX(), spot.getY(), spot.getZ()) : 0.0f;
+    const runrules::PullGather gather = GatherOf(view);
+    const bool stepped = runrules::Stepped(step, gather);
+    runrules::PullWay way = runrules::PullWayOf(castHere, offSpot, stepped, stepping, passOver);
+    // The step's own move under way: nothing yet, no phase written, and the pull trigger fires again next tick.
+    if (way == runrules::PullWay::Wait)
+        return false;
+
     if (fromBefore && (!fromRange || distance > range || !inSight))
     {
         sGuildRunStates.UseOwnSpot(bot, stamp, stop + ": its pull spot is reached by " + GuildRunStates::Names(view.stop.reachedBy)
@@ -240,8 +311,42 @@ bool RunPullAction::Execute(Event& event)
         Refresh(context);
         return true;
     }
-    // Out of range and out of sight from the last spot it could pull from: passed over, and the run goes on.
-    if (!fromBefore && distance > range && !inSight)
+    // More than a yard off the planned spot, and no cast from here: the leader steps onto the spot first, only when a pull
+    // would go now. Its run move under the pull trigger's stamp (MoveToRunSpotAction, which checks the bot is in the world
+    // and not between maps), in the phase Gather, so the movement guard judges it against every creature. Said with whether
+    // a move started; one that did not leaves the pull to go on from here this tick, as before.
+    if (way == runrules::PullWay::Step)
+    {
+        if (!sGuildRunStates.PullAllowed(bot))
+            return false;
+        step = runrules::PullStep();
+        step.gather = gather;
+        step.start = view.start;
+        step.plan = view.stamp.plan;
+        step.map = spot.getMapId();
+        step.x = spot.getX();
+        step.y = spot.getY();
+        step.z = spot.getZ();
+        step.target = target->GetObjectGuid().GetRawValue();
+        step.from = offSpot;
+        step.startMs = WorldTimer::getMSTime();
+        bool moved = ai->DoSpecificAction("move to run spot", event, true);
+        GuildRunStamp stepStamp;
+        step.token = moved ? sGuildRunStates.RunMoveOf(bot->GetGUIDLow(), stepStamp) : 0;
+        moved = moved && step.token;
+        step.told = !moved;
+        SET_AI_VALUE(runrules::PullStep, "run pull step", step);
+        sGuildBotMgr.RecordEvent(bot->GetGUIDLow(), "run_step", RunFields(view) + " stop=" + std::to_string(view.index + 1)
+            + " off=" + Tenths(offSpot) + " to=" + Tenths(spot.getX()) + "," + Tenths(spot.getY()) + "," + Tenths(spot.getZ())
+            + " sight=" + (inSight ? "1" : "0") + " sight_m2=" + (sightM2 ? "1" : "0") + " moved=" + (moved ? "1" : "0"));
+        if (moved)
+            return true;
+        way = runrules::PullWayOf(castHere, offSpot, true, false, passOver);
+    }
+
+    // Out of range and out of sight from the last spot it could pull from, the planned one stepped onto or within a yard of
+    // it: passed over, and the run goes on.
+    if (way == runrules::PullWay::Skip)
     {
         sGuildRunStates.Skip(bot, stamp, std::string(target->GetName()) + " is " + std::to_string(uint32(distance))
             + " yd off and out of sight of its pull spot");
@@ -256,12 +361,13 @@ bool RunPullAction::Execute(Event& event)
     // From the spot, with no chase, when the creature is within the pull's range and in sight of where the leader stands,
     // as the route plans its spots (runguard::PULL_CAST): the pull spell is cast at once. Otherwise the pull strategy's own
     // pull, whose reach move the movement guard judges.
-    const bool fromSpot = fromRange && inSight && distance <= range;
+    const bool fromSpot = way == runrules::PullWay::Cast;
     // The pull phase first, and the leader's own copy of the run read afresh, before anything can move it: the pull's
     // move, or a melee fallback's chase, launches then under the plan's exemption for the stop's pack, which the movement
     // guard reads from that copy. A write refused for a stale stamp pulls nothing.
     sGuildRunStates.Pulled(bot, stamp, target->GetObjectGuid(), "from=" + std::string(fromSpot ? "spot" : "reach")
-        + " distance=" + std::to_string(uint32(distance)) + " range=" + std::to_string(uint32(range)));
+        + " distance=" + std::to_string(uint32(distance)) + " range=" + std::to_string(uint32(range))
+        + " off=" + Tenths(offSpot) + " sight_m2=" + (sightM2 ? "1" : "0") + " stepped=" + (runrules::Stepped(step, gather) ? "1" : "0"));
     Refresh(context);
     const GuildRunView pulling = sGuildRunStates.View(bot);
     if (!pulling.valid || pulling.pull != GuildRunPull::Pull || pulling.pulled != target->GetObjectGuid())
@@ -287,6 +393,21 @@ bool RunPullAction::Execute(Event& event)
     sGuildRuns.NotePull(bot, target, "pull");
     Refresh(context);
     return true;
+}
+
+bool RunSteppedAction::Execute(Event& event)
+{
+    if (!Settled(bot))
+        return false;
+    runrules::PullStep step = AI_VALUE(runrules::PullStep, "run pull step");
+    if (!step.token || step.told)
+        return false;
+    StepNow(bot, sGuildRunStates.View(bot), step);
+    if (runrules::StepOutcomeDue(step))
+        SayStep(bot, step);
+    SET_AI_VALUE(runrules::PullStep, "run pull step", step);
+    // Only an event: the tick goes on to what the leader does next.
+    return false;
 }
 
 bool RunPullFailedAction::Execute(Event& event)

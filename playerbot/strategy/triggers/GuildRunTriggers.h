@@ -104,6 +104,16 @@ namespace ai
         bool IsActive() override;
     };
 
+    // The leader's step onto its spot is over and not yet said, whatever the run's phase and in or out of a fight. Its end is
+    // marked the first time it is seen over, with how the leader then stands (StepNow), so the outcome is the step's
+    // however late it is said. Looked at every tick, cheaply while no step is pending.
+    class RunSteppedTrigger : public Trigger
+    {
+    public:
+        RunSteppedTrigger(PlayerbotAI* ai) : Trigger(ai, "run stepped") {}
+        bool IsActive() override;
+    };
+
     // A pull that started no fight in a while.
     class RunPullFailedTrigger : public RunTrigger
     {

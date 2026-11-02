@@ -860,6 +860,150 @@ namespace runrules
         return gathered ? AT_SPOT * 2.0f : AT_SPOT;
     }
 
+    // How near its fight spot the leader pulls without stepping onto it first. The route planned the spot itself castable;
+    // anywhere within LeaderNear of it is not.
+    constexpr float PULL_STEP_NEAR = 1.0f;
+
+    // How the leader pulls a stop's creature from where it stands (RunPullAction): the spell cast from here, a step onto
+    // the planned spot first, a wait while that step's own move is under way, the stop passed over, or the pull strategy's
+    // reach pull.
+    enum class PullWay : uint8_t { Cast, Step, Wait, Skip, Reach };
+
+    // castHere: in the pull's range and in sight by the spell's own rule. offSpot: yards from the fight spot. stepped: the
+    // step of this gather is taken (Stepped). stepping: that step's own move is under way, within its bound (StepUnderway).
+    // passOver: from where the leader stands, out of the pull's range and out of sight of a stop pulled from its own spot.
+    // Never a cast mid-step, and never a pass over from off the spot before the step: the stop is judged from the spot the
+    // route planned, not from wherever the gather or a fight left the leader.
+    inline PullWay PullWayOf(bool castHere, float offSpot, bool stepped, bool stepping, bool passOver)
+    {
+        if (stepped && stepping)
+            return PullWay::Wait;
+        if (castHere)
+            return PullWay::Cast;
+        if (!stepped && offSpot > PULL_STEP_NEAR)
+            return PullWay::Step;
+        if (passOver)
+            return PullWay::Skip;
+        return PullWay::Reach;
+    }
+
+    // One gather of the leader at a stop: the generation, the stop, when it gathered and the pulls that brought nothing so
+    // far. A re-choose after an unplanned fight keeps the generation and the stop and gathers anew (a new since), and a
+    // pull that brought nothing gathers again with one more try, even within the same second.
+    struct PullGather
+    {
+        uint32_t generation = 0;
+        size_t index = SIZE_MAX;
+        int64_t since = 0;
+        uint32_t tries = 0;
+    };
+
+    inline bool SameGather(const PullGather& a, const PullGather& b)
+    {
+        return a.generation == b.generation && a.index == b.index && a.since == b.since && a.tries == b.tries;
+    }
+
+    // Why the leader's step is over, said with its outcome (run_stepped over=): its own move ended, was taken over or ran
+    // past its bound (move), the leader came into a fight (fight), or the run moved on from the step's gather: a new
+    // generation (gen), another stop (stop), or another gather at the stop, as a re-choose, a wait for a patrol or a pull
+    // that brought nothing (gather).
+    enum class StepEnd : uint8_t { None, Move, Fight, Generation, Stop, Gather };
+
+    inline const char* StepEndName(StepEnd end)
+    {
+        switch (end)
+        {
+            case StepEnd::Move: return "move";
+            case StepEnd::Fight: return "fight";
+            case StepEnd::Generation: return "gen";
+            case StepEnd::Stop: return "stop";
+            case StepEnd::Gather: return "gather";
+            default: return "none";
+        }
+    }
+
+    // The leader's last step onto its spot: the gather it was taken in, and its move. One step per gather, so a refused or
+    // useless step never repeats within it, and each gather needs a write of the run state, so steps cannot loop. Its end
+    // is marked the first time it is seen over (MarkStepEnd), with when and how the leader then stood, so its outcome says
+    // what the step did however late it is said.
+    struct PullStep
+    {
+        PullGather gather;
+        uint64_t start = 0;        // the server's start and the plan revision, for the events' gen= and rev=
+        uint32_t plan = 0;
+        uint32_t map = 0;          // the spot it stepped onto
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        uint64_t target = 0;       // the creature to be pulled, by its raw guid
+        uint32_t startMs = 0;      // when its move started
+        uint32_t token = 0;        // its run move, or 0 when none started
+        float from = 0.0f;         // yards off the spot when it stepped
+        bool told = false;         // its outcome said (run_stepped), or nothing to say since no move started
+        StepEnd end = StepEnd::None;
+        uint32_t endMs = 0;        // from its start to when it was first seen over
+        float off = -1.0f;         // yards off the spot then, or -1 off the map
+        bool moving = false;       // the leader still moved then
+        bool own = false;          // by the step's own run move
+        int8_t sight = -1;         // the creature in sight then, by the pull spell's rule and with M2 doodads; -1 not known
+        int8_t sightM2 = -1;
+    };
+
+    inline bool Stepped(const PullStep& step, const PullGather& now)
+    {
+        return SameGather(step.gather, now);
+    }
+
+    // How long the leader waits on its step's own move: the step at a walk, 2.5 yards a second, and two seconds more. The
+    // step is at most the pulling leader's distance from its spot (LeaderNear), so the wait never passes 4.4 seconds.
+    inline uint32_t StepWaitMs(float from)
+    {
+        const float yards = std::min(std::max(from, 0.0f), AT_SPOT * 2.0f);
+        return 2000u + uint32_t(yards / 2.5f * 1000.0f);
+    }
+
+    // The step's own move is under way: the leader moves, the move on top is still the step's run move, and its bound has
+    // not run out. Any other movement, or the step's move held past its bound, is not the step.
+    inline bool StepUnderway(bool moving, bool ownMove, uint32_t elapsedMs, float from)
+    {
+        return moving && ownMove && elapsedMs <= StepWaitMs(from);
+    }
+
+    // Why a step whose move started and whose outcome is not yet said is over now, or None while its own move is under way
+    // in its gather. now: the run's gather at the leader's stop, as GatherOf has it; gathering: the run is in the phase
+    // Gather there. A fight first, since a step that drew one is the case to trace; then the run moved on, whether or not
+    // the leader still moves, since a pull under the new gather is no longer the step's.
+    inline StepEnd StepEndOf(const PullStep& step, const PullGather& now, bool gathering, bool fighting, bool stepping)
+    {
+        if (!step.token || step.told)
+            return StepEnd::None;
+        if (fighting)
+            return StepEnd::Fight;
+        if (now.generation != step.gather.generation)
+            return StepEnd::Generation;
+        if (now.index != step.gather.index)
+            return StepEnd::Stop;
+        if (!gathering || !SameGather(step.gather, now))
+            return StepEnd::Gather;
+        return stepping ? StepEnd::None : StepEnd::Move;
+    }
+
+    // Marks the step's end the first time it is seen over, with the time from its start; later looks keep that first end.
+    // Whether it was marked now, so the caller records how the leader stands at this moment.
+    inline bool MarkStepEnd(PullStep& step, StepEnd end, uint32_t elapsedMs)
+    {
+        if (step.end != StepEnd::None || end == StepEnd::None)
+            return false;
+        step.end = end;
+        step.endMs = elapsedMs;
+        return true;
+    }
+
+    // The step's outcome is to be said once: a step whose move started, over, and not yet said, in whatever gather the run
+    // is now.
+    inline bool StepOutcomeDue(const PullStep& step)
+    {
+        return step.token && !step.told && step.end != StepEnd::None;
+    }
+
     // Where readiness measures a member from at a stop in lead: the leader from its fight spot, always; any other member
     // from the leader while the party approaches, since it follows the leader there (GuildRunStates::PlaceOf), and from
     // the spot once the party gathers. A leader the guard keeps on its way is then the one kept, not the members by it.

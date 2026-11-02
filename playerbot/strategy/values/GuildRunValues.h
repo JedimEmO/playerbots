@@ -22,4 +22,21 @@ namespace ai
         RunSpotValue(PlayerbotAI* ai) : CalculatedValue<WorldPosition>(ai, "run spot", 1) {}
         WorldPosition Calculate() override;
     };
+
+    // The leader's last step onto its pull spot (runrules::PullStep): taken by "run pull", its end marked by whichever
+    // looks first, "run pull" or "run stepped", and its outcome said once, in a fight or after the run moved on too.
+    class RunPullStepValue : public ManualSetValue<runrules::PullStep>
+    {
+    public:
+        RunPullStepValue(PlayerbotAI* ai) : ManualSetValue<runrules::PullStep>(ai, runrules::PullStep(), "run pull step") {}
+    };
+
+    // The run's gather at the leader's stop as the view has it (runrules::PullGather): the generation, the stop, when the
+    // leader gathered and the pulls that brought nothing.
+    runrules::PullGather GatherOf(const GuildRunView& view);
+
+    // The leader's step as it is now: whether its own move is under way in its gather (runrules::StepUnderway), and, the
+    // first time it is seen over, its end marked on it with where the leader then stands, whether it still moves and by
+    // whose move, and whether the creature is in sight. Only for a bot in the world and not between maps.
+    bool StepNow(Player* bot, const GuildRunView& view, runrules::PullStep& step);
 }

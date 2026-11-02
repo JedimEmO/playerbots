@@ -84,13 +84,26 @@ namespace ai
     // pull from range attacks it. A pack whose own creatures reach its pull spot is pulled from the stop before's, from
     // range and in sight only, else from its own spot. A pack out of range and out of sight from its own spot as well is
     // passed over. The pull phase is written before anything moves, so the movement guard lets the pull's own move close
-    // on the pack, and goes back when nothing started.
+    // on the pack, and goes back when nothing started. Sight is the pull spell's own (M2 doodads ignored). A leader more
+    // than a yard off its spot that cannot cast from where it stands steps onto the spot once per gather before it reaches
+    // or passes the stop over, and waits while that step's own move lasts, never past its bound (runrules::PullWayOf). The
+    // step is kept in the value "run pull step", and said once it is over, before anything the pull writes.
     class RunPullAction : public AttackAction
     {
     public:
         RunPullAction(PlayerbotAI* ai) : AttackAction(ai, "run pull") {}
         bool Execute(Event& event) override;
         bool isPossible() override { return true; }
+    };
+
+    // The leader's step onto its spot is over where no pull comes to say it: in a fight, or once the run moved on from the
+    // step's gather (a re-choose, a wait for a patrol, a pull that brought nothing, a new generation). Said once
+    // (run_stepped), and the tick goes on.
+    class RunSteppedAction : public Action
+    {
+    public:
+        RunSteppedAction(PlayerbotAI* ai) : Action(ai, "run stepped") {}
+        bool Execute(Event& event) override;
     };
 
     // A pull that brought nothing: the leader gathers and pulls again, and after a few tries goes on to the next stop.

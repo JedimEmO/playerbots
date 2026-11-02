@@ -2654,6 +2654,248 @@ namespace
         CHECK(!runrules::Met(obligation, leader));
     }
 
+    // The leader steps onto its planned spot once per gather before a reach pull (experiments/2026-11-02-sight-pull-plan.md):
+    // a cast wins, a step comes before a reach, and a pull is never cast mid-step.
+    void PullStepOnce()
+    {
+        using runrules::PullWay;
+        using runrules::PullWayOf;
+        const float near = runrules::PULL_STEP_NEAR;
+        // A cast from where the leader stands wins, stepped or not.
+        CHECK(PullWayOf(true, 2.5f, false, false, false) == PullWay::Cast);
+        CHECK(PullWayOf(true, 0.0f, true, false, false) == PullWay::Cast);
+        // Off the spot and out of sight, not yet stepped: the step (stop 3 of 2237).
+        CHECK(PullWayOf(false, 2.5f, false, false, false) == PullWay::Step);
+        // On the spot: the reach (stop 6 before the sight fix), and the edge of PULL_STEP_NEAR.
+        CHECK(PullWayOf(false, 0.3f, false, false, false) == PullWay::Reach);
+        CHECK(PullWayOf(false, near, false, false, false) == PullWay::Reach);
+        CHECK(PullWayOf(false, near + 0.01f, false, false, false) == PullWay::Step);
+        // Mid-step: wait, castable or not.
+        CHECK(PullWayOf(false, 2.0f, true, true, false) == PullWay::Wait);
+        CHECK(PullWayOf(true, 2.0f, true, true, false) == PullWay::Wait);
+        // Stepped and still off, refused or with no path: the reach. One step, never a loop.
+        CHECK(PullWayOf(false, 2.5f, true, false, false) == PullWay::Reach);
+        // Moving for another reason, not stepped: the step, since a wait needs the step.
+        CHECK(PullWayOf(false, 2.5f, false, true, false) == PullWay::Step);
+
+        // The memo: one step per gather, by generation, stop, gather time and tries.
+        runrules::PullStep step;
+        step.gather = { 7, 2, 1000, 0 };
+        CHECK(runrules::Stepped(step, { 7, 2, 1000, 0 }));
+        CHECK(!runrules::Stepped(step, { 7, 3, 1000, 0 }));     // the next stop
+        CHECK(!runrules::Stepped(step, { 8, 2, 1000, 0 }));     // a new generation
+        CHECK(!runrules::Stepped(runrules::PullStep(), { 0, 0, 0, 0 }));   // none taken: index SIZE_MAX
+
+        // A tick by tick sequence over one stop, as the action sees it: off 2.5 and no cast gives the step, its move under
+        // way the wait, then on the spot the cast, or with no cast the reach.
+        const runrules::PullGather gather{ 7, 2, 1000, 0 };
+        CHECK(PullWayOf(false, 2.5f, runrules::Stepped(runrules::PullStep(), gather), false, false) == PullWay::Step);
+        step = runrules::PullStep();
+        step.gather = gather;
+        step.from = 2.5f;
+        step.token = 41;
+        CHECK(PullWayOf(false, 1.2f, runrules::Stepped(step, gather), runrules::StepUnderway(true, true, 300, step.from), false)
+            == PullWay::Wait);
+        CHECK(PullWayOf(true, 0.2f, runrules::Stepped(step, gather), runrules::StepUnderway(false, false, 900, step.from), false)
+            == PullWay::Cast);
+        CHECK(PullWayOf(false, 0.2f, runrules::Stepped(step, gather), runrules::StepUnderway(false, false, 900, step.from), false)
+            == PullWay::Reach);
+    }
+
+    // Review point 1: the memo is keyed on the gather, so a return to the same stop under the same generation steps again.
+    // A re-choose after an unplanned fight resets the stop (Reset) and gathers anew, and a pull that brought nothing gathers
+    // again with one more try (PullFailed); neither changes the generation.
+    void PullStepPerGather()
+    {
+        using runrules::PullWay;
+        using runrules::PullWayOf;
+        runrules::PullStep step;
+        step.gather = { 7, 2, 1000, 0 };
+        step.from = 2.5f;
+        // The same gather: stepped, and the leader still 2.5 yd off reaches.
+        CHECK(runrules::Stepped(step, { 7, 2, 1000, 0 }));
+        CHECK(PullWayOf(false, 2.5f, runrules::Stepped(step, { 7, 2, 1000, 0 }), false, false) == PullWay::Reach);
+        // A re-choose: same generation and stop, a new gather time. Not stepped, so the leader back within 3 yd steps again.
+        const runrules::PullGather rechosen{ 7, 2, 1060, 0 };
+        CHECK(!runrules::Stepped(step, rechosen));
+        CHECK(PullWayOf(false, 2.5f, runrules::Stepped(step, rechosen), false, false) == PullWay::Step);
+        // A pull that brought nothing, 5 yd off after the fight drew the leader away: a new gather, a new step.
+        const runrules::PullGather retried{ 7, 2, 1090, 1 };
+        CHECK(!runrules::Stepped(step, retried));
+        CHECK(PullWayOf(false, 5.0f, runrules::Stepped(step, retried), false, false) == PullWay::Step);
+        // The same, written within the gather's own second: the try tells it apart.
+        CHECK(!runrules::Stepped(step, { 7, 2, 1000, 1 }));
+        // A gather stepped once and again only through a write: over 50 ticks of one gather, one step.
+        runrules::PullStep memo;
+        int steps = 0;
+        for (int tick = 0; tick < 50; ++tick)
+        {
+            const runrules::PullGather now{ 7, 2, 1000, 0 };
+            const bool stepped = runrules::Stepped(memo, now);
+            if (PullWayOf(false, 2.5f, stepped, false, false) == PullWay::Step)
+            {
+                ++steps;
+                memo = runrules::PullStep();
+                memo.gather = now;
+            }
+        }
+        CHECK(steps == 1);
+    }
+
+    // Review point 2: the pass over is judged after the step. A leader off the spot, out of range and out of sight from
+    // where it stands, steps first; it passes the stop over only once stepped, or within PULL_STEP_NEAR of the spot.
+    void PullSkipAfterStep()
+    {
+        using runrules::PullWay;
+        using runrules::PullWayOf;
+        CHECK(PullWayOf(false, 2.5f, false, false, true) == PullWay::Step);
+        CHECK(PullWayOf(false, 5.5f, false, false, true) == PullWay::Step);
+        CHECK(PullWayOf(false, 2.5f, true, false, true) == PullWay::Skip);
+        CHECK(PullWayOf(false, 0.4f, false, false, true) == PullWay::Skip);
+        CHECK(PullWayOf(false, 2.5f, true, true, true) == PullWay::Wait);
+        // Never a pass over where the same facts without it would step, over a grid of every input.
+        int grid = 0;
+        for (int cast = 0; cast < 2; ++cast)
+            for (float off : { 0.0f, 0.5f, 1.0f, 1.01f, 2.5f, 6.0f })
+                for (int stepped = 0; stepped < 2; ++stepped)
+                    for (int stepping = 0; stepping < 2; ++stepping)
+                    {
+                        const PullWay plain = PullWayOf(cast, off, stepped, stepping, false);
+                        const PullWay over = PullWayOf(cast, off, stepped, stepping, true);
+                        CHECK(plain != PullWay::Step || over == PullWay::Step);
+                        CHECK(over != PullWay::Skip || plain == PullWay::Reach);
+                        ++grid;
+                    }
+        CHECK(grid == 48);
+    }
+
+    // Review point 3: the wait is bounded and tied to the step's own move. Any other movement, or the step's move past its
+    // bound, gives the cast or the reach, never the wait.
+    void PullStepWaitBounded()
+    {
+        using runrules::PullWay;
+        using runrules::PullWayOf;
+        CHECK(runrules::StepWaitMs(0.0f) == 2000);
+        CHECK(runrules::StepWaitMs(2.5f) == 3000);
+        CHECK(runrules::StepWaitMs(6.0f) == 4400);
+        CHECK(runrules::StepWaitMs(40.0f) == 4400);   // never past the pulling leader's 6 yd
+        CHECK(runrules::StepWaitMs(-1.0f) == 2000);
+        // Under way: moving, its own move, within the bound.
+        CHECK(runrules::StepUnderway(true, true, 0, 2.5f));
+        CHECK(runrules::StepUnderway(true, true, 3000, 2.5f));
+        // Past the bound, still moving by its own move: not the step any more.
+        CHECK(!runrules::StepUnderway(true, true, 3001, 2.5f));
+        CHECK(!runrules::StepUnderway(true, true, 60000, 6.0f));
+        // Moving by another move (the token on top is not the step's): not the step.
+        CHECK(!runrules::StepUnderway(true, false, 100, 2.5f));
+        // Still: not the step.
+        CHECK(!runrules::StepUnderway(false, true, 100, 2.5f));
+        // Stepped and moving past the bound gives the cast or the reach, never the wait.
+        CHECK(PullWayOf(true, 2.0f, true, runrules::StepUnderway(true, true, 5000, 2.5f), false) == PullWay::Cast);
+        CHECK(PullWayOf(false, 2.0f, true, runrules::StepUnderway(true, true, 5000, 2.5f), false) == PullWay::Reach);
+        CHECK(PullWayOf(false, 2.0f, true, runrules::StepUnderway(true, false, 100, 2.5f), true) == PullWay::Skip);
+        // A leader that keeps moving for another reason waits at most the bound, tick by tick: the ticks of Wait end.
+        int waits = 0;
+        for (uint32_t ms = 0; ms <= 20000; ms += 100)
+            if (PullWayOf(false, 2.0f, true, runrules::StepUnderway(true, true, ms, 6.0f), false) == PullWay::Wait)
+                ++waits;
+        CHECK(waits == 45);   // 0 to 4400 ms
+    }
+
+    // Review point 4: the step's outcome is said once, after its move is over, with what came of it. A step that started no
+    // move says so at once (moved=0) and has nothing more to say.
+    void PullStepOutcome()
+    {
+        using runrules::StepEnd;
+        const runrules::PullGather gather{ 7, 2, 1000, 0 };
+        runrules::PullStep step;
+        step.gather = gather;
+        step.token = 41;
+        step.told = false;
+        CHECK(runrules::StepEndOf(step, gather, true, false, true) == StepEnd::None);    // still under way
+        CHECK(!runrules::StepOutcomeDue(step));                                           // nothing marked yet
+        CHECK(runrules::StepEndOf(step, gather, true, false, false) == StepEnd::Move);   // its move over
+        CHECK(runrules::MarkStepEnd(step, StepEnd::Move, 1800));
+        CHECK(step.end == StepEnd::Move && step.endMs == 1800);
+        CHECK(runrules::StepOutcomeDue(step));                                            // said now
+        step.told = true;
+        CHECK(!runrules::StepOutcomeDue(step));                                           // said once
+        CHECK(runrules::StepEndOf(step, gather, true, false, false) == StepEnd::None);
+        // No move started: told with the step itself, nothing to mark.
+        runrules::PullStep none;
+        none.gather = gather;
+        none.told = true;
+        CHECK(runrules::StepEndOf(none, gather, true, true, false) == StepEnd::None);
+        CHECK(!runrules::StepOutcomeDue(none));
+        runrules::PullStep untold;
+        untold.gather = gather;
+        untold.told = false;   // token 0: no move, nothing to say
+        CHECK(runrules::StepEndOf(untold, { 7, 2, 1060, 0 }, true, false, false) == StepEnd::None);
+        CHECK(!runrules::MarkStepEnd(untold, runrules::StepEndOf(untold, gather, true, true, false), 0));
+        CHECK(!runrules::StepOutcomeDue(untold));
+        // The end names, as run_stepped over= has them.
+        CHECK(std::string(runrules::StepEndName(StepEnd::Move)) == "move");
+        CHECK(std::string(runrules::StepEndName(StepEnd::Fight)) == "fight");
+        CHECK(std::string(runrules::StepEndName(StepEnd::Generation)) == "gen");
+        CHECK(std::string(runrules::StepEndName(StepEnd::Stop)) == "stop");
+        CHECK(std::string(runrules::StepEndName(StepEnd::Gather)) == "gather");
+    }
+
+    // Review round 2: a step is said even when no pull comes to say it. The run moved on from its gather (a re-choose, a
+    // wait for a patrol, a pull that brought nothing, another stop, a new generation) or the leader came into a fight: the
+    // step is over then, whether or not the leader still moves, and its end is the first one seen, timed then.
+    void PullStepSaidAnyway()
+    {
+        using runrules::StepEnd;
+        const runrules::PullGather gather{ 7, 2, 1000, 0 };
+        runrules::PullStep step;
+        step.gather = gather;
+        step.token = 41;
+        // An untold step with a different gather is due, moving or not, in the phase Gather or not.
+        for (int moving = 0; moving < 2; ++moving)
+            for (int gathering = 0; gathering < 2; ++gathering)
+            {
+                CHECK(runrules::StepEndOf(step, { 7, 2, 1060, 0 }, gathering, false, moving) == StepEnd::Gather);   // re-choose
+                CHECK(runrules::StepEndOf(step, { 7, 2, 1000, 1 }, gathering, false, moving) == StepEnd::Gather);   // tried again
+                CHECK(runrules::StepEndOf(step, { 7, 3, 1060, 0 }, gathering, false, moving) == StepEnd::Stop);
+                CHECK(runrules::StepEndOf(step, { 8, 2, 1000, 0 }, gathering, false, moving) == StepEnd::Generation);
+                CHECK(runrules::StepEndOf(step, runrules::PullGather(), gathering, false, moving) == StepEnd::Generation);   // run gone
+            }
+        // The same gather, out of the phase Gather: a wait for a patrol that kept the gather's time.
+        CHECK(runrules::StepEndOf(step, gather, false, false, true) == StepEnd::Gather);
+        // A fight, first: in the step's gather while it still moves, or after the run moved on.
+        CHECK(runrules::StepEndOf(step, gather, true, true, true) == StepEnd::Fight);
+        CHECK(runrules::StepEndOf(step, { 7, 2, 1060, 0 }, false, true, false) == StepEnd::Fight);
+        // Marked once: a later look keeps the first end and its time.
+        CHECK(runrules::MarkStepEnd(step, StepEnd::Gather, 900));
+        CHECK(!runrules::MarkStepEnd(step, StepEnd::Fight, 2500));
+        CHECK(step.end == StepEnd::Gather && step.endMs == 900);
+        CHECK(runrules::StepOutcomeDue(step));
+        CHECK(!runrules::MarkStepEnd(step, StepEnd::None, 3000));
+        // Nothing marked while the step's own move is under way in its gather.
+        runrules::PullStep under;
+        under.gather = gather;
+        under.token = 41;
+        CHECK(!runrules::MarkStepEnd(under, runrules::StepEndOf(under, gather, true, false, true), 300));
+        CHECK(!runrules::StepOutcomeDue(under));
+        // Each step is said exactly once across a run of looks: under way, under way, over, over.
+        runrules::PullStep memo;
+        memo.gather = gather;
+        memo.token = 41;
+        int said = 0;
+        const bool steppingAt[] = { true, true, false, false };
+        for (int look = 0; look < 4; ++look)
+        {
+            runrules::MarkStepEnd(memo, runrules::StepEndOf(memo, gather, true, false, steppingAt[look]), uint32_t(look * 500));
+            if (runrules::StepOutcomeDue(memo))
+            {
+                memo.told = true;
+                ++said;
+            }
+        }
+        CHECK(said == 1 && memo.end == StepEnd::Move && memo.endMs == 1000);
+    }
+
     // Choose by the run's order: the first living planned stop at or after the current one, wherever the leader stands.
     void NextLivingByProgress()
     {
@@ -3489,6 +3731,12 @@ int main()
     GuardedReadiness();
     GuardedClockAccounting();
     LeaderNear();
+    PullStepOnce();
+    PullStepPerGather();
+    PullSkipAfterStep();
+    PullStepWaitBounded();
+    PullStepOutcome();
+    PullStepSaidAnyway();
     NextLivingByProgress();
     GuardedThroughThreeBlocks();
     RefusedLeaderOnTheWay();

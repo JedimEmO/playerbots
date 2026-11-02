@@ -57,6 +57,12 @@ void RunLeadStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
         "run pull failed",
         NextAction::array(0, new NextAction("run pull failed", ACTION_HIGH), NULL)));
 
+    // The leader's step onto its spot, said once it is over, before the writes that follow it. Only an event, so the tick
+    // goes on.
+    triggers.push_back(new TriggerNode(
+        "run stepped",
+        NextAction::array(0, new NextAction("run stepped", ACTION_INTERRUPT + 6), NULL)));
+
     // The run's tactics while a member fights or the pull comes, though the leader itself is not yet in it
     // (docs/plan.md, item 5): the kill order's marks and the interrupts, decided again when stale.
     triggers.push_back(new TriggerNode(
@@ -85,6 +91,11 @@ void RunLeadStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "run interrupt",
         NextAction::array(0, new NextAction("run interrupt", ACTION_INTERRUPT + 5), NULL)));
+
+    // A step of the leader's that drew the fight, said with it.
+    triggers.push_back(new TriggerNode(
+        "run stepped",
+        NextAction::array(0, new NextAction("run stepped", ACTION_INTERRUPT + 6), NULL)));
 }
 
 void RunPartyStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)

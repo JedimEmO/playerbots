@@ -5,6 +5,7 @@
 #include "playerbot/GuildRunState.h"
 #include "playerbot/GuildTactics.h"
 #include "playerbot/strategy/generic/PullStrategy.h"
+#include "playerbot/strategy/values/GuildRunValues.h"
 #include "Groups/Group.h"
 #include "MotionGenerators/MovementGenerator.h"
 
@@ -221,6 +222,17 @@ bool RunRefusedTrigger::IsActive()
         return false;
     return runguard::Fresh(sGuildMoveGuard.RefusalOf(bot->GetGUIDLow()), view.stamp.generation, view.index,
         int64_t(time(nullptr)));
+}
+
+bool RunSteppedTrigger::IsActive()
+{
+    runrules::PullStep step = AI_VALUE(runrules::PullStep, "run pull step");
+    if (!step.token || step.told || !InWorld(bot))
+        return false;
+    // The run as it is now, not as cached: the step's end is timed by the first look that finds it over.
+    StepNow(bot, sGuildRunStates.View(bot), step);
+    SET_AI_VALUE(runrules::PullStep, "run pull step", step);
+    return runrules::StepOutcomeDue(step);
 }
 
 bool RunPullFailedTrigger::IsActive()
